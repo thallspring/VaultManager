@@ -1,2 +1,16 @@
 package-as: VaultManager
+
 enable-nolib-creation: no
+
+manual-changelog:
+  filename: CHANGELOG.md
+  markup-type: markdown
+
+ignore:
+  - .gitattributes
+  - .github
+  - .gitignore
+  - GEMINI.md
+  - README.md
+  - "*.bak"
+  - "*.tmp"

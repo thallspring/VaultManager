@@ -1,0 +1,2 @@
+package-as: VaultManager
+enable-nolib-creation: no

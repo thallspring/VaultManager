@@ -1,0 +1,15 @@
+## Interface: 11509, 16001, 20506
+## Title: Vault Manager
+## Notes: Guild Bank inventory sharing, request queue, P2P sync, and main/alt value ledger.
+## Author: Thallspring
+## Version: 1.0.0
+## OptionalDeps: Auctionator
+## SavedVariables: VaultManagerDB
+
+Core.lua
+BankScanner.lua
+Comms.lua
+Ledger.lua
+Fulfillment.lua
+UI.lua
+Minimap.lua

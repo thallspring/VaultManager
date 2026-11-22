@@ -175,7 +175,7 @@ function Comms:OnMessageReceived(msg, sender)
         if not existing or req.updatedAt > (existing.updatedAt or 0) then
             VM.db.requests[req.id] = req
             if VM:IsOfficer() and req.status == "PENDING" and not existing then
-                print(string.format("|cff00ccff[Vault Manager]|r Ny anmodning fra |cffffff00%s|r: %dx %s",
+                print(string.format("|cff00ccff[Vault Manager]|r New request from |cffffff00%s|r: %dx %s",
                     req.requester, req.count, req.itemLink or req.itemName))
             end
             if VM.UI then VM.UI:RefreshAll() end

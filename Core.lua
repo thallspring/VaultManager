@@ -95,7 +95,7 @@ function VM:GetMainFor(charName)
     return norm
 end
 
--- Kobler chars til newMain (hver tx i ledger beholder oprindelig tx.player og merges dynamisk)
+-- Links characters to newMain (each ledger transaction retains its original tx.player and merges dynamically)
 function VM:SetMainCharacter(newMain, charsToLink)
     local targetMain = self:NormalizeName(newMain)
     if targetMain == "" then return end
@@ -133,13 +133,12 @@ function VM:SetMainCharacter(newMain, charsToLink)
     if self.UI then self.UI:RefreshAll() end
 end
 
--- Frakobler en specifik karakter fra dens nuværende Main (og synkroniserer via P2P)
+-- Unlinks a specific character from its current Main (and syncs via P2P)
 function VM:UnlinkCharacter(charName)
     local norm = self:NormalizeName(charName)
     if norm == "" then return end
 
     local now = time()
-    -- Hvis andre karakterer pegede på denne karakter som main, så frigør eller ompeg dem
     local parentMain = self:GetMainFor(norm)
     for otherChar, entry in pairs(self.db.mains) do
         local m = type(entry) == "table" and entry.main or entry
@@ -272,11 +271,17 @@ initFrame:SetScript("OnEvent", function(_, event, arg1)
 
         SLASH_VAULTMANAGER1 = "/vm"
         SLASH_VAULTMANAGER2 = "/vaultmanager"
-        SlashCmdList["VAULTMANAGER"] = function()
-            VM.UI:Toggle()
+        SlashCmdList["VAULTMANAGER"] = function(msg)
+            local cmd = strtrim(msg or ""):lower()
+            if cmd == "scan" then
+                VM.BankScanner:ForceScan()
+                print("|cff00ccff[Vault Manager]|r Manual Guild Bank scan triggered.")
+            else
+                VM.UI:Toggle()
+            end
         end
 
-        print("|cff00ccff[Vault Manager]|r Indlæst. Skriv |cffffff00/vm|r for at åbne.")
+        print("|cff00ccff[Vault Manager]|r Loaded. Type |cffffff00/vm|r to open.")
     elseif event == "GUILD_ROSTER_UPDATE" then
         VM:UpdateRosterCache()
         if VM.UI then VM.UI:RefreshAll() end

@@ -69,7 +69,7 @@ function Ledger:RecordGoldDeposit(playerName, copperAmount, source)
         player = (playerName == "UNATTRIBUTED") and "UNATTRIBUTED" or VM:NormalizeName(playerName),
         itemID = 0,
         itemLink = "GOLD",
-        itemName = "Guld-indbetaling",
+        itemName = "Gold Deposit",
         count = 1,
         unitPriceAtTime = copperAmount,
         chargedUnitPrice = 0,
@@ -162,7 +162,7 @@ function Ledger:GetAggregatedByMain(useHistorical)
     return sorted
 end
 
--- Ranking-liste over donationer (sortMode: "TOTAL" | "GOLD" | "ITEMS")
+-- Donation leaderboard (sortMode: "TOTAL" | "GOLD" | "ITEMS")
 function Ledger:GetDonationRanking(sortMode, useHistorical)
     local allGroups = self:GetAggregatedByMain(useHistorical)
     local ranked = {}

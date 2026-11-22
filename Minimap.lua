@@ -53,7 +53,7 @@ function MM:Create()
     minimapBtn:RegisterForClicks("LeftButtonUp", "RightButtonUp")
     minimapBtn:RegisterForDrag("LeftButton")
 
-    -- Standard rund minimap-ramme
+    -- Standard circular minimap border
     local overlay = minimapBtn:CreateTexture(nil, "OVERLAY")
     overlay:SetSize(53, 53)
     overlay:SetTexture("Interface\\Minimap\\MiniMap-TrackingBorder")
@@ -77,7 +77,7 @@ function MM:Create()
     highlight:SetBlendMode("ADD")
     highlight:SetPoint("CENTER", 0, 0)
 
-    -- Notifikations-badge (antal åbne anmodninger)
+    -- Notification badge (number of open requests)
     local badge = CreateFrame("Frame", nil, minimapBtn, "BackdropTemplate")
     badge:SetSize(16, 16)
     badge:SetPoint("BOTTOMRIGHT", 2, -2)
@@ -97,7 +97,7 @@ function MM:Create()
     badgeText:SetFont(STANDARD_TEXT_FONT, 10, "OUTLINE")
     minimapBtn.badgeText = badgeText
 
-    -- Træk rundt om minimappet
+    -- Drag around the minimap
     minimapBtn:SetScript("OnDragStart", function(self)
         self.isDragging = true
         self:SetScript("OnUpdate", function()
@@ -116,7 +116,7 @@ function MM:Create()
         self:SetScript("OnUpdate", nil)
     end)
 
-    -- Klik-handlinger
+    -- Click actions
     minimapBtn:SetScript("OnClick", function(self, button)
         if self.isDragging then return end
         if button == "LeftButton" then
@@ -132,8 +132,8 @@ function MM:Create()
     minimapBtn:SetScript("OnEnter", function(self)
         GameTooltip:SetOwner(self, "ANCHOR_LEFT")
         GameTooltip:AddLine("|cff26a6f2Vault Manager|r")
-        GameTooltip:AddLine("|cffffffffVenstreklik:|r Åbn / luk vindue", 0.8, 0.8, 0.8)
-        GameTooltip:AddLine("|cffffffffTræk:|r Flyt knap rundt om minimap", 0.8, 0.8, 0.8)
+        GameTooltip:AddLine("|cffffffffLeft-click:|r Open / close window", 0.8, 0.8, 0.8)
+        GameTooltip:AddLine("|cffffffffDrag:|r Move button around minimap", 0.8, 0.8, 0.8)
         GameTooltip:Show()
     end)
     minimapBtn:SetScript("OnLeave", function()
@@ -144,7 +144,7 @@ function MM:Create()
     self:UpdateBadge()
 end
 
--- Opret knappen ved login og opdater badge løbende
+-- Create button on login and update badge periodically
 local f = CreateFrame("Frame")
 f:RegisterEvent("PLAYER_LOGIN")
 f:SetScript("OnEvent", function()

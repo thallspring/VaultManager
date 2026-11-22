@@ -107,7 +107,7 @@ local function CreateModernEditBox(parent, width, height, numeric)
 end
 
 local function CreateModernDropdown(parent, width, height, placeholder)
-    local dd = CreateModernButton(parent, width, height, placeholder or "Vælg...")
+    local dd = CreateModernButton(parent, width, height, placeholder or "Select...")
     dd.label:ClearAllPoints()
     dd.label:SetPoint("LEFT", 8, 0)
     dd.label:SetPoint("RIGHT", -20, 0)
@@ -153,7 +153,7 @@ function UI:Toggle()
 end
 
 --------------------------------------------------------------------------------
--- CUSTOM SØGBAR ROSTER DROPDOWN
+-- CUSTOM SEARCHABLE ROSTER DROPDOWN
 --------------------------------------------------------------------------------
 function UI:CreateRosterPickerFrame()
     rosterPickerFrame = CreateFrame("Frame", "VaultManagerRosterPicker", UIParent, "BackdropTemplate")
@@ -167,7 +167,7 @@ function UI:CreateRosterPickerFrame()
     search:SetPoint("TOPLEFT", 6, -6)
     search.placeholder = search:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
     search.placeholder:SetPoint("LEFT", 6, 0)
-    search.placeholder:SetText("Filtrer navn...")
+    search.placeholder:SetText("Filter name...")
     rosterPickerFrame.search = search
 
     local closeBtn = CreateModernButton(rosterPickerFrame, 22, 22, "X", { 0.85, 0.25, 0.25, 1 })
@@ -247,7 +247,7 @@ function UI:RefreshRosterPicker(filter)
 end
 
 --------------------------------------------------------------------------------
--- MAIN FRAME (5 FANER)
+-- MAIN FRAME (5 TABS)
 --------------------------------------------------------------------------------
 function UI:CreateMainFrame()
     mainFrame = CreateFrame("Frame", "VaultManagerMainFrame", UIParent, "BackdropTemplate")
@@ -289,7 +289,7 @@ function UI:CreateMainFrame()
         if rosterPickerFrame then rosterPickerFrame:Hide() end
     end)
 
-    local tabNames = { "Bank & Bestil", "Anmodninger", "Regnskab", "Ranking", "Indstillinger & Mains" }
+    local tabNames = { "Vault & Requests", "Requests", "Ledger", "Ranking", "Settings & Mains" }
     mainFrame.navButtons = {}
     for i, name in ipairs(tabNames) do
         local btn = CreateModernButton(mainFrame, 148, 28, name)
@@ -328,13 +328,13 @@ function UI:CreateMainFrame()
 end
 
 --------------------------------------------------------------------------------
--- FANE 1: BANK & BESTIL
+-- TAB 1: VAULT & REQUESTS
 --------------------------------------------------------------------------------
 function UI:BuildInventoryPanel(panel)
     panel.bankTabButtons = {}
     for i = 1, 6 do
-        local b = CreateModernButton(panel, 98, 24, "Tab " .. i)
-        b:SetPoint("TOPLEFT", 10 + (i - 1) * 102, -10)
+        local b = CreateModernButton(panel, 82, 24, "Tab " .. i)
+        b:SetPoint("TOPLEFT", 10 + (i - 1) * 86, -10)
         b:SetScript("OnClick", function()
             selectedBankTab = i
             self:RefreshInventory()
@@ -342,11 +342,21 @@ function UI:BuildInventoryPanel(panel)
         panel.bankTabButtons[i] = b
     end
 
+    local scanBtn = CreateModernButton(panel, 78, 24, "Scan Now", { 0.25, 0.80, 0.45, 1 })
+    scanBtn:SetPoint("TOPRIGHT", -156, -10)
+    scanBtn:SetScript("OnClick", function()
+        if VM.BankScanner and VM.BankScanner.ForceScan then
+            VM.BankScanner:ForceScan()
+            print("|cff00ccff[Vault Manager]|r Scanning Guild Bank tabs and logs...")
+        end
+    end)
+    panel.scanBtn = scanBtn
+
     local searchBox = CreateModernEditBox(panel, 140, 24, false)
     searchBox:SetPoint("TOPRIGHT", -10, -10)
     searchBox.placeholder = searchBox:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
     searchBox.placeholder:SetPoint("LEFT", 8, 0)
-    searchBox.placeholder:SetText("Søg item...")
+    searchBox.placeholder:SetText("Search item...")
     searchBox:SetScript("OnTextChanged", function(selfBox)
         local txt = selfBox:GetText()
         if txt == "" then selfBox.placeholder:Show() else selfBox.placeholder:Hide() end
@@ -385,11 +395,11 @@ function UI:RefreshInventory()
 
     local rule = VM:GetTabRule(selectedBankTab)
     if rule.mode == "LOCKED" then
-        panel.ruleBanner:SetText("|cffff5555LÅST TAB|r  |cff999999— Kan ikke bestilles fra|r")
+        panel.ruleBanner:SetText("|cffff5555LOCKED TAB|r  |cff999999— Requests disabled|r")
     elseif rule.mode == "PERCENT" then
-        panel.ruleBanner:SetText(string.format("|cffffcc33MEDLEMSPRIS: %d%% AF AUCTION HOUSE|r  |cff999999— Betales ved udlevering|r", rule.percent or 50))
+        panel.ruleBanner:SetText(string.format("|cffffcc33MEMBER PRICE: %d%% OF AUCTION HOUSE|r  |cff999999— Paid upon delivery|r", rule.percent or 50))
     else
-        panel.ruleBanner:SetText("|cff44dd77FREE-FOR-ALL|r  |cff999999— Gratis udlevering (AH-værdi registreres i regnskab)|r")
+        panel.ruleBanner:SetText("|cff44dd77FREE-FOR-ALL|r  |cff999999— Free withdrawal (AH value tracked in ledger)|r")
     end
 
     local content = panel.scroll.content
@@ -440,7 +450,7 @@ function UI:RefreshInventory()
             row.qtyBox:SetPoint("LEFT", 588, 0)
             row.qtyBox:SetText("1")
 
-            row.reqBtn = CreateModernButton(row, 84, 22, "Anmod", THEME.accent)
+            row.reqBtn = CreateModernButton(row, 84, 22, "Request", THEME.accent)
             row.reqBtn:SetPoint("LEFT", 638, 0)
 
             panel.scroll.rows[idx] = row
@@ -471,9 +481,9 @@ function UI:RefreshInventory()
         row.nameBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
 
         if reserved > 0 then
-            row.stockText:SetText(string.format("Ledig: |cff44dd77%d|r |cff888888(Res: %d)|r", available, reserved))
+            row.stockText:SetText(string.format("Available: |cff44dd77%d|r |cff888888(Res: %d)|r", available, reserved))
         else
-            row.stockText:SetText(string.format("På lager: |cff44dd77%d|r", available))
+            row.stockText:SetText(string.format("In Stock: |cff44dd77%d|r", available))
         end
 
         if VM:HasPriceAddon() then
@@ -481,12 +491,12 @@ function UI:RefreshInventory()
             if ah then
                 if rule.mode == "PERCENT" then
                     local memberPrice = math.floor(ah * ((rule.percent or 50) / 100))
-                    row.priceText:SetText("Pris: " .. VM:FormatMoney(memberPrice))
+                    row.priceText:SetText("Price: " .. VM:FormatMoney(memberPrice))
                 else
                     row.priceText:SetText("AH: " .. VM:FormatMoney(ah))
                 end
             else
-                row.priceText:SetText("|cff777777AH: Ukendt|r")
+                row.priceText:SetText("|cff777777AH: Unknown|r")
             end
         else
             row.priceText:SetText("")
@@ -510,7 +520,7 @@ function UI:RefreshInventory()
 end
 
 --------------------------------------------------------------------------------
--- FANE 2: ANMODNINGER
+-- TAB 2: REQUESTS
 --------------------------------------------------------------------------------
 function UI:BuildRequestsPanel(panel)
     panel.scroll = CreateScrollArea(panel, -10, 8)
@@ -564,10 +574,10 @@ function UI:RefreshRequests()
         row:Show()
 
         local statusColors = {
-            PENDING = "|cffffcc33AFVENTER|r",
-            APPROVED = "|cff26a6f2GODKENDT|r",
-            FULFILLED = "|cff44dd77UDLEVERET|r",
-            REJECTED = "|cffff5555AFVIST|r"
+            PENDING = "|cffffcc33PENDING|r",
+            APPROVED = "|cff26a6f2APPROVED|r",
+            FULFILLED = "|cff44dd77FULFILLED|r",
+            REJECTED = "|cffff5555REJECTED|r"
         }
 
         local priceNote = ""
@@ -585,26 +595,26 @@ function UI:RefreshRequests()
 
         if isOff then
             if req.status == "PENDING" then
-                row.btn1:SetText("Godkend")
+                row.btn1:SetText("Approve")
                 row.btn1:Show()
                 row.btn1:SetScript("OnClick", function() VM.Fulfillment:ApproveRequest(req.id) end)
 
-                row.btn3:SetText("Afvis")
+                row.btn3:SetText("Reject")
                 row.btn3:Show()
                 row.btn3:SetScript("OnClick", function() VM.Fulfillment:RejectRequest(req.id) end)
             elseif req.status == "APPROVED" then
-                row.btn2:SetText("Udlever")
+                row.btn2:SetText("Fulfill")
                 row.btn2:Show()
                 row.btn2:SetScript("OnClick", function()
                     VM.Fulfillment.activeOrder = req
-                    print(string.format("|cff00ccff[Vault Manager]|r Klar til udlevering til |cffffff00%s|r. Åbn Mail eller Trade for auto-udfyldning!", req.requester))
+                    print(string.format("|cff00ccff[Vault Manager]|r Ready to fulfill for |cffffff00%s|r. Open Mail or Trade to auto-fill!", req.requester))
                 end)
 
-                row.btn1:SetText("Fuldendt")
+                row.btn1:SetText("Complete")
                 row.btn1:Show()
                 row.btn1:SetScript("OnClick", function() VM.Fulfillment:CompleteRequest(req.id) end)
 
-                row.btn3:SetText("Annuller")
+                row.btn3:SetText("Cancel")
                 row.btn3:Show()
                 row.btn3:SetScript("OnClick", function() VM.Fulfillment:RejectRequest(req.id) end)
             end
@@ -616,7 +626,7 @@ function UI:RefreshRequests()
 end
 
 --------------------------------------------------------------------------------
--- FANE 3: REGNSKAB
+-- TAB 3: LEDGER
 --------------------------------------------------------------------------------
 function UI:BuildLedgerPanel(panel)
     local topBar = CreateFrame("Frame", nil, panel)
@@ -631,7 +641,7 @@ function UI:BuildLedgerPanel(panel)
 
     local toggleLabel = topBar:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     toggleLabel:SetPoint("LEFT", priceToggle, "RIGHT", 4, 0)
-    toggleLabel:SetText("Historisk pris (ellers live AH)")
+    toggleLabel:SetText("Historical price (otherwise live AH)")
 
     priceToggle:SetScript("OnClick", function(cb)
         VM.db.uiPrefs.useHistoricalPrices = cb:GetChecked()
@@ -654,18 +664,18 @@ function UI:BuildLedgerPanel(panel)
         goldBox:SetPoint("RIGHT", -104, 0)
         goldBox.placeholder = goldBox:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
         goldBox.placeholder:SetPoint("LEFT", 6, 0)
-        goldBox.placeholder:SetText("Guld")
+        goldBox.placeholder:SetText("Gold")
         goldBox:SetScript("OnTextChanged", function(eb)
             if eb:GetText() == "" then eb.placeholder:Show() else eb.placeholder:Hide() end
         end)
 
-        local addGoldBtn = CreateModernButton(topBar, 96, 22, "+ Registrer Guld", { 0.25, 0.80, 0.45, 1 })
+        local addGoldBtn = CreateModernButton(topBar, 96, 22, "+ Log Gold", { 0.25, 0.80, 0.45, 1 })
         addGoldBtn:SetPoint("RIGHT", 0, 0)
         addGoldBtn:SetScript("OnClick", function()
             local g = tonumber(goldBox:GetText()) or 0
             if manualMember ~= "" and g > 0 then
                 VM.Ledger:RecordGoldDeposit(manualMember, g * 10000, "MANUAL_GOLD")
-                print(string.format("|cff00ccff[Vault Manager]|r Registrerede %dg indbetalt af |cffffff00%s|r.", g, manualMember))
+                print(string.format("|cff00ccff[Vault Manager]|r Logged %dg donated by |cffffff00%s|r.", g, manualMember))
                 goldBox:SetText("")
                 manualMember = ""
                 memberBtn:SetText("Donor...")
@@ -703,7 +713,7 @@ function UI:RefreshLedger()
             row.text:SetWidth(555)
             row.text:SetJustifyH("LEFT")
 
-            row.actionBtn = CreateModernButton(row, 125, 20, "Tildel medlem", THEME.accent)
+            row.actionBtn = CreateModernButton(row, 125, 20, "Assign Member", THEME.accent)
             row.actionBtn:SetPoint("RIGHT", -8, 0)
 
             panel.scroll.rows[rowIdx] = row
@@ -729,21 +739,21 @@ function UI:RefreshLedger()
         header.text:SetPoint("LEFT", 34, 0)
 
         local goldSubNote = (grp.totalGoldIn and grp.totalGoldIn > 0)
-            and string.format(" (heraf %s guld)", VM:FormatMoney(grp.totalGoldIn))
+            and string.format(" (incl. %s gold)", VM:FormatMoney(grp.totalGoldIn))
             or ""
 
         if grp.mainName == "UNATTRIBUTED" then
-            header.text:SetText(string.format("|cffff5555UNATTRIBUTED INDBETALINGER|r  —  Doneret: %s%s  |cff999999(%d poster)|r",
+            header.text:SetText(string.format("|cffff5555UNATTRIBUTED DEPOSITS|r  —  Donated: %s%s  |cff999999(%d entries)|r",
                 VM:FormatMoney(grp.totalInValue), goldSubNote, #grp.transactions))
         elseif grp.isLegacy then
-            header.text:SetText(string.format("|cff808080%s [Legacy Member]|r  |cff707070—  Modtaget: %s  |  Doneret: %s%s  (%d poster)|r",
+            header.text:SetText(string.format("|cff808080%s [Legacy Member]|r  |cff707070—  Received: %s  |  Donated: %s%s  (%d entries)|r",
                 grp.mainName,
                 VM:FormatMoney(grp.totalOutValue),
                 VM:FormatMoney(grp.totalInValue),
                 goldSubNote,
                 #grp.transactions))
         else
-            header.text:SetText(string.format("|cffffcc33%s|r  —  Modtaget: %s  |  Doneret: %s%s  |cff999999(%d poster)|r",
+            header.text:SetText(string.format("|cffffcc33%s|r  —  Received: %s  |  Donated: %s%s  |cff999999(%d entries)|r",
                 grp.mainName,
                 VM:FormatMoney(grp.totalOutValue),
                 VM:FormatMoney(grp.totalInValue),
@@ -762,7 +772,7 @@ function UI:RefreshLedger()
                 sub.text:SetPoint("LEFT", 40, 0)
 
                 local isGold = (tx.itemID == 0 or tx.itemLink == "GOLD")
-                local dir = (tx.type == "OUT") and "|cffff6666UD|r" or (isGold and "|cffffd700GULD IND|r" or "|cff44dd77IND|r")
+                local dir = (tx.type == "OUT") and "|cffff6666OUT|r" or (isGold and "|cffffd700GOLD IN|r" or "|cff44dd77IN|r")
                 local val = VM.Ledger:GetTransactionValue(tx, useHist)
                 local dateStr = date("%d/%m %H:%M", tx.timestamp or 0)
                 local charTag = (tx.player ~= grp.mainName and tx.player ~= "UNATTRIBUTED") and (" (" .. tx.player .. ")") or ""
@@ -771,10 +781,10 @@ function UI:RefreshLedger()
                     sub.text:SetText(string.format("|cff999999%s|r [%s]%s: %s",
                         dateStr, dir, charTag, VM:FormatMoney(val)))
                 elseif grp.isLegacy then
-                    sub.text:SetText(string.format("|cff808080%s [%s]%s: %dx %s — Værdi: %s|r",
-                        dateStr, tx.type == "OUT" and "UD" or "IND", charTag, tx.count, tx.itemName, VM:FormatMoney(val)))
+                    sub.text:SetText(string.format("|cff808080%s [%s]%s: %dx %s — Value: %s|r",
+                        dateStr, tx.type == "OUT" and "OUT" or "IN", charTag, tx.count, tx.itemName, VM:FormatMoney(val)))
                 else
-                    sub.text:SetText(string.format("|cff999999%s|r [%s]%s: %dx %s  —  Værdi: %s",
+                    sub.text:SetText(string.format("|cff999999%s|r [%s]%s: %dx %s  —  Value: %s",
                         dateStr, dir, charTag, tx.count, tx.itemLink or tx.itemName, VM:FormatMoney(val)))
                 end
 
@@ -798,7 +808,7 @@ function UI:RefreshLedger()
 end
 
 --------------------------------------------------------------------------------
--- FANE 4: RANKING (Top Donorer: Samlet / Rent Guld / Mats + Gear)
+-- TAB 4: RANKING (Top Donors: Total / Pure Gold / Mats + Gear)
 --------------------------------------------------------------------------------
 function UI:BuildRankingPanel(panel)
     local topBar = CreateFrame("Frame", nil, panel)
@@ -808,18 +818,18 @@ function UI:BuildRankingPanel(panel)
 
     local filterLabel = topBar:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     filterLabel:SetPoint("LEFT", 2, 0)
-    filterLabel:SetText("Rangér efter:")
+    filterLabel:SetText("Rank by:")
 
     panel.sortButtons = {}
     local modes = {
-        { key = "TOTAL", label = "Samlet værdi" },
-        { key = "GOLD", label = "Rent guld" },
+        { key = "TOTAL", label = "Total Value" },
+        { key = "GOLD", label = "Pure Gold" },
         { key = "ITEMS", label = "Mats + Gear" },
     }
 
     for i, m in ipairs(modes) do
         local btn = CreateModernButton(topBar, 120, 24, m.label)
-        btn:SetPoint("LEFT", 85 + (i - 1) * 126, 0)
+        btn:SetPoint("LEFT", 65 + (i - 1) * 126, 0)
         btn:SetScript("OnClick", function()
             rankingSortMode = m.key
             UI:RefreshRanking()
@@ -827,7 +837,7 @@ function UI:BuildRankingPanel(panel)
         panel.sortButtons[m.key] = btn
     end
 
-    -- Kolonne-overskrifter
+    -- Column headers
     local colHeader = CreateFrame("Frame", nil, panel, "BackdropTemplate")
     colHeader:SetSize(744, 24)
     colHeader:SetPoint("TOPLEFT", 10, -44)
@@ -839,11 +849,11 @@ function UI:BuildRankingPanel(panel)
 
     local cName = colHeader:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     cName:SetPoint("LEFT", 48, 0)
-    cName:SetText("Spiller (Main)")
+    cName:SetText("Player (Main)")
 
     local cGold = colHeader:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     cGold:SetPoint("LEFT", 290, 0)
-    cGold:SetText("Rent guld")
+    cGold:SetText("Pure Gold")
 
     local cItems = colHeader:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     cItems:SetPoint("LEFT", 435, 0)
@@ -851,7 +861,7 @@ function UI:BuildRankingPanel(panel)
 
     local cTotal = colHeader:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     cTotal:SetPoint("LEFT", 585, 0)
-    cTotal:SetText("Samlet værdi")
+    cTotal:SetText("Total Value")
 
     panel.scroll = CreateScrollArea(panel, -72, 8)
 end
@@ -943,12 +953,12 @@ function UI:RefreshRanking()
 end
 
 --------------------------------------------------------------------------------
--- FANE 5: INDSTILLINGER & MAINS
+-- TAB 5: SETTINGS & MAINS
 --------------------------------------------------------------------------------
 function UI:BuildSettingsPanel(panel)
     local ruleTitle = panel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     ruleTitle:SetPoint("TOPLEFT", 14, -12)
-    ruleTitle:SetText("|cff26a6f2GUILD BANK TAB-REGLER|r  |cff888888(Kun Officers / GM)|r")
+    ruleTitle:SetText("|cff26a6f2GUILD BANK TAB RULES|r  |cff888888(Officers / GM Only)|r")
 
     panel.tabRuleRows = {}
     for i = 1, 6 do
@@ -965,13 +975,13 @@ function UI:BuildSettingsPanel(panel)
         r.freeBtn = CreateModernButton(r, 105, 22, "Free-for-All")
         r.freeBtn:SetPoint("LEFT", 195, 0)
 
-        r.pctBtn = CreateModernButton(r, 105, 22, "% af AH-pris")
+        r.pctBtn = CreateModernButton(r, 105, 22, "% of AH Price")
         r.pctBtn:SetPoint("LEFT", 306, 0)
 
         r.pctBox = CreateModernEditBox(r, 42, 22, true)
         r.pctBox:SetPoint("LEFT", 418, 0)
 
-        r.lockBtn = CreateModernButton(r, 95, 22, "Låst Tab")
+        r.lockBtn = CreateModernButton(r, 95, 22, "Locked Tab")
         r.lockBtn:SetPoint("LEFT", 468, 0)
 
         r.status = r:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
@@ -982,14 +992,14 @@ function UI:BuildSettingsPanel(panel)
 
     local mainTitle = panel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     mainTitle:SetPoint("TOPLEFT", 14, -225)
-    mainTitle:SetText("|cff26a6f2KOBL ALT TIL MAIN / SKIFT AKTIV MAIN|r  |cff888888(Søgbar Guild Roster)|r")
+    mainTitle:SetText("|cff26a6f2LINK ALT TO MAIN / SWITCH ACTIVE MAIN|r  |cff888888(Searchable Guild Roster)|r")
 
     local altLabel = panel:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     altLabel:SetPoint("TOPLEFT", 14, -254)
-    altLabel:SetText("Alt-karakter:")
+    altLabel:SetText("Alt Character:")
 
-    panel.altDropdown = CreateModernDropdown(panel, 165, 24, "Vælg Alt...")
-    panel.altDropdown:SetPoint("TOPLEFT", 95, -249)
+    panel.altDropdown = CreateModernDropdown(panel, 165, 24, "Select Alt...")
+    panel.altDropdown:SetPoint("TOPLEFT", 105, -249)
     panel.altDropdown:SetScript("OnClick", function(btn)
         UI:OpenRosterPicker(btn, true, function(chosen)
             selectedAltChar = chosen
@@ -998,11 +1008,11 @@ function UI:BuildSettingsPanel(panel)
     end)
 
     local mainLabel = panel:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    mainLabel:SetPoint("TOPLEFT", 280, -254)
-    mainLabel:SetText("Aktiv Main:")
+    mainLabel:SetPoint("TOPLEFT", 285, -254)
+    mainLabel:SetText("Active Main:")
 
-    panel.mainDropdown = CreateModernDropdown(panel, 165, 24, "Vælg Main...")
-    panel.mainDropdown:SetPoint("TOPLEFT", 355, -249)
+    panel.mainDropdown = CreateModernDropdown(panel, 165, 24, "Select Main...")
+    panel.mainDropdown:SetPoint("TOPLEFT", 365, -249)
     panel.mainDropdown:SetScript("OnClick", function(btn)
         UI:OpenRosterPicker(btn, true, function(chosen)
             selectedMainChar = chosen
@@ -1010,18 +1020,18 @@ function UI:BuildSettingsPanel(panel)
         end)
     end)
 
-    local linkBtn = CreateModernButton(panel, 165, 24, "Gem / Opdater Main", THEME.accent)
-    linkBtn:SetPoint("TOPLEFT", 540, -249)
+    local linkBtn = CreateModernButton(panel, 165, 24, "Save / Update Main", THEME.accent)
+    linkBtn:SetPoint("TOPLEFT", 545, -249)
     linkBtn:SetScript("OnClick", function()
         if selectedMainChar ~= "" then
             VM:SetMainCharacter(selectedMainChar, selectedAltChar ~= "" and { selectedAltChar } or nil)
-            print(string.format("|cff00ccff[Vault Manager]|r Opdaterede aktiv Main til |cffffff00%s|r.", selectedMainChar))
+            print(string.format("|cff00ccff[Vault Manager]|r Updated active Main to |cffffff00%s|r.", selectedMainChar))
             selectedAltChar = ""
             selectedMainChar = ""
-            panel.altDropdown:SetText("Vælg Alt...")
-            panel.mainDropdown:SetText("Vælg Main...")
+            panel.altDropdown:SetText("Select Alt...")
+            panel.mainDropdown:SetText("Select Main...")
         else
-            print("|cffff5555[Vault Manager]|r Vælg en aktiv Main fra listen først.")
+            print("|cffff5555[Vault Manager]|r Please select an active Main from the list first.")
         end
     end)
 
@@ -1042,7 +1052,7 @@ function UI:RefreshSettings()
             r.pctBox:SetText(tostring(rule.percent or 50))
 
             if rule.mode == "LOCKED" then
-                r.status:SetText("|cffff5555Låst|r")
+                r.status:SetText("|cffff5555Locked|r")
             elseif rule.mode == "PERCENT" then
                 r.status:SetText("|cffffcc33" .. (rule.percent or 50) .. "% AH|r")
             else
@@ -1102,7 +1112,7 @@ function UI:RefreshSettings()
             row.label:SetWidth(580)
             row.label:SetJustifyH("LEFT")
 
-            row.unlinkBtn = CreateModernButton(row, 95, 20, "Frakobl", { 0.85, 0.30, 0.30, 1 })
+            row.unlinkBtn = CreateModernButton(row, 95, 20, "Unlink", { 0.85, 0.30, 0.30, 1 })
             row.unlinkBtn:SetPoint("RIGHT", -8, 0)
 
             panel.linksScroll.rows[idx] = row
@@ -1113,14 +1123,14 @@ function UI:RefreshSettings()
         row:Show()
 
         if link.isLegacy then
-            row.label:SetText(string.format("|cff808080Alt: %s  ->  Aktiv Main: %s [Legacy]|r", link.alt, link.main))
+            row.label:SetText(string.format("|cff808080Alt: %s  ->  Active Main: %s [Legacy]|r", link.alt, link.main))
         else
-            row.label:SetText(string.format("Alt: |cffffffff%s|r  ->  Aktiv Main: |cffffcc33%s|r", link.alt, link.main))
+            row.label:SetText(string.format("Alt: |cffffffff%s|r  ->  Active Main: |cffffcc33%s|r", link.alt, link.main))
         end
 
         row.unlinkBtn:SetScript("OnClick", function()
             VM:UnlinkCharacter(link.alt)
-            print(string.format("|cff00ccff[Vault Manager]|r Frakoblede |cffffff00%s|r fra %s.", link.alt, link.main))
+            print(string.format("|cff00ccff[Vault Manager]|r Unlinked |cffffff00%s|r from %s.", link.alt, link.main))
         end)
 
         y = y + 28
@@ -1145,7 +1155,7 @@ function UI:CreateOfficerPopupFrame()
 
     local title = popupFrame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     title:SetPoint("TOPLEFT", 14, -12)
-    title:SetText("|cff26a6f2GODKENDTE GUILD BANK BESTILLINGER|r")
+    title:SetText("|cff26a6f2APPROVED GUILD BANK REQUESTS|r")
 
     local closeBtn = CreateModernButton(popupFrame, 22, 22, "X", { 0.85, 0.25, 0.25, 1 })
     closeBtn:SetPoint("TOPRIGHT", -8, -8)
@@ -1174,10 +1184,10 @@ function UI:ShowOfficerBankPopup(orders)
             row.label:SetWidth(260)
             row.label:SetJustifyH("LEFT")
 
-            row.prepBtn = CreateModernButton(row, 76, 22, "Klargør", THEME.accent)
+            row.prepBtn = CreateModernButton(row, 76, 22, "Prepare", THEME.accent)
             row.prepBtn:SetPoint("LEFT", 275, 0)
 
-            row.doneBtn = CreateModernButton(row, 76, 22, "Fuldendt", { 0.25, 0.80, 0.45, 1 })
+            row.doneBtn = CreateModernButton(row, 76, 22, "Complete", { 0.25, 0.80, 0.45, 1 })
             row.doneBtn:SetPoint("LEFT", 356, 0)
 
             popupFrame.scroll.rows[idx] = row
@@ -1191,7 +1201,7 @@ function UI:ShowOfficerBankPopup(orders)
 
         row.prepBtn:SetScript("OnClick", function()
             VM.Fulfillment.activeOrder = req
-            print(string.format("|cff00ccff[Vault Manager]|r Træk %dx %s fra Tab %d, og åbn derefter Mail eller Trade med %s.",
+            print(string.format("|cff00ccff[Vault Manager]|r Withdraw %dx %s from Tab %d, then open Mail or Trade with %s.",
                 req.count, req.itemName, req.tab, req.requester))
         end)
 
@@ -1215,10 +1225,10 @@ function UI:RefreshAll()
 
     local inv = VM.db.inventory
     if inv.lastScan and inv.lastScan > 0 then
-        mainFrame.scanInfo:SetText(string.format("Sidst scannet: %s af %s",
+        mainFrame.scanInfo:SetText(string.format("Last scanned: %s by %s",
             date("%d/%m %H:%M", inv.lastScan), inv.scannedBy or "?"))
     else
-        mainFrame.scanInfo:SetText("Ikke scannet endnu (Åbn Guild Bank)")
+        mainFrame.scanInfo:SetText("Not scanned yet (Open Guild Bank)")
     end
 
     for i = 1, 5 do

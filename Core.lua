@@ -3,6 +3,7 @@ _G.VaultManager = VM
 
 VM.PREFIX = "VMGR_V1"
 VM.VERSION = 2
+VM.OFFICER_MAX_RANK_INDEX = 1
 
 local DEFAULT_DB = {
     inventory = {
@@ -44,15 +45,13 @@ end
 
 function VM:IsOfficer()
     if not IsInGuild() then return false end
-    if IsGuildLeader() then return true end
-    if C_GuildInfo and C_GuildInfo.CanViewOfficerNote then
-        return C_GuildInfo.CanViewOfficerNote()
-    end
-    if CanViewOfficerNote then
-        return CanViewOfficerNote()
-    end
     local _, _, rankIndex = GetGuildInfo("player")
-    return rankIndex ~= nil and rankIndex <= 1
+    return rankIndex ~= nil and rankIndex <= VM.OFFICER_MAX_RANK_INDEX
+end
+
+function VM:IsOfficerName(name)
+    local rankIndex = self.db.rosterCache[self:NormalizeName(name)]
+    return type(rankIndex) == "number" and rankIndex <= VM.OFFICER_MAX_RANK_INDEX
 end
 
 function VM:UpdateRosterCache()
@@ -61,9 +60,9 @@ function VM:UpdateRosterCache()
     if total and total > 0 then
         local fresh = {}
         for i = 1, total do
-            local name = GetGuildRosterInfo(i)
+            local name, _, rankIndex = GetGuildRosterInfo(i)
             if name then
-                fresh[self:NormalizeName(name)] = true
+                fresh[self:NormalizeName(name)] = rankIndex
             end
         end
         self.db.rosterCache = fresh

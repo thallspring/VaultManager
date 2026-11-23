@@ -2,6 +2,13 @@
 
 All notable changes to **Vault Manager** will be documented in this file.
 
+## [1.1.4] - 2026-11-23
+
+### Fixed
+- **0g Unattributed Entries:** Prevented creation of zero-amount or negative unattributed gold ledger entries, and added automatic startup purging of existing 0g entries from SavedVariables.
+- **Async Guild Bank Log Scanning:** Explicitly queried guild bank money logs (`MAX_GUILDBANK_TABS + 1`) and tab logs on `GUILDBANKFRAME_OPENED`, using a debounced `GUILDBANKLOG_UPDATE` handler to ensure scan summaries execute only after server log data arrives.
+- **Money Log Transaction Parsing:** Filtered out guild repairs (`repair`), tab purchases (`buyTab`), withdrawals (`withdraw`), and zero/negative transfers so only valid member gold deposits are recorded in the ledger.
+
 ## [1.1.3] - 2026-11-23
 
 ### Fixed

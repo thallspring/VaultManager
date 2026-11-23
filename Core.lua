@@ -334,6 +334,15 @@ initFrame:SetScript("OnEvent", function(_, event, arg1)
         DeepCopyDefaults(VaultManagerDB, DEFAULT_DB)
         VM.db = VaultManagerDB
         VM:MigrateMainsFormat()
+
+        -- Purge any old 0g or invalid unattributed gold ledger entries
+        if VM.db.ledger then
+            for id, tx in pairs(VM.db.ledger) do
+                if tx and (tx.itemLink == "GOLD" or tx.itemID == 0) and (not tx.unitPriceAtTime or tx.unitPriceAtTime <= 0 or tx.count == 0) then
+                    VM.db.ledger[id] = nil
+                end
+            end
+        end
     elseif event == "PLAYER_LOGIN" then
         if C_ChatInfo and C_ChatInfo.RegisterAddonMessagePrefix then
             C_ChatInfo.RegisterAddonMessagePrefix(VM.PREFIX)

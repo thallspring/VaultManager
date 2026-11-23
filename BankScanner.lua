@@ -5,6 +5,8 @@ local Scanner = VM.BankScanner
 local MAX_SLOTS_PER_TAB = 98
 local lastScanTime = 0
 local SCAN_COOLDOWN = 4.0
+local logUpdatePending = false
+local logUpdateTimer = nil
 
 local GB_API = {
     GetNumTabs = function() 
@@ -60,6 +62,7 @@ function Scanner:Init()
             if VM:IsOfficer() then
                 VM.Fulfillment:OnGuildBankOpened()
             end
+            self:RequestAllTabsAndLogs()
             self:ScheduleScan()
         elseif event == "GUILDBANK_UPDATE_TABS" or event == "GUILDBANKBAGSLOTS_CHANGED" then
             if not scanQueued then
@@ -70,7 +73,14 @@ function Scanner:Init()
                 end)
             end
         elseif event == "GUILDBANKLOG_UPDATE" or event == "GUILDBANK_UPDATE_MONEY" then
-            if not scanQueued then
+            if logUpdatePending then
+                logUpdatePending = false
+                if logUpdateTimer then
+                    logUpdateTimer:Cancel()
+                    logUpdateTimer = nil
+                end
+                self:RunFullScanPass(true)
+            elseif not scanQueued then
                 scanQueued = true
                 C_Timer.After(1.5, function()
                     scanQueued = false
@@ -87,8 +97,13 @@ function Scanner:ScheduleScan()
     if (now - lastScanTime) < SCAN_COOLDOWN then return end
     lastScanTime = now
 
-    C_Timer.After(1.0, function()
-        self:ForceScan()
+    self:RequestAllTabsAndLogs()
+    logUpdatePending = true
+    if logUpdateTimer then logUpdateTimer:Cancel() end
+    logUpdateTimer = C_Timer.NewTimer(2.5, function()
+        logUpdatePending = false
+        logUpdateTimer = nil
+        self:RunFullScanPass(true)
     end)
 end
 
@@ -116,7 +131,13 @@ function Scanner:ForceScan()
     lastScanTime = now
 
     self:RequestAllTabsAndLogs()
-    C_Timer.After(1.0, function() self:RunFullScanPass(true) end)
+    logUpdatePending = true
+    if logUpdateTimer then logUpdateTimer:Cancel() end
+    logUpdateTimer = C_Timer.NewTimer(2.5, function()
+        logUpdatePending = false
+        logUpdateTimer = nil
+        self:RunFullScanPass(true)
+    end)
 end
 
 function Scanner:RunFullScanPass(isFinal)
@@ -261,6 +282,10 @@ function Scanner:ScanLogs()
 end
 
 function Scanner:ScanMoneyLogs()
+    if GetGuildBankMoney and GetGuildBankMoney() < 0 then
+        return 0
+    end
+
     if QueryGuildBankLog then 
         local moneyTabIndex = (MAX_GUILDBANK_TABS or 8) + 1
         QueryGuildBankLog(moneyTabIndex)
@@ -274,24 +299,29 @@ function Scanner:ScanMoneyLogs()
         local txType, name, amount = GB_API.GetMoneyTransaction(i)
         local typeStr = tostring(txType or ""):lower()
 
-        if (typeStr:find("deposit") or typeStr == "1") and amount and tonumber(amount) > 0 then
-            local normName = (name and name ~= "") and VM:NormalizeName(name) or "UNATTRIBUTED"
+        -- Filter out repairs, tab purchases, withdrawals, and 0 or negative amounts
+        if typeStr:find("repair") or typeStr:find("buytab") or typeStr:find("withdraw") then
+            -- Ignore non-deposit transactions
+        else
             local copper = tonumber(amount) or 0
+            if (typeStr:find("deposit") or typeStr == "1" or typeStr == "deposit") and copper > 0 then
+                local normName = (name and name ~= "") and VM:NormalizeName(name) or "UNATTRIBUTED"
 
-            local sig = string.format("money_%d_%s_%d", i, normName, copper)
-            if not VM.db.processedBankLogs[sig] then
-                VM.db.processedBankLogs[sig] = true
-                local exists = false
-                for _, existingTx in pairs(VM.db.ledger) do
-                    if not existingTx.deleted and existingTx.player == normName and (existingTx.unitPriceAtTime * (existingTx.count or 1)) == copper and (existingTx.itemLink == "GOLD" or existingTx.source == "BANK_MONEY_LOG") then
-                        exists = true
-                        break
+                local sig = string.format("money_%d_%s_%d", i, normName, copper)
+                if not VM.db.processedBankLogs[sig] then
+                    VM.db.processedBankLogs[sig] = true
+                    local exists = false
+                    for _, existingTx in pairs(VM.db.ledger) do
+                        if not existingTx.deleted and existingTx.player == normName and (existingTx.unitPriceAtTime * (existingTx.count or 1)) == copper and (existingTx.itemLink == "GOLD" or existingTx.source == "BANK_MONEY_LOG") then
+                            exists = true
+                            break
+                        end
                     end
-                end
 
-                if not exists then
-                    VM.Ledger:RecordGoldDeposit(normName, copper, "BANK_MONEY_LOG")
-                    addedCount = addedCount + 1
+                    if not exists then
+                        VM.Ledger:RecordGoldDeposit(normName, copper, "BANK_MONEY_LOG")
+                        addedCount = addedCount + 1
+                    end
                 end
             end
         end

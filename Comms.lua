@@ -76,6 +76,7 @@ end
 
 function Comms:OnMessageReceived(msg, sender)
     if sender == VM:GetPlayerName() then return end
+    local fromOfficer = VM:IsOfficerName(sender)
     local parts = { strsplit("|", msg) }
     local cmd = parts[1]
 
@@ -172,6 +173,7 @@ function Comms:OnMessageReceived(msg, sender)
             itemLink = UnescapeStr(parts[16]),
         }
         local existing = VM.db.requests[req.id]
+        if not fromOfficer and (existing or req.status ~= "PENDING") then return end
         if not existing or req.updatedAt > (existing.updatedAt or 0) then
             VM.db.requests[req.id] = req
             if VM:IsOfficer() and req.status == "PENDING" and not existing then
@@ -182,6 +184,7 @@ function Comms:OnMessageReceived(msg, sender)
         end
 
     elseif cmd == "RULE" then
+        if not fromOfficer then return end
         local tabIdx = tonumber(parts[2])
         local mode = UnescapeStr(parts[3])
         local pct = tonumber(parts[4]) or 50
@@ -193,6 +196,7 @@ function Comms:OnMessageReceived(msg, sender)
         end
 
     elseif cmd == "MAIN" then
+        if not fromOfficer then return end
         local alt = UnescapeStr(parts[2])
         local main = UnescapeStr(parts[3])
         local updatedAt = tonumber(parts[4]) or 0
@@ -220,6 +224,7 @@ function Comms:OnMessageReceived(msg, sender)
             updatedAt = tonumber(parts[14]) or tonumber(parts[9]) or 0,
         }
         local existing = VM.db.ledger[tx.id]
+        if not fromOfficer and (existing or (tx.source ~= "BANK_LOG" and tx.source ~= "BANK_MONEY_LOG")) then return end
         if tx.id ~= "" and (not existing or tx.updatedAt > (existing.updatedAt or existing.timestamp or 0)) then
             VM.db.ledger[tx.id] = tx
             if VM.UI then VM.UI:RefreshAll() end

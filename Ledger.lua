@@ -94,6 +94,30 @@ function Ledger:RecordGoldDeposit(playerName, copperAmount, source)
     return tx
 end
 
+function Ledger:RecordGoldWithdrawal(playerName, copperAmount, source)
+    local now = time()
+    local tx = {
+        id = GenerateTxID("GOLD_OUT"),
+        type = "OUT",
+        player = (playerName == "UNATTRIBUTED") and "UNATTRIBUTED" or VM:NormalizeName(playerName),
+        itemID = 0,
+        itemLink = "GOLD",
+        itemName = "Gold Withdrawal",
+        count = 1,
+        unitPriceAtTime = copperAmount or 0,
+        chargedUnitPrice = 0,
+        timestamp = now,
+        updatedAt = now,
+        officer = VM:GetPlayerName(),
+        source = source or "BANK_MONEY_LOG",
+        deleted = false
+    }
+
+    VM.db.ledger[tx.id] = tx
+    VM.Comms:BroadcastTransaction(tx)
+    return tx
+end
+
 function Ledger:AssignUnattributed(txID, memberName)
     local tx = VM.db.ledger[txID]
     if not tx then return end
@@ -140,6 +164,7 @@ function Ledger:GetAggregatedByMain(useHistorical)
                     totalOutValue = 0,
                     totalInValue = 0,
                     totalGoldIn = 0,
+                    totalGoldOut = 0,
                     totalItemsIn = 0,
                     totalCharged = 0,
                     transactions = {}
@@ -150,6 +175,9 @@ function Ledger:GetAggregatedByMain(useHistorical)
             if tx.type == "OUT" then
                 groups[key].totalOutValue = groups[key].totalOutValue + val
                 groups[key].totalCharged = groups[key].totalCharged + ((tx.chargedUnitPrice or 0) * (tx.count or 0))
+                if tx.itemID == 0 or tx.itemLink == "GOLD" then
+                    groups[key].totalGoldOut = (groups[key].totalGoldOut or 0) + val
+                end
             else
                 groups[key].totalInValue = groups[key].totalInValue + val
                 if tx.itemID == 0 or tx.itemLink == "GOLD" then

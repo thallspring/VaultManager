@@ -2,6 +2,12 @@
 
 All notable changes to **Vault Manager** will be documented in this file.
 
+## [1.1.5] - 2026-11-23
+
+### Fixed & Added
+- **Gold Withdrawal Tracking:** Added support for parsing direct member gold withdrawals (`withdraw`) in the Guild Bank Money Log scanner while explicitly ignoring guild repairs (`repair`) and tab purchases (`buyTab`).
+- **Ledger & Ranking Integration:** Recorded member gold withdrawals as `[GOLD OUT]` transactions attributed to members (and their Mains), aggregated `totalGoldOut` in ledger calculations, and rendered them cleanly in the Ledger UI.
+
 ## [1.1.4] - 2026-11-23
 
 ### Fixed

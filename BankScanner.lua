@@ -299,28 +299,37 @@ function Scanner:ScanMoneyLogs()
         local txType, name, amount = GB_API.GetMoneyTransaction(i)
         local typeStr = tostring(txType or ""):lower()
 
-        -- Filter out repairs, tab purchases, withdrawals, and 0 or negative amounts
-        if typeStr:find("repair") or typeStr:find("buytab") or typeStr:find("withdraw") then
-            -- Ignore non-deposit transactions
+        -- Filter out repairs and tab purchases explicitly
+        if typeStr:find("repair") or typeStr:find("buytab") then
+            -- Ignore operational expenses
         else
             local copper = tonumber(amount) or 0
-            if (typeStr:find("deposit") or typeStr == "1" or typeStr == "deposit") and copper > 0 then
+            if copper > 0 then
                 local normName = (name and name ~= "") and VM:NormalizeName(name) or "UNATTRIBUTED"
+                local isDeposit = (typeStr:find("deposit") or typeStr == "1")
+                local isWithdraw = (typeStr:find("withdraw") or typeStr == "2")
 
-                local sig = string.format("money_%d_%s_%d", i, normName, copper)
-                if not VM.db.processedBankLogs[sig] then
-                    VM.db.processedBankLogs[sig] = true
-                    local exists = false
-                    for _, existingTx in pairs(VM.db.ledger) do
-                        if not existingTx.deleted and existingTx.player == normName and (existingTx.unitPriceAtTime * (existingTx.count or 1)) == copper and (existingTx.itemLink == "GOLD" or existingTx.source == "BANK_MONEY_LOG") then
-                            exists = true
-                            break
+                if isDeposit or isWithdraw then
+                    local prefix = isDeposit and "money_in" or "money_out"
+                    local sig = string.format("%s_%d_%s_%d", prefix, i, normName, copper)
+                    if not VM.db.processedBankLogs[sig] then
+                        VM.db.processedBankLogs[sig] = true
+                        local exists = false
+                        for _, existingTx in pairs(VM.db.ledger) do
+                            if not existingTx.deleted and existingTx.player == normName and (existingTx.unitPriceAtTime * (existingTx.count or 1)) == copper and existingTx.itemLink == "GOLD" and ((isDeposit and existingTx.type == "IN") or (isWithdraw and existingTx.type == "OUT")) then
+                                exists = true
+                                break
+                            end
                         end
-                    end
 
-                    if not exists then
-                        VM.Ledger:RecordGoldDeposit(normName, copper, "BANK_MONEY_LOG")
-                        addedCount = addedCount + 1
+                        if not exists then
+                            if isDeposit then
+                                VM.Ledger:RecordGoldDeposit(normName, copper, "BANK_MONEY_LOG")
+                            else
+                                VM.Ledger:RecordGoldWithdrawal(normName, copper, "BANK_MONEY_LOG")
+                            end
+                            addedCount = addedCount + 1
+                        end
                     end
                 end
             end

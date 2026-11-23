@@ -901,7 +901,7 @@ function UI:RefreshLedger()
                 sub.actionBtn:Hide()
 
                 local isGold = (tx.itemID == 0 or tx.itemLink == "GOLD")
-                local dir = (tx.type == "OUT") and "|cffff6666OUT|r" or (isGold and "|cffffd700GOLD IN|r" or "|cff44dd77IN|r")
+                local dir = (tx.type == "OUT") and (isGold and "|cffff6666GOLD OUT|r" or "|cffff6666OUT|r") or (isGold and "|cffffd700GOLD IN|r" or "|cff44dd77IN|r")
                 local val = VM.Ledger:GetTransactionValue(tx, useHist)
                 local dateStr = date("%d/%m %H:%M", tx.timestamp or 0)
                 local charTag = (tx.player ~= grp.mainName and tx.player ~= "UNATTRIBUTED") and (" (" .. tx.player .. ")") or ""

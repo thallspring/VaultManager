@@ -3,18 +3,46 @@ VM.BankScanner = {}
 local Scanner = VM.BankScanner
 
 local MAX_SLOTS_PER_TAB = 98
+local lastScanTime = 0
+local SCAN_COOLDOWN = 4.0
 
 local GB_API = {
-    GetNumTabs = function() return GetNumGuildBankTabs and GetNumGuildBankTabs() or 0 end,
-    GetTabInfo = function(tab) return GetGuildBankTabInfo and GetGuildBankTabInfo(tab) end,
-    QueryTab = function(tab) if QueryGuildBankTab then QueryGuildBankTab(tab) end end,
-    GetItemInfo = function(tab, slot) return GetGuildBankItemInfo and GetGuildBankItemInfo(tab, slot) end,
-    GetItemLink = function(tab, slot) return GetGuildBankItemLink and GetGuildBankItemLink(tab, slot) end,
-    QueryLog = function(tab) if QueryGuildBankLog then QueryGuildBankLog(tab) end end,
-    GetNumTransactions = function(tab) return GetNumGuildBankTransactions and GetNumGuildBankTransactions(tab) or 0 end,
-    GetTransaction = function(tab, idx) return GetGuildBankTransaction and GetGuildBankTransaction(tab, idx) end,
-    GetNumMoneyTransactions = function() return GetNumGuildBankMoneyTransactions and GetNumGuildBankMoneyTransactions() or 0 end,
-    GetMoneyTransaction = function(idx) return GetGuildBankMoneyTransaction and GetGuildBankMoneyTransaction(idx) end,
+    GetNumTabs = function() 
+        local n = GetNumGuildBankTabs and GetNumGuildBankTabs() or 0 
+        return (n > 0) and n or (MAX_GUILDBANK_TABS or 8)
+    end,
+    GetTabInfo = function(tab)
+        if GetGuildBankTabInfo then return GetGuildBankTabInfo(tab) end
+    end,
+    SetTab = function(tab)
+        if SetCurrentGuildBankTab then SetCurrentGuildBankTab(tab) end
+    end,
+    QueryTab = function(tab)
+        if QueryGuildBankTab then QueryGuildBankTab(tab) end
+    end,
+    GetItemInfo = function(tab, slot)
+        if GetGuildBankItemInfo then return GetGuildBankItemInfo(tab, slot) end
+    end,
+    GetItemLink = function(tab, slot)
+        if GetGuildBankItemLink then return GetGuildBankItemLink(tab, slot) end
+    end,
+    QueryLog = function(tab)
+        if QueryGuildBankLog then QueryGuildBankLog(tab) end
+    end,
+    GetNumTransactions = function(tab)
+        if GetNumGuildBankTransactions then return GetNumGuildBankTransactions(tab) or 0 end
+        return 0
+    end,
+    GetTransaction = function(tab, idx)
+        if GetGuildBankTransaction then return GetGuildBankTransaction(tab, idx) end
+    end,
+    GetNumMoneyTransactions = function()
+        if GetNumGuildBankMoneyTransactions then return GetNumGuildBankMoneyTransactions() or 0 end
+        return 0
+    end,
+    GetMoneyTransaction = function(idx)
+        if GetGuildBankMoneyTransaction then return GetGuildBankMoneyTransaction(idx) end
+    end,
 }
 
 function Scanner:Init()
@@ -27,62 +55,91 @@ function Scanner:Init()
 
     local scanQueued = false
     f:SetScript("OnEvent", function(_, event)
-        if event == "GUILDBANKFRAME_OPENED" or event == "GUILDBANK_UPDATE_TABS" then
-            self:RequestAllTabsAndLogs()
-            self:ScheduleScan()
-            if event == "GUILDBANKFRAME_OPENED" and VM:IsOfficer() then
+        VM:LogDebug("BankScanner event: " .. tostring(event))
+        if event == "GUILDBANKFRAME_OPENED" then
+            if VM:IsOfficer() then
                 VM.Fulfillment:OnGuildBankOpened()
             end
-        elseif event == "GUILDBANKBAGSLOTS_CHANGED" then
+            self:ScheduleScan()
+        elseif event == "GUILDBANK_UPDATE_TABS" or event == "GUILDBANKBAGSLOTS_CHANGED" then
             if not scanQueued then
                 scanQueued = true
-                C_Timer.After(0.4, function()
+                C_Timer.After(1.0, function()
                     scanQueued = false
                     self:ScanBank()
                 end)
             end
         elseif event == "GUILDBANKLOG_UPDATE" or event == "GUILDBANK_UPDATE_MONEY" then
-            self:ScanLogs()
-            self:ScanMoneyLogs()
+            if not scanQueued then
+                scanQueued = true
+                C_Timer.After(1.5, function()
+                    scanQueued = false
+                    self:ScanLogs()
+                    self:ScanMoneyLogs()
+                end)
+            end
         end
     end)
 end
 
 function Scanner:ScheduleScan()
-    C_Timer.After(0.6, function()
-        self:ScanBank()
+    local now = time()
+    if (now - lastScanTime) < SCAN_COOLDOWN then return end
+    lastScanTime = now
+
+    C_Timer.After(1.0, function()
+        self:ForceScan()
     end)
 end
 
 function Scanner:RequestAllTabsAndLogs()
     local numTabs = GB_API.GetNumTabs()
+    VM:LogDebug(string.format("RequestAllTabsAndLogs: %d tabs", numTabs))
     for tab = 1, numTabs do
-        GB_API.QueryTab(tab)
-        GB_API.QueryLog(tab)
+        if SetCurrentGuildBankTab then SetCurrentGuildBankTab(tab) end
+        if QueryGuildBankTab then QueryGuildBankTab(tab) end
+        if QueryGuildBankLog then QueryGuildBankLog(tab) end
     end
-    -- Query Guild Bank Money Log (Classic/TBC client uses MAX_GUILDBANK_TABS + 1, typically 9)
-    local moneyTabIndex = (MAX_GUILDBANK_TABS or 8) + 1
-    GB_API.QueryLog(moneyTabIndex)
-    if moneyTabIndex ~= 7 then
-        GB_API.QueryLog(7)
+    if QueryGuildBankLog then
+        QueryGuildBankLog((MAX_GUILDBANK_TABS or 8) + 1)
+        QueryGuildBankLog(7)
     end
 end
 
 function Scanner:ForceScan()
+    VM:LogDebug("ForceScan triggered")
+    local now = time()
+    if (now - lastScanTime) < SCAN_COOLDOWN then
+        print("|cff00ccff[Vault Manager]|r Please wait a few seconds before scanning again.")
+        return
+    end
+    lastScanTime = now
+
     self:RequestAllTabsAndLogs()
-    C_Timer.After(0.6, function()
-        self:ScanBank()
-        self:ScanLogs()
-        self:ScanMoneyLogs()
-    end)
+    C_Timer.After(1.0, function() self:RunFullScanPass(true) end)
+end
+
+function Scanner:RunFullScanPass(isFinal)
+    local itemCount = self:ScanBank()
+    local logsAdded = self:ScanLogs()
+    local moneyAdded = self:ScanMoneyLogs()
+    
+    if isFinal then
+        print(string.format("|cff00ccff[Vault Manager]|r Scan complete: %d items, %d item logs, %d gold logs stored.",
+            itemCount or 0, logsAdded or 0, moneyAdded or 0))
+    end
 end
 
 function Scanner:ScanBank()
     local numTabs = GB_API.GetNumTabs()
-    if numTabs == 0 then return end
-
     local newTabs = {}
+    local totalItemsScanned = 0
+    local uniqueItemsCount = 0
+
     for tab = 1, numTabs do
+        if SetCurrentGuildBankTab then SetCurrentGuildBankTab(tab) end
+        if QueryGuildBankTab then QueryGuildBankTab(tab) end
+
         local name, icon = GB_API.GetTabInfo(tab)
         newTabs[tab] = {
             name = name or ("Tab " .. tab),
@@ -93,21 +150,35 @@ function Scanner:ScanBank()
         for slot = 1, MAX_SLOTS_PER_TAB do
             local texture, count = GB_API.GetItemInfo(tab, slot)
             local link = GB_API.GetItemLink(tab, slot)
-            if link and count and count > 0 then
+
+            count = tonumber(count) or 1
+            if link and link ~= "" and count > 0 then
                 local itemID = tonumber(link:match("item:(%d+)"))
-                if itemID then
-                    local itemName = GetItemInfo(link) or link:match("%[(.-)%]") or ("Item " .. itemID)
-                    if not newTabs[tab].items[itemID] then
-                        newTabs[tab].items[itemID] = {
-                            itemID = itemID,
-                            link = link,
-                            name = itemName,
-                            icon = texture,
-                            count = 0
-                        }
-                    end
-                    newTabs[tab].items[itemID].count = newTabs[tab].items[itemID].count + count
+                local itemName = link:match("%[(.-)%]") or link
+                itemName = itemName:gsub("^%[", ""):gsub("%]$", "")
+
+                if not itemID and GetItemInfo then
+                    local _, foundLink, _, _, _, _, _, _, _, _, _, foundItemID = GetItemInfo(itemName)
+                    if foundItemID then itemID = foundItemID
+                    elseif foundLink then itemID = tonumber(foundLink:match("item:(%d+)")) end
                 end
+
+                itemID = itemID or 0
+                local key = (itemID ~= 0) and itemID or itemName
+
+                texture = texture or "Interface\\Icons\\INV_Misc_QuestionMark"
+                if not newTabs[tab].items[key] then
+                    newTabs[tab].items[key] = {
+                        itemID = itemID,
+                        link = link,
+                        name = itemName,
+                        icon = texture,
+                        count = 0
+                    }
+                    uniqueItemsCount = uniqueItemsCount + 1
+                end
+                newTabs[tab].items[key].count = newTabs[tab].items[key].count + count
+                totalItemsScanned = totalItemsScanned + count
             end
         end
     end
@@ -120,62 +191,89 @@ function Scanner:ScanBank()
 
     VM.Comms:BroadcastInventory()
     if VM.UI then VM.UI:RefreshAll() end
+    return uniqueItemsCount
 end
 
 function Scanner:ScanLogs()
     local numTabs = GB_API.GetNumTabs()
-    local addedNew = false
+    local addedCount = 0
 
     for tab = 1, numTabs do
+        if QueryGuildBankLog then QueryGuildBankLog(tab) end
         local numTx = GB_API.GetNumTransactions(tab)
         for i = 1, numTx do
-            local txType, playerName, itemLink, count, _, _, year, month, day, hour = GB_API.GetTransaction(tab, i)
-            if txType == "deposit" and itemLink and count and count > 0 then
-                local itemID = tonumber(itemLink:match("item:(%d+)"))
-                if itemID then
-                    local hash = string.format("ITEM_%d_%s_%d_%d_%d_%d_%d_%d",
-                        tab, tostring(playerName or "UNKNOWN"), itemID, count,
-                        year or 0, month or 0, day or 0, hour or 0)
+            local txType, name, itemLink, count = GB_API.GetTransaction(tab, i)
+            if name and name:find("%[") and not (itemLink and itemLink:find("%[")) then
+                local temp = name
+                name = itemLink
+                itemLink = temp
+            end
 
-                    if not VM.db.processedBankLogs[hash] then
-                        VM.db.processedBankLogs[hash] = true
-                        local donor = (playerName and playerName ~= "") and VM:NormalizeName(playerName) or "UNATTRIBUTED"
-                        VM.Ledger:RecordDeposit(donor, itemID, itemLink, count, "BANK_LOG")
-                        addedNew = true
+            local typeStr = tostring(txType or ""):lower()
+            if typeStr:find("deposit") or typeStr == "1" then
+                local cleanLink = itemLink or "[Unknown Item]"
+                local itemID = tonumber(cleanLink and cleanLink:match("item:(%d+)")) or 0
+                local normName = (name and name ~= "") and VM:NormalizeName(name) or "UNATTRIBUTED"
+                count = tonumber(count) or 1
+
+                local exists = false
+                for _, existingTx in pairs(VM.db.ledger) do
+                    if not existingTx.deleted and existingTx.player == normName and existingTx.count == count and (existingTx.itemLink == cleanLink or existingTx.itemName == cleanLink) then
+                        exists = true
+                        break
                     end
+                end
+
+                if not exists then
+                    VM.Ledger:RecordDeposit(normName, itemID, cleanLink, count, "BANK_LOG")
+                    addedCount = addedCount + 1
                 end
             end
         end
     end
 
-    if addedNew then
+    if addedCount > 0 then
         VM.Comms:BroadcastLedgerSync()
         if VM.UI then VM.UI:RefreshAll() end
     end
+    return addedCount
 end
 
 function Scanner:ScanMoneyLogs()
+    if QueryGuildBankLog then 
+        local moneyTabIndex = (MAX_GUILDBANK_TABS or 8) + 1
+        QueryGuildBankLog(moneyTabIndex)
+        QueryGuildBankLog(7)
+    end
     local numMoneyTx = GB_API.GetNumMoneyTransactions()
-    local addedNew = false
+    local addedCount = 0
 
     for i = 1, numMoneyTx do
-        local txType, playerName, amount, year, month, day, hour = GB_API.GetMoneyTransaction(i)
-        if txType == "deposit" and amount and amount > 0 then
-            local hash = string.format("GOLD_%s_%d_%d_%d_%d_%d",
-                tostring(playerName or "UNKNOWN"), amount,
-                year or 0, month or 0, day or 0, hour or 0)
+        local txType, name, amount = GB_API.GetMoneyTransaction(i)
+        local typeStr = tostring(txType or ""):lower()
 
-            if not VM.db.processedBankLogs[hash] then
-                VM.db.processedBankLogs[hash] = true
-                local donor = (playerName and playerName ~= "") and VM:NormalizeName(playerName) or "UNATTRIBUTED"
-                VM.Ledger:RecordGoldDeposit(donor, amount, "BANK_MONEY_LOG")
-                addedNew = true
+        if (typeStr:find("deposit") or typeStr == "1") and amount and tonumber(amount) > 0 then
+            local normName = (name and name ~= "") and VM:NormalizeName(name) or "UNATTRIBUTED"
+            local copper = tonumber(amount) or 0
+
+            local exists = false
+            for _, existingTx in pairs(VM.db.ledger) do
+                if not existingTx.deleted and existingTx.player == normName and (existingTx.unitPriceAtTime * (existingTx.count or 1)) == copper and (existingTx.itemLink == "GOLD" or existingTx.source == "BANK_MONEY_LOG") then
+                    exists = true
+                    break
+                end
+            end
+
+            if not exists then
+                VM.Ledger:RecordGoldDeposit(normName, copper, "BANK_MONEY_LOG")
+                addedCount = addedCount + 1
             end
         end
     end
 
-    if addedNew then
+    if addedCount > 0 then
         VM.Comms:BroadcastLedgerSync()
         if VM.UI then VM.UI:RefreshAll() end
     end
+    return addedCount
 end

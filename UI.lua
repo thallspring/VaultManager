@@ -5,10 +5,13 @@ local UI = VM.UI
 local mainFrame
 local popupFrame
 local rosterPickerFrame
+local exportModalFrame
 local currentTab = 1
 local selectedBankTab = 1
 local searchQuery = ""
 local expandedMains = {}
+local expandedTreeMains = {}
+local settingsSearchFilter = ""
 local selectedAltChar = ""
 local selectedMainChar = ""
 local rankingSortMode = "TOTAL" -- "TOTAL" | "GOLD" | "ITEMS"
@@ -135,6 +138,7 @@ function UI:Init()
     self:CreateMainFrame()
     self:CreateOfficerPopupFrame()
     self:CreateRosterPickerFrame()
+    self:CreateExportModal()
 end
 
 function UI:Toggle()
@@ -142,6 +146,7 @@ function UI:Toggle()
     if mainFrame:IsShown() then
         mainFrame:Hide()
         if rosterPickerFrame then rosterPickerFrame:Hide() end
+        if exportModalFrame then exportModalFrame:Hide() end
     else
         if IsInGuild() then
             if C_GuildInfo and C_GuildInfo.GuildRoster then C_GuildInfo.GuildRoster()
@@ -149,6 +154,101 @@ function UI:Toggle()
         end
         mainFrame:Show()
         self:RefreshAll()
+    end
+end
+
+--------------------------------------------------------------------------------
+-- EXPORT MODAL
+--------------------------------------------------------------------------------
+function UI:CreateExportModal()
+    exportModalFrame = CreateFrame("Frame", "VaultManagerExportModal", UIParent, "BackdropTemplate")
+    exportModalFrame:SetSize(600, 420)
+    exportModalFrame:SetPoint("CENTER")
+    exportModalFrame:SetFrameStrata("FULLSCREEN_DIALOG")
+    exportModalFrame:SetMovable(true)
+    exportModalFrame:EnableMouse(true)
+    exportModalFrame:RegisterForDrag("LeftButton")
+    exportModalFrame:SetScript("OnDragStart", exportModalFrame.StartMoving)
+    exportModalFrame:SetScript("OnDragStop", exportModalFrame.StopMovingOrSizing)
+    ApplyModernBackdrop(exportModalFrame, THEME.bg, THEME.accent)
+    exportModalFrame:Hide()
+    table.insert(UISpecialFrames, "VaultManagerExportModal")
+
+    local title = exportModalFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    title:SetPoint("TOPLEFT", 14, -12)
+    title:SetText("|cff26a6f2Vault Manager — Data Export|r")
+
+    local closeBtn = CreateModernButton(exportModalFrame, 24, 24, "X", { 0.85, 0.25, 0.25, 1 })
+    closeBtn:SetPoint("TOPRIGHT", -8, -8)
+    closeBtn:SetScript("OnClick", function() exportModalFrame:Hide() end)
+
+    local csvToggle = CreateFrame("CheckButton", nil, exportModalFrame, "UICheckButtonTemplate")
+    csvToggle:SetSize(22, 22)
+    csvToggle:SetPoint("TOPLEFT", 14, -42)
+    csvToggle.label = csvToggle:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    csvToggle.label:SetPoint("LEFT", csvToggle, "RIGHT", 4, 0)
+    csvToggle.label:SetText("CSV Format (otherwise Markdown)")
+
+    local sf = CreateScrollArea(exportModalFrame, -75, 40)
+    sf.content:SetSize(560, 1)
+    exportModalFrame.scroll = sf
+
+    local editBox = CreateFrame("EditBox", nil, sf.content)
+    editBox:SetWidth(550)
+    editBox:SetMultiLine(true)
+    editBox:SetFontObject("GameFontHighlightSmall")
+    editBox:SetAutoFocus(false)
+    editBox:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
+    sf.editBox = editBox
+    exportModalFrame.editBox = editBox
+    editBox:SetPoint("TOPLEFT", 0, 0)
+
+    csvToggle:SetScript("OnClick", function()
+        UI:RefreshExportContent()
+    end)
+    exportModalFrame.csvToggle = csvToggle
+
+    local copyNote = exportModalFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    copyNote:SetPoint("BOTTOMLEFT", 14, 12)
+    copyNote:SetText("Press Ctrl+C to copy selected text.")
+end
+
+function UI:OpenExportModal()
+    if not exportModalFrame then self:CreateExportModal() end
+    exportModalFrame:Show()
+    self:RefreshExportContent()
+end
+
+function UI:RefreshExportContent()
+    if not exportModalFrame or not exportModalFrame:IsShown() then return end
+    local isCSV = exportModalFrame.csvToggle:GetChecked()
+    local useHist = VM.db.uiPrefs.useHistoricalPrices
+    local ranked = VM.Ledger:GetDonationRanking("TOTAL", useHist)
+
+    local lines = {}
+    if isCSV then
+        table.insert(lines, "Main,TotalInValue,GoldIn,ItemsIn")
+        for _, grp in ipairs(ranked) do
+            table.insert(lines, string.format("%s,%d,%d,%d",
+                grp.mainName, grp.totalInValue, grp.totalGoldIn, grp.totalItemsIn))
+        end
+    else
+        table.insert(lines, "| Main Character | Total Donated | Pure Gold | Mats & Gear |")
+        table.insert(lines, "|---|---|---|---|")
+        for _, grp in ipairs(ranked) do
+            table.insert(lines, string.format("| %s | %s | %s | %s |",
+                grp.mainName,
+                VM:FormatMoney(grp.totalInValue),
+                VM:FormatMoney(grp.totalGoldIn),
+                VM:FormatMoney(grp.totalItemsIn)))
+        end
+    end
+
+    local text = table.concat(lines, "\n")
+    if exportModalFrame.editBox then
+        exportModalFrame.editBox:SetText(text)
+        exportModalFrame.editBox:HighlightText()
+        exportModalFrame.editBox:SetFocus()
     end
 end
 
@@ -199,8 +299,10 @@ function UI:OpenRosterPicker(anchor, includeLegacy, onSelect)
 end
 
 function UI:RefreshRosterPicker(filter)
+    if not rosterPickerFrame or not rosterPickerFrame.scroll then return end
     local names = VM:GetGuildRosterNames(rosterPickerFrame.includeLegacy)
     local content = rosterPickerFrame.scroll.content
+    if not content then return end
     for _, r in ipairs(rosterPickerFrame.scroll.rows) do r:Hide() end
 
     local y = 0
@@ -287,6 +389,7 @@ function UI:CreateMainFrame()
     closeBtn:SetScript("OnClick", function()
         mainFrame:Hide()
         if rosterPickerFrame then rosterPickerFrame:Hide() end
+        if exportModalFrame then exportModalFrame:Hide() end
     end)
 
     local tabNames = { "Vault & Requests", "Requests", "Ledger", "Ranking", "Settings & Mains" }
@@ -372,8 +475,11 @@ function UI:BuildInventoryPanel(panel)
 end
 
 function UI:RefreshInventory()
+    if not mainFrame or not mainFrame.panels or not mainFrame.panels[1] then return end
     local panel = mainFrame.panels[1]
-    local inv = VM.db.inventory
+    if not panel or not panel.scroll or not panel.bankTabButtons then return end
+    local inv = VM.db and VM.db.inventory
+    if not inv or not inv.tabs then return end
 
     for i = 1, 6 do
         local btn = panel.bankTabButtons[i]
@@ -475,7 +581,11 @@ function UI:RefreshInventory()
         row.nameText:SetText(item.link or item.name)
         row.nameBtn:SetScript("OnEnter", function(selfBtn)
             GameTooltip:SetOwner(selfBtn, "ANCHOR_RIGHT")
-            GameTooltip:SetHyperlink(item.link)
+            if item.link and item.link:find("item:") then
+                GameTooltip:SetHyperlink(item.link)
+            else
+                GameTooltip:SetText(item.name or "Item")
+            end
             GameTooltip:Show()
         end)
         row.nameBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
@@ -510,7 +620,8 @@ function UI:RefreshInventory()
             row.qtyBox:Show()
             row.reqBtn:SetScript("OnClick", function()
                 local qty = tonumber(row.qtyBox:GetText()) or 1
-                VM.Fulfillment:CreateRequest(selectedBankTab, item.itemID, qty)
+                local itemKey = (item.itemID and item.itemID ~= 0) and item.itemID or item.name
+                VM.Fulfillment:CreateRequest(selectedBankTab, itemKey, qty)
             end)
         end
 
@@ -527,8 +638,11 @@ function UI:BuildRequestsPanel(panel)
 end
 
 function UI:RefreshRequests()
+    if not mainFrame or not mainFrame.panels or not mainFrame.panels[2] then return end
     local panel = mainFrame.panels[2]
+    if not panel or not panel.scroll then return end
     local content = panel.scroll.content
+    if not content then return end
     for _, r in ipairs(panel.scroll.rows) do r:Hide() end
 
     local list = {}
@@ -649,10 +763,16 @@ function UI:BuildLedgerPanel(panel)
         UI:RefreshRanking()
     end)
 
+    local exportBtn = CreateModernButton(topBar, 76, 22, "Export", THEME.accent)
+    exportBtn:SetPoint("RIGHT", -275, 0)
+    exportBtn:SetScript("OnClick", function()
+        UI:OpenExportModal()
+    end)
+
     if VM:IsOfficer() then
         local manualMember = ""
         local memberBtn = CreateModernDropdown(topBar, 130, 22, "Donor...")
-        memberBtn:SetPoint("RIGHT", -165, 0)
+        memberBtn:SetPoint("RIGHT", -140, 0)
         memberBtn:SetScript("OnClick", function(btn)
             UI:OpenRosterPicker(btn, false, function(chosen)
                 manualMember = chosen
@@ -660,8 +780,8 @@ function UI:BuildLedgerPanel(panel)
             end)
         end)
 
-        local goldBox = CreateModernEditBox(topBar, 55, 22, true)
-        goldBox:SetPoint("RIGHT", -104, 0)
+        local goldBox = CreateModernEditBox(topBar, 50, 22, true)
+        goldBox:SetPoint("RIGHT", -86, 0)
         goldBox.placeholder = goldBox:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
         goldBox.placeholder:SetPoint("LEFT", 6, 0)
         goldBox.placeholder:SetText("Gold")
@@ -669,7 +789,7 @@ function UI:BuildLedgerPanel(panel)
             if eb:GetText() == "" then eb.placeholder:Show() else eb.placeholder:Hide() end
         end)
 
-        local addGoldBtn = CreateModernButton(topBar, 96, 22, "+ Log Gold", { 0.25, 0.80, 0.45, 1 })
+        local addGoldBtn = CreateModernButton(topBar, 82, 22, "+ Log Gold", { 0.25, 0.80, 0.45, 1 })
         addGoldBtn:SetPoint("RIGHT", 0, 0)
         addGoldBtn:SetScript("OnClick", function()
             local g = tonumber(goldBox:GetText()) or 0
@@ -688,8 +808,11 @@ function UI:BuildLedgerPanel(panel)
 end
 
 function UI:RefreshLedger()
+    if not mainFrame or not mainFrame.panels or not mainFrame.panels[3] then return end
     local panel = mainFrame.panels[3]
+    if not panel or not panel.scroll then return end
     local content = panel.scroll.content
+    if not content then return end
     for _, r in ipairs(panel.scroll.rows) do r:Hide() end
 
     local useHist = VM.db.uiPrefs.useHistoricalPrices
@@ -710,11 +833,15 @@ function UI:RefreshLedger()
 
             row.text = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
             row.text:SetPoint("LEFT", 34, 0)
-            row.text:SetWidth(555)
+            row.text:SetWidth(530)
             row.text:SetJustifyH("LEFT")
 
             row.actionBtn = CreateModernButton(row, 125, 20, "Assign Member", THEME.accent)
             row.actionBtn:SetPoint("RIGHT", -8, 0)
+
+            row.deleteBtn = CreateModernButton(row, 20, 20, "X", { 0.85, 0.30, 0.30, 1 })
+            row.deleteBtn:SetPoint("RIGHT", -8, 0)
+            row.deleteBtn:Hide()
 
             panel.scroll.rows[rowIdx] = row
         end
@@ -736,6 +863,7 @@ function UI:RefreshLedger()
         end)
 
         header.actionBtn:Hide()
+        header.deleteBtn:Hide()
         header.text:SetPoint("LEFT", 34, 0)
 
         local goldSubNote = (grp.totalGoldIn and grp.totalGoldIn > 0)
@@ -770,6 +898,7 @@ function UI:RefreshLedger()
                 sub:SetPoint("TOPLEFT", 4, -y)
                 sub.expandBtn:Hide()
                 sub.text:SetPoint("LEFT", 40, 0)
+                sub.actionBtn:Hide()
 
                 local isGold = (tx.itemID == 0 or tx.itemLink == "GOLD")
                 local dir = (tx.type == "OUT") and "|cffff6666OUT|r" or (isGold and "|cffffd700GOLD IN|r" or "|cff44dd77IN|r")
@@ -795,8 +924,11 @@ function UI:RefreshLedger()
                             VM.Ledger:AssignUnattributed(tx.id, chosenName)
                         end)
                     end)
-                else
-                    sub.actionBtn:Hide()
+                elseif VM:IsOfficer() then
+                    sub.deleteBtn:Show()
+                    sub.deleteBtn:SetScript("OnClick", function()
+                        VM.Ledger:DeleteTransaction(tx.id)
+                    end)
                 end
 
                 y = y + 25
@@ -828,14 +960,20 @@ function UI:BuildRankingPanel(panel)
     }
 
     for i, m in ipairs(modes) do
-        local btn = CreateModernButton(topBar, 120, 24, m.label)
-        btn:SetPoint("LEFT", 65 + (i - 1) * 126, 0)
+        local btn = CreateModernButton(topBar, 110, 24, m.label)
+        btn:SetPoint("LEFT", 60 + (i - 1) * 116, 0)
         btn:SetScript("OnClick", function()
             rankingSortMode = m.key
             UI:RefreshRanking()
         end)
         panel.sortButtons[m.key] = btn
     end
+
+    local exportBtn = CreateModernButton(topBar, 76, 24, "Export", THEME.accent)
+    exportBtn:SetPoint("RIGHT", 0, 0)
+    exportBtn:SetScript("OnClick", function()
+        UI:OpenExportModal()
+    end)
 
     -- Column headers
     local colHeader = CreateFrame("Frame", nil, panel, "BackdropTemplate")
@@ -867,8 +1005,11 @@ function UI:BuildRankingPanel(panel)
 end
 
 function UI:RefreshRanking()
+    if not mainFrame or not mainFrame.panels or not mainFrame.panels[4] then return end
     local panel = mainFrame.panels[4]
-    if not panel then return end
+    if not panel or not panel.scroll or not panel.sortButtons then return end
+    local content = panel.scroll.content
+    if not content then return end
 
     for key, btn in pairs(panel.sortButtons) do
         if key == rankingSortMode then
@@ -953,7 +1094,7 @@ function UI:RefreshRanking()
 end
 
 --------------------------------------------------------------------------------
--- TAB 5: SETTINGS & MAINS
+-- TAB 5: SETTINGS & MAINS (Hierarchical Roster Tree & Bank Tab Rules)
 --------------------------------------------------------------------------------
 function UI:BuildSettingsPanel(panel)
     local ruleTitle = panel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
@@ -963,8 +1104,8 @@ function UI:BuildSettingsPanel(panel)
     panel.tabRuleRows = {}
     for i = 1, 6 do
         local r = CreateFrame("Frame", nil, panel, "BackdropTemplate")
-        r:SetSize(744, 28)
-        r:SetPoint("TOPLEFT", 14, -34 - (i - 1) * 30)
+        r:SetSize(744, 26)
+        r:SetPoint("TOPLEFT", 14, -32 - (i - 1) * 28)
         ApplyModernBackdrop(r, (i % 2 == 0) and THEME.rowEven or THEME.rowOdd, { 0, 0, 0, 0 })
 
         r.label = r:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
@@ -972,74 +1113,74 @@ function UI:BuildSettingsPanel(panel)
         r.label:SetWidth(175)
         r.label:SetJustifyH("LEFT")
 
-        r.freeBtn = CreateModernButton(r, 105, 22, "Free-for-All")
+        r.freeBtn = CreateModernButton(r, 100, 20, "Free-for-All")
         r.freeBtn:SetPoint("LEFT", 195, 0)
 
-        r.pctBtn = CreateModernButton(r, 105, 22, "% of AH Price")
-        r.pctBtn:SetPoint("LEFT", 306, 0)
+        r.pctBtn = CreateModernButton(r, 100, 20, "% of AH")
+        r.pctBtn:SetPoint("LEFT", 300, 0)
 
-        r.pctBox = CreateModernEditBox(r, 42, 22, true)
-        r.pctBox:SetPoint("LEFT", 418, 0)
+        r.pctBox = CreateModernEditBox(r, 40, 20, true)
+        r.pctBox:SetPoint("LEFT", 405, 0)
 
-        r.lockBtn = CreateModernButton(r, 95, 22, "Locked Tab")
-        r.lockBtn:SetPoint("LEFT", 468, 0)
+        r.lockBtn = CreateModernButton(r, 90, 20, "Locked")
+        r.lockBtn:SetPoint("LEFT", 450, 0)
 
         r.status = r:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-        r.status:SetPoint("LEFT", 575, 0)
+        r.status:SetPoint("LEFT", 550, 0)
 
         panel.tabRuleRows[i] = r
     end
 
-    local mainTitle = panel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    mainTitle:SetPoint("TOPLEFT", 14, -225)
-    mainTitle:SetText("|cff26a6f2LINK ALT TO MAIN / SWITCH ACTIVE MAIN|r  |cff888888(Searchable Guild Roster)|r")
+    local rosterTitle = panel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    rosterTitle:SetPoint("TOPLEFT", 14, -208)
+    rosterTitle:SetText("|cff26a6f2GUILD ROSTER & MAIN/ALT HIERARCHY TREE|r")
 
-    local altLabel = panel:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    altLabel:SetPoint("TOPLEFT", 14, -254)
-    altLabel:SetText("Alt Character:")
+    local searchBox = CreateModernEditBox(panel, 180, 22, false)
+    searchBox:SetPoint("TOPLEFT", 14, -230)
+    searchBox.placeholder = searchBox:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+    searchBox.placeholder:SetPoint("LEFT", 8, 0)
+    searchBox.placeholder:SetText("Filter character...")
+    searchBox:SetScript("OnTextChanged", function(selfBox)
+        local txt = selfBox:GetText()
+        if txt == "" then selfBox.placeholder:Show() else selfBox.placeholder:Hide() end
+        settingsSearchFilter = txt:lower()
+        UI:RefreshSettings()
+    end)
+    panel.searchBox = searchBox
 
-    panel.altDropdown = CreateModernDropdown(panel, 165, 24, "Select Alt...")
-    panel.altDropdown:SetPoint("TOPLEFT", 105, -249)
-    panel.altDropdown:SetScript("OnClick", function(btn)
-        UI:OpenRosterPicker(btn, true, function(chosen)
-            selectedAltChar = chosen
-            btn:SetText(VM:IsLegacyMember(chosen) and ("|cff808080" .. chosen .. "|r") or chosen)
+    if VM:IsOfficer() then
+        local autoSuggestBtn = CreateModernButton(panel, 130, 22, "Auto-Suggest Alts", THEME.accent)
+        autoSuggestBtn:SetPoint("TOPLEFT", 200, -230)
+        autoSuggestBtn:SetScript("OnClick", function()
+            local names = VM:GetGuildRosterNames(false)
+            local count = 0
+            for i = 1, #names do
+                for j = i + 1, #names do
+                    local n1, n2 = names[i], names[j]
+                    if n1:len() >= 4 and n2:len() >= 4 and n1:sub(1, 4):lower() == n2:sub(1, 4):lower() then
+                        local m1 = VM:GetMainFor(n1)
+                        local m2 = VM:GetMainFor(n2)
+                        if m1 == n1 and m2 == n2 and n1 ~= n2 then
+                            VM:SetMainCharacter(n1, { n2 })
+                            count = count + 1
+                        end
+                    end
+                end
+            end
+            print(string.format("|cff00ccff[Vault Manager]|r Auto-suggested and linked %d alt pairs.", count))
+            UI:RefreshSettings()
         end)
-    end)
+    end
 
-    local mainLabel = panel:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    mainLabel:SetPoint("TOPLEFT", 285, -254)
-    mainLabel:SetText("Active Main:")
-
-    panel.mainDropdown = CreateModernDropdown(panel, 165, 24, "Select Main...")
-    panel.mainDropdown:SetPoint("TOPLEFT", 365, -249)
-    panel.mainDropdown:SetScript("OnClick", function(btn)
-        UI:OpenRosterPicker(btn, true, function(chosen)
-            selectedMainChar = chosen
-            btn:SetText(VM:IsLegacyMember(chosen) and ("|cff808080" .. chosen .. "|r") or chosen)
-        end)
-    end)
-
-    local linkBtn = CreateModernButton(panel, 165, 24, "Save / Update Main", THEME.accent)
-    linkBtn:SetPoint("TOPLEFT", 545, -249)
-    linkBtn:SetScript("OnClick", function()
-        if selectedMainChar ~= "" then
-            VM:SetMainCharacter(selectedMainChar, selectedAltChar ~= "" and { selectedAltChar } or nil)
-            print(string.format("|cff00ccff[Vault Manager]|r Updated active Main to |cffffff00%s|r.", selectedMainChar))
-            selectedAltChar = ""
-            selectedMainChar = ""
-            panel.altDropdown:SetText("Select Alt...")
-            panel.mainDropdown:SetText("Select Main...")
-        else
-            print("|cffff5555[Vault Manager]|r Please select an active Main from the list first.")
-        end
-    end)
-
-    panel.linksScroll = CreateScrollArea(panel, -284, 8)
+    panel.treeScroll = CreateScrollArea(panel, -258, 8)
 end
 
 function UI:RefreshSettings()
+    if not mainFrame or not mainFrame.panels or not mainFrame.panels[5] then return end
     local panel = mainFrame.panels[5]
+    if not panel or not panel.tabRuleRows or not panel.treeScroll then return end
+    local content = panel.treeScroll.content
+    if not content then return end
     local isOff = VM:IsOfficer()
 
     for i = 1, 6 do
@@ -1079,62 +1220,125 @@ function UI:RefreshSettings()
         end
     end
 
-    local content = panel.linksScroll.content
-    for _, r in ipairs(panel.linksScroll.rows) do r:Hide() end
+    local content = panel.treeScroll.content
+    for _, r in ipairs(panel.treeScroll.rows) do r:Hide() end
 
-    local links = {}
-    for alt, entry in pairs(VM.db.mains) do
-        local main = type(entry) == "table" and entry.main or entry
-        if main and main ~= "" then
-            table.insert(links, {
-                alt = alt,
-                main = main,
-                isLegacy = VM:IsLegacyMember(alt) or VM:IsLegacyMember(main)
-            })
-        end
-    end
-
-    table.sort(links, function(a, b)
-        if a.isLegacy ~= b.isLegacy then return not a.isLegacy end
-        if a.main ~= b.main then return a.main < b.main end
-        return a.alt < b.alt
-    end)
-
+    local hierarchy = VM:GetRosterHierarchy(true)
+    local rowIdx = 0
     local y = 0
-    for idx, link in ipairs(links) do
-        local row = panel.linksScroll.rows[idx]
+
+    local function GetTreeRow()
+        rowIdx = rowIdx + 1
+        local row = panel.treeScroll.rows[rowIdx]
         if not row then
             row = CreateFrame("Frame", nil, content, "BackdropTemplate")
             row:SetSize(732, 26)
 
+            row.expandBtn = CreateModernButton(row, 20, 20, "+")
+            row.expandBtn:SetPoint("LEFT", 4, 0)
+
             row.label = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-            row.label:SetPoint("LEFT", 10, 0)
-            row.label:SetWidth(580)
+            row.label:SetPoint("LEFT", 30, 0)
+            row.label:SetWidth(380)
             row.label:SetJustifyH("LEFT")
 
-            row.unlinkBtn = CreateModernButton(row, 95, 20, "Unlink", { 0.85, 0.30, 0.30, 1 })
-            row.unlinkBtn:SetPoint("RIGHT", -8, 0)
+            row.btn1 = CreateModernButton(row, 85, 20, "Set as Alt", THEME.accent)
+            row.btn1:SetPoint("RIGHT", -95, 0)
 
-            panel.linksScroll.rows[idx] = row
+            row.btn2 = CreateModernButton(row, 85, 20, "Unlink", { 0.85, 0.30, 0.30, 1 })
+            row.btn2:SetPoint("RIGHT", -6, 0)
+
+            panel.treeScroll.rows[rowIdx] = row
         end
-
-        ApplyModernBackdrop(row, (idx % 2 == 0) and THEME.rowEven or THEME.rowOdd, { 0, 0, 0, 0 })
-        row:SetPoint("TOPLEFT", 4, -y)
         row:Show()
+        return row
+    end
 
-        if link.isLegacy then
-            row.label:SetText(string.format("|cff808080Alt: %s  ->  Active Main: %s [Legacy]|r", link.alt, link.main))
-        else
-            row.label:SetText(string.format("Alt: |cffffffff%s|r  ->  Active Main: |cffffcc33%s|r", link.alt, link.main))
+    for _, mainEntry in ipairs(hierarchy) do
+        local mainName = mainEntry.name
+        local alts = mainEntry.alts or {}
+        local hasAlts = (#alts > 0)
+        local isExpanded = expandedTreeMains[mainName]
+
+        -- Filter check
+        local matchesFilter = (settingsSearchFilter == "" or mainName:lower():find(settingsSearchFilter, 1, true))
+        if not matchesFilter then
+            for _, alt in ipairs(alts) do
+                if alt:lower():find(settingsSearchFilter, 1, true) then
+                    matchesFilter = true
+                    break
+                end
+            end
         end
 
-        row.unlinkBtn:SetScript("OnClick", function()
-            VM:UnlinkCharacter(link.alt)
-            print(string.format("|cff00ccff[Vault Manager]|r Unlinked |cffffff00%s|r from %s.", link.alt, link.main))
-        end)
+        if matchesFilter then
+            local row = GetTreeRow()
+            ApplyModernBackdrop(row, mainEntry.isLegacy and { 0.08, 0.08, 0.09, 0.85 } or THEME.rowEven, THEME.border)
+            row:SetPoint("TOPLEFT", 4, -y)
 
-        y = y + 28
+            row.expandBtn:SetPoint("LEFT", 4, 0)
+            if hasAlts then
+                row.expandBtn:Show()
+                row.expandBtn:SetText(isExpanded and "-" or "+")
+                row.expandBtn:SetScript("OnClick", function()
+                    expandedTreeMains[mainName] = not expandedTreeMains[mainName]
+                    UI:RefreshSettings()
+                end)
+            else
+                row.expandBtn:Hide()
+            end
+
+            row.label:SetPoint("LEFT", hasAlts and 30 or 10, 0)
+            if mainEntry.isLegacy then
+                row.label:SetText(string.format("|cff808080%s [Legacy]%s|r", mainName, hasAlts and string.format(" (%d alts)", #alts) or ""))
+            else
+                row.label:SetText(string.format("|cffffcc33%s|r%s", mainName, hasAlts and string.format(" |cff888888(%d alts)|r", #alts) or ""))
+            end
+
+            row.btn1:Show()
+            row.btn1:SetText("Set as Alt")
+            row.btn1:SetScript("OnClick", function(btn)
+                UI:OpenRosterPicker(btn, true, function(targetMain)
+                    if targetMain ~= mainName then
+                        VM:SetMainCharacter(targetMain, { mainName })
+                    end
+                end)
+            end)
+
+            row.btn2:Hide()
+
+            y = y + 28
+
+            if hasAlts and (isExpanded or settingsSearchFilter ~= "") then
+                for _, altName in ipairs(alts) do
+                    if settingsSearchFilter == "" or altName:lower():find(settingsSearchFilter, 1, true) then
+                        local subRow = GetTreeRow()
+                        ApplyModernBackdrop(subRow, THEME.rowOdd, { 0, 0, 0, 0 })
+                        subRow:SetPoint("TOPLEFT", 4, -y)
+
+                        subRow.expandBtn:Hide()
+                        subRow.label:SetPoint("LEFT", 35, 0)
+                        subRow.label:SetText(string.format("|cffaaaaaa└─ %s|r", altName))
+
+                        subRow.btn1:Show()
+                        subRow.btn1:SetText("Make Main")
+                        subRow.btn1:SetScript("OnClick", function()
+                            VM:SetMainCharacter(altName, { mainName })
+                        end)
+
+                        subRow.btn2:Show()
+                        subRow.btn2:SetText("Unlink")
+                        subRow.btn2:SetScript("OnClick", function()
+                            VM:UnlinkCharacter(altName)
+                        end)
+
+                        y = y + 25
+                    end
+                end
+            end
+        end
     end
+
     content:SetHeight(math.max(1, y))
 end
 
@@ -1167,9 +1371,10 @@ end
 
 function UI:ShowOfficerBankPopup(orders)
     if not popupFrame then self:CreateOfficerPopupFrame() end
-    popupFrame:Show()
-
+    if not popupFrame or not popupFrame.scroll then return end
     local content = popupFrame.scroll.content
+    if not content then return end
+    popupFrame:Show()
     for _, r in ipairs(popupFrame.scroll.rows) do r:Hide() end
 
     local y = 0
@@ -1222,27 +1427,35 @@ end
 
 function UI:RefreshAll()
     if not mainFrame or not mainFrame:IsShown() then return end
+    if not mainFrame.navButtons or not mainFrame.panels or not mainFrame.scanInfo then return end
 
-    local inv = VM.db.inventory
-    if inv.lastScan and inv.lastScan > 0 then
-        mainFrame.scanInfo:SetText(string.format("Last scanned: %s by %s",
-            date("%d/%m %H:%M", inv.lastScan), inv.scannedBy or "?"))
+    if VM.newerVersionAvailable then
+        mainFrame.scanInfo:SetText("|cffffcc33Update available|r")
     else
-        mainFrame.scanInfo:SetText("Not scanned yet (Open Guild Bank)")
+        local inv = VM.db and VM.db.inventory
+        if inv and inv.lastScan and inv.lastScan > 0 then
+            mainFrame.scanInfo:SetText(string.format("Last scanned: %s by %s",
+                date("%d/%m %H:%M", inv.lastScan), inv.scannedBy or "?"))
+        else
+            mainFrame.scanInfo:SetText("Not scanned yet (Open Guild Bank)")
+        end
     end
 
     for i = 1, 5 do
         local btn = mainFrame.navButtons[i]
-        if i == currentTab then
-            btn.activeBar:Show()
-            btn:SetBackdropColor(0.14, 0.20, 0.28, 1)
-            btn:SetBackdropBorderColor(THEME.accent[1], THEME.accent[2], THEME.accent[3], 1)
-            mainFrame.panels[i]:Show()
-        else
-            btn.activeBar:Hide()
-            btn:SetBackdropColor(THEME.btnBg[1], THEME.btnBg[2], THEME.btnBg[3], 1)
-            btn:SetBackdropBorderColor(THEME.border[1], THEME.border[2], THEME.border[3], 1)
-            mainFrame.panels[i]:Hide()
+        local panel = mainFrame.panels[i]
+        if btn and panel then
+            if i == currentTab then
+                if btn.activeBar then btn.activeBar:Show() end
+                btn:SetBackdropColor(0.14, 0.20, 0.28, 1)
+                btn:SetBackdropBorderColor(THEME.accent[1], THEME.accent[2], THEME.accent[3], 1)
+                panel:Show()
+            else
+                if btn.activeBar then btn.activeBar:Hide() end
+                btn:SetBackdropColor(THEME.btnBg[1], THEME.btnBg[2], THEME.btnBg[3], 1)
+                btn:SetBackdropBorderColor(THEME.border[1], THEME.border[2], THEME.border[3], 1)
+                panel:Hide()
+            end
         end
     end
 

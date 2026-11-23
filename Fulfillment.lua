@@ -38,7 +38,7 @@ function Fulfillment:Init()
 end
 
 -- Opret ny anmodning (Medlem)
-function Fulfillment:CreateRequest(tabIndex, itemID, count)
+function Fulfillment:CreateRequest(tabIndex, itemKey, count)
     local rule = VM:GetTabRule(tabIndex)
     if rule.mode == "LOCKED" then
         print("|cffff4444[Vault Manager]|r Denne bank-tab er låst og kan ikke bestilles fra.")
@@ -46,16 +46,25 @@ function Fulfillment:CreateRequest(tabIndex, itemID, count)
     end
 
     local tabData = VM.db.inventory.tabs[tabIndex]
-    local itemData = tabData and tabData.items[itemID]
+    local itemData = tabData and (tabData.items[itemKey] or tabData.items[tonumber(itemKey) or 0])
+    if not itemData and tabData and tabData.items then
+        for k, itm in pairs(tabData.items) do
+            if k == itemKey or itm.itemID == itemKey or itm.name == itemKey or itm.link == itemKey then
+                itemData = itm
+                itemKey = k
+                break
+            end
+        end
+    end
     if not itemData then return end
 
-    local available = itemData.count - VM:GetReservedCount(itemID, tabIndex)
+    local available = itemData.count - VM:GetReservedCount(itemKey, tabIndex)
     if count <= 0 or count > available then
         print("|cffff4444[Vault Manager]|r Ikke nok ledige items (Ledig: " .. available .. ").")
         return
     end
 
-    local ahPrice = VM:GetItemAHPrice(itemID) or 0
+    local ahPrice = (itemData.itemID ~= 0 and VM:GetItemAHPrice(itemData.itemID)) or 0
     local quotedUnit = 0
     if rule.mode == "PERCENT" and ahPrice > 0 then
         quotedUnit = math.floor(ahPrice * ((rule.percent or 50) / 100))
@@ -65,7 +74,7 @@ function Fulfillment:CreateRequest(tabIndex, itemID, count)
     local req = {
         id = reqID,
         requester = VM:GetPlayerName(),
-        itemID = itemID,
+        itemID = itemData.itemID ~= 0 and itemData.itemID or itemData.name,
         itemLink = itemData.link,
         itemName = itemData.name,
         count = count,
@@ -177,7 +186,8 @@ function Fulfillment:PopulateMail(req)
 
             if link then
                 local id = tonumber(link:match("item:(%d+)"))
-                if id == req.itemID and remaining > 0 then
+                local name = link:match("%[(.-)%]") or link
+                if id == req.itemID or name == req.itemName or req.itemID == req.itemName and remaining > 0 then
                     if C_Container and C_Container.PickupContainerItem then
                         C_Container.PickupContainerItem(bag, slot)
                     else
@@ -215,7 +225,8 @@ function Fulfillment:PopulateTrade(req)
 
             if link then
                 local id = tonumber(link:match("item:(%d+)"))
-                if id == req.itemID then
+                local name = link:match("%[(.-)%]") or link
+                if id == req.itemID or name == req.itemName or req.itemID == req.itemName then
                     if C_Container and C_Container.PickupContainerItem then
                         C_Container.PickupContainerItem(bag, slot)
                     else

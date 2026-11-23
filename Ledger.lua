@@ -27,7 +27,8 @@ function Ledger:RecordFulfillment(req, officerName)
         timestamp = now,
         updatedAt = now,
         officer = VM:NormalizeName(officerName),
-        source = "REQUEST"
+        source = "REQUEST",
+        deleted = false
     }
 
     VM.db.ledger[tx.id] = tx
@@ -37,23 +38,31 @@ end
 
 function Ledger:RecordDeposit(playerName, itemID, itemLink, count, source)
     local ahPrice = VM:GetItemAHPrice(itemID) or 0
-    local itemName = (itemLink and (GetItemInfo(itemLink) or itemLink:match("%[(.-)%]"))) or ("Item " .. itemID)
+    local cleanLink = itemLink or "item:0"
+    local itemName = "Item " .. tostring(itemID or 0)
+    if cleanLink:find("%[") then
+        local m = cleanLink:match("%[(.-)%]")
+        if m then itemName = m end
+    elseif cleanLink ~= "" and cleanLink ~= "Unknown" then
+        itemName = cleanLink:gsub("^%[", ""):gsub("%]$", "")
+    end
 
     local now = time()
     local tx = {
         id = GenerateTxID("IN"),
         type = "IN",
         player = (playerName == "UNATTRIBUTED") and "UNATTRIBUTED" or VM:NormalizeName(playerName),
-        itemID = itemID,
-        itemLink = itemLink or ("item:" .. itemID),
+        itemID = itemID or 0,
+        itemLink = cleanLink,
         itemName = itemName,
-        count = count,
+        count = count or 1,
         unitPriceAtTime = ahPrice,
         chargedUnitPrice = 0,
         timestamp = now,
         updatedAt = now,
         officer = VM:GetPlayerName(),
-        source = source or "BANK_LOG"
+        source = source or "BANK_LOG",
+        deleted = false
     }
 
     VM.db.ledger[tx.id] = tx
@@ -71,12 +80,13 @@ function Ledger:RecordGoldDeposit(playerName, copperAmount, source)
         itemLink = "GOLD",
         itemName = "Gold Deposit",
         count = 1,
-        unitPriceAtTime = copperAmount,
+        unitPriceAtTime = copperAmount or 0,
         chargedUnitPrice = 0,
         timestamp = now,
         updatedAt = now,
         officer = VM:GetPlayerName(),
-        source = source or "BANK_MONEY_LOG"
+        source = source or "BANK_MONEY_LOG",
+        deleted = false
     }
 
     VM.db.ledger[tx.id] = tx
@@ -88,6 +98,16 @@ function Ledger:AssignUnattributed(txID, memberName)
     local tx = VM.db.ledger[txID]
     if not tx then return end
     tx.player = VM:NormalizeName(memberName)
+    tx.updatedAt = time()
+    VM.Comms:BroadcastTransaction(tx)
+    if VM.UI then VM.UI:RefreshAll() end
+end
+
+function Ledger:DeleteTransaction(txID)
+    if not VM:IsOfficer() then return end
+    local tx = VM.db.ledger[txID]
+    if not tx then return end
+    tx.deleted = true
     tx.updatedAt = time()
     VM.Comms:BroadcastTransaction(tx)
     if VM.UI then VM.UI:RefreshAll() end
@@ -111,34 +131,36 @@ function Ledger:GetAggregatedByMain(useHistorical)
     local groups = {}
 
     for _, tx in pairs(VM.db.ledger) do
-        local key = (tx.player == "UNATTRIBUTED") and "UNATTRIBUTED" or VM:GetMainFor(tx.player)
-        if not groups[key] then
-            groups[key] = {
-                mainName = key,
-                isLegacy = VM:IsLegacyMember(key),
-                totalOutValue = 0,
-                totalInValue = 0,
-                totalGoldIn = 0,
-                totalItemsIn = 0,
-                totalCharged = 0,
-                transactions = {}
-            }
-        end
-
-        local val = self:GetTransactionValue(tx, useHistorical)
-        if tx.type == "OUT" then
-            groups[key].totalOutValue = groups[key].totalOutValue + val
-            groups[key].totalCharged = groups[key].totalCharged + ((tx.chargedUnitPrice or 0) * (tx.count or 0))
-        else
-            groups[key].totalInValue = groups[key].totalInValue + val
-            if tx.itemID == 0 or tx.itemLink == "GOLD" then
-                groups[key].totalGoldIn = groups[key].totalGoldIn + val
-            else
-                groups[key].totalItemsIn = groups[key].totalItemsIn + val
+        if not tx.deleted then
+            local key = (tx.player == "UNATTRIBUTED") and "UNATTRIBUTED" or VM:GetMainFor(tx.player)
+            if not groups[key] then
+                groups[key] = {
+                    mainName = key,
+                    isLegacy = VM:IsLegacyMember(key),
+                    totalOutValue = 0,
+                    totalInValue = 0,
+                    totalGoldIn = 0,
+                    totalItemsIn = 0,
+                    totalCharged = 0,
+                    transactions = {}
+                }
             end
-        end
 
-        table.insert(groups[key].transactions, tx)
+            local val = self:GetTransactionValue(tx, useHistorical)
+            if tx.type == "OUT" then
+                groups[key].totalOutValue = groups[key].totalOutValue + val
+                groups[key].totalCharged = groups[key].totalCharged + ((tx.chargedUnitPrice or 0) * (tx.count or 0))
+            else
+                groups[key].totalInValue = groups[key].totalInValue + val
+                if tx.itemID == 0 or tx.itemLink == "GOLD" then
+                    groups[key].totalGoldIn = groups[key].totalGoldIn + val
+                else
+                    groups[key].totalItemsIn = groups[key].totalItemsIn + val
+                end
+            end
+
+            table.insert(groups[key].transactions, tx)
+        end
     end
 
     local sorted = {}

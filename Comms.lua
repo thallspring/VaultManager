@@ -3,7 +3,7 @@ VM.Comms = {}
 local Comms = VM.Comms
 
 local MSG_QUEUE = {}
-local THROTTLE_INTERVAL = 0.20
+local THROTTLE_INTERVAL = 0.35
 local elapsedSinceSend = 0
 
 local function EscapeStr(s)
@@ -65,13 +65,34 @@ function Comms:SendRaw(payload)
     table.insert(MSG_QUEUE, payload)
 end
 
+function Comms:BroadcastEpoch()
+    self:SendRaw(string.format("EPOCH|%d", VM.db.dbEpoch or 1))
+end
+
 function Comms:SendHello()
+    local epoch = VM.db.dbEpoch or 1
     local invTs = VM.db.inventory.lastScan or 0
     local reqTs = self:GetMaxTimestamp(VM.db.requests, "updatedAt")
     local mainTs = self:GetMaxTimestamp(VM.db.mains, "updatedAt")
     local ruleTs = self:GetMaxTimestamp(VM.db.tabRules, "updatedAt")
     local txTs = self:GetMaxTimestamp(VM.db.ledger, "updatedAt")
-    self:SendRaw(string.format("HELLO|%d|%d|%d|%d|%d", invTs, reqTs, mainTs, ruleTs, txTs))
+    self:SendRaw(string.format("HELLO|%d|%d|%d|%d|%d|%d|%d", VM.VERSION, epoch, invTs, reqTs, mainTs, ruleTs, txTs))
+end
+
+local function CheckAndAdoptEpoch(peerEpoch)
+    if peerEpoch and peerEpoch > (VM.db.dbEpoch or 1) then
+        VM.db.dbEpoch = peerEpoch
+        VM.db.inventory = { lastScan = 0, scannedBy = "", tabs = {} }
+        VM.db.ledger = {}
+        VM.db.processedBankLogs = {}
+        VM.db.requests = {}
+        VM.db.tabRules = {}
+        VM.db.mains = {}
+        print(string.format("|cff00ccff[Vault Manager]|r Guild reset detected from peer (Epoch %d). Local data reset.", peerEpoch))
+        if VM.UI then VM.UI:RefreshAll() end
+        return true
+    end
+    return false
 end
 
 function Comms:OnMessageReceived(msg, sender)
@@ -80,12 +101,47 @@ function Comms:OnMessageReceived(msg, sender)
     local parts = { strsplit("|", msg) }
     local cmd = parts[1]
 
+    if cmd == "EPOCH" then
+        local peerEpoch = tonumber(parts[2]) or 1
+        CheckAndAdoptEpoch(peerEpoch)
+        return
+    end
+
     if cmd == "HELLO" then
-        local peerInvTs = tonumber(parts[2]) or 0
-        local peerReqTs = tonumber(parts[3]) or 0
-        local peerMainTs = tonumber(parts[4]) or 0
-        local peerRuleTs = tonumber(parts[5]) or 0
-        local peerTxTs = tonumber(parts[6]) or 0
+        local peerVersion = 2
+        local peerEpoch = 1
+        local peerInvTs, peerReqTs, peerMainTs, peerRuleTs, peerTxTs = 0, 0, 0, 0, 0
+
+        if #parts >= 8 then
+            peerVersion = tonumber(parts[2]) or 2
+            peerEpoch = tonumber(parts[3]) or 1
+            peerInvTs = tonumber(parts[4]) or 0
+            peerReqTs = tonumber(parts[5]) or 0
+            peerMainTs = tonumber(parts[6]) or 0
+            peerRuleTs = tonumber(parts[7]) or 0
+            peerTxTs = tonumber(parts[8]) or 0
+        elseif #parts >= 7 then
+            peerVersion = tonumber(parts[2]) or 2
+            peerInvTs = tonumber(parts[3]) or 0
+            peerReqTs = tonumber(parts[4]) or 0
+            peerMainTs = tonumber(parts[5]) or 0
+            peerRuleTs = tonumber(parts[6]) or 0
+            peerTxTs = tonumber(parts[7]) or 0
+        else
+            peerInvTs = tonumber(parts[2]) or 0
+            peerReqTs = tonumber(parts[3]) or 0
+            peerMainTs = tonumber(parts[4]) or 0
+            peerRuleTs = tonumber(parts[5]) or 0
+            peerTxTs = tonumber(parts[6]) or 0
+        end
+
+        if CheckAndAdoptEpoch(peerEpoch) then return end
+        if peerEpoch < (VM.db.dbEpoch or 1) then return end
+
+        if peerVersion > VM.VERSION then
+            VM.newerVersionAvailable = true
+            if VM.UI and VM.UI.RefreshAll then VM.UI:RefreshAll() end
+        end
 
         if (VM.db.inventory.lastScan or 0) > peerInvTs then
             self:BroadcastInventory()
@@ -115,6 +171,7 @@ function Comms:OnMessageReceived(msg, sender)
     elseif cmd == "INV_META" then
         local scanTime = tonumber(parts[2]) or 0
         local scannedBy = UnescapeStr(parts[3])
+        if VM.db.inventory.lastScan == 0 then return end
         if scanTime > (VM.db.inventory.lastScan or 0) then
             VM.db.inventory = {
                 lastScan = scanTime,
@@ -128,6 +185,7 @@ function Comms:OnMessageReceived(msg, sender)
         local tabIdx = tonumber(parts[3])
         local tabName = UnescapeStr(parts[4])
         local tabIcon = UnescapeStr(parts[5])
+        if VM.db.inventory.lastScan == 0 then return end
         if scanTime >= (VM.db.inventory.lastScan or 0) and tabIdx then
             VM.db.inventory.tabs[tabIdx] = VM.db.inventory.tabs[tabIdx] or { items = {} }
             VM.db.inventory.tabs[tabIdx].name = tabName
@@ -142,10 +200,12 @@ function Comms:OnMessageReceived(msg, sender)
         local itemName = UnescapeStr(parts[6])
         local itemLink = UnescapeStr(parts[7])
         local icon = UnescapeStr(parts[8])
-        if scanTime >= (VM.db.inventory.lastScan or 0) and tabIdx and itemID then
+        if VM.db.inventory.lastScan == 0 then return end
+        if scanTime >= (VM.db.inventory.lastScan or 0) and tabIdx and (itemID or itemName) then
+            local key = (itemID and itemID ~= 0) and itemID or itemName
             VM.db.inventory.tabs[tabIdx] = VM.db.inventory.tabs[tabIdx] or { name = "Tab " .. tabIdx, items = {} }
-            VM.db.inventory.tabs[tabIdx].items[itemID] = {
-                itemID = itemID,
+            VM.db.inventory.tabs[tabIdx].items[key] = {
+                itemID = itemID or 0,
                 count = count,
                 name = itemName,
                 link = itemLink,
@@ -158,7 +218,7 @@ function Comms:OnMessageReceived(msg, sender)
         local req = {
             id = UnescapeStr(parts[2]),
             requester = UnescapeStr(parts[3]),
-            itemID = tonumber(parts[4]),
+            itemID = tonumber(parts[4]) or parts[4],
             count = tonumber(parts[5]),
             tab = tonumber(parts[6]),
             status = UnescapeStr(parts[7]),
@@ -208,11 +268,12 @@ function Comms:OnMessageReceived(msg, sender)
         end
 
     elseif cmd == "TX" then
+        local isNewFormat = (#parts >= 15)
         local tx = {
             id = UnescapeStr(parts[2]),
             type = UnescapeStr(parts[3]),
             player = UnescapeStr(parts[4]),
-            itemID = tonumber(parts[5]),
+            itemID = tonumber(parts[5]) or 0,
             count = tonumber(parts[6]),
             unitPriceAtTime = tonumber(parts[7]) or 0,
             chargedUnitPrice = tonumber(parts[8]) or 0,
@@ -221,7 +282,8 @@ function Comms:OnMessageReceived(msg, sender)
             source = UnescapeStr(parts[11]),
             itemName = UnescapeStr(parts[12]),
             itemLink = UnescapeStr(parts[13]),
-            updatedAt = tonumber(parts[14]) or tonumber(parts[9]) or 0,
+            deleted = isNewFormat and (tonumber(parts[14]) == 1) or false,
+            updatedAt = tonumber(isNewFormat and parts[15] or parts[14]) or tonumber(parts[9]) or 0,
         }
         local existing = VM.db.ledger[tx.id]
         if not fromOfficer and (existing or (tx.source ~= "BANK_LOG" and tx.source ~= "BANK_MONEY_LOG")) then return end
@@ -234,22 +296,23 @@ end
 
 function Comms:BroadcastInventory()
     local inv = VM.db.inventory
-    if not inv or inv.lastScan == 0 then return end
+    if not inv or not inv.lastScan or inv.lastScan == 0 then return end
     self:SendRaw(string.format("INV_META|%d|%s", inv.lastScan, EscapeStr(inv.scannedBy)))
     for tabIdx, tabData in pairs(inv.tabs) do
         self:SendRaw(string.format("INV_TAB|%d|%d|%s|%s",
             inv.lastScan, tabIdx, EscapeStr(tabData.name), EscapeStr(tabData.icon)))
         for itemID, item in pairs(tabData.items) do
             self:SendRaw(string.format("INV_ITEM|%d|%d|%d|%d|%s|%s|%s",
-                inv.lastScan, tabIdx, itemID, item.count,
+                inv.lastScan, tabIdx, item.itemID or 0, item.count,
                 EscapeStr(item.name), EscapeStr(item.link), EscapeStr(item.icon)))
         end
     end
 end
 
 function Comms:BroadcastRequest(req)
-    self:SendRaw(string.format("REQ|%s|%s|%d|%d|%d|%s|%d|%d|%s|%s|%d|%s|%d|%s|%s",
-        EscapeStr(req.id), EscapeStr(req.requester), req.itemID, req.count, req.tab,
+    if not VM.db.inventory or VM.db.inventory.lastScan == 0 then return end
+    self:SendRaw(string.format("REQ|%s|%s|%s|%d|%d|%s|%d|%d|%s|%s|%d|%s|%d|%s|%s",
+        EscapeStr(req.id), EscapeStr(req.requester), tostring(req.itemID), req.count, req.tab,
         EscapeStr(req.status), req.createdAt or 0, req.updatedAt or 0,
         EscapeStr(req.approvedBy), EscapeStr(req.fulfilledBy),
         req.quotedUnitPrice or 0, EscapeStr(req.priceMode), req.pricePercent or 0,
@@ -257,6 +320,7 @@ function Comms:BroadcastRequest(req)
 end
 
 function Comms:BroadcastTabRules()
+    if not VM.db.inventory or VM.db.inventory.lastScan == 0 then return end
     for tabIdx, rule in pairs(VM.db.tabRules) do
         self:SendRaw(string.format("RULE|%d|%s|%d|%d",
             tabIdx, EscapeStr(rule.mode), rule.percent or 50, rule.updatedAt or 0))
@@ -272,17 +336,22 @@ function Comms:BroadcastMains()
 end
 
 function Comms:BroadcastTransaction(tx)
-    self:SendRaw(string.format("TX|%s|%s|%s|%d|%d|%d|%d|%d|%s|%s|%s|%s|%d",
+    if not VM.db.inventory or VM.db.inventory.lastScan == 0 then return end
+    local delVal = tx.deleted and 1 or 0
+    self:SendRaw(string.format("TX|%s|%s|%s|%s|%d|%d|%d|%d|%s|%s|%s|%s|%d|%d",
         EscapeStr(tx.id), EscapeStr(tx.type), EscapeStr(tx.player),
-        tx.itemID, tx.count, tx.unitPriceAtTime or 0, tx.chargedUnitPrice or 0,
+        tostring(tx.itemID), tx.count, tx.unitPriceAtTime or 0, tx.chargedUnitPrice or 0,
         tx.timestamp or 0, EscapeStr(tx.officer), EscapeStr(tx.source),
-        EscapeStr(tx.itemName), EscapeStr(tx.itemLink), tx.updatedAt or tx.timestamp or 0))
+        EscapeStr(tx.itemName), EscapeStr(tx.itemLink), delVal, tx.updatedAt or tx.timestamp or 0))
 end
 
 function Comms:BroadcastLedgerSync()
+    if not VM.db.inventory or VM.db.inventory.lastScan == 0 then return end
     local cutoff = time() - (90 * 86400)
     for _, tx in pairs(VM.db.ledger) do
-        if (tx.updatedAt or tx.timestamp or 0) > cutoff then
+        if not tx.deleted and (tx.updatedAt or tx.timestamp or 0) > cutoff then
+            self:BroadcastTransaction(tx)
+        elseif tx.deleted and (tx.updatedAt or tx.timestamp or 0) > cutoff then
             self:BroadcastTransaction(tx)
         end
     end

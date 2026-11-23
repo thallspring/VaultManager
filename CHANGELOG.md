@@ -2,6 +2,12 @@
 
 All notable changes to **Vault Manager** will be documented in this file.
 
+## [1.1.6] - 2026-11-23
+
+### Fixed & Added
+- **Lock Automatically Scanned Entries:** Scanned Guild Bank item and money logs are now strictly read-only (`isManual = false`), removing the delete "X" button from the UI and guarding against deletion in `Ledger.lua`. Only manually logged gold entries (`+ Log Gold`) retain deletion controls.
+- **Ranking Net Contribution:** Verified and updated donation ranking to calculate net contribution as `(Items Donated + Gold Deposited) - (Items Received + Gold Withdrawn)`. Direct member gold withdrawals (`[GOLD OUT]`) are subtracted from member totals while guild repairs and tab purchases remain completely excluded.
+
 ## [1.1.5] - 2026-11-23
 
 ### Fixed & Added

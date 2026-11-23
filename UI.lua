@@ -899,6 +899,7 @@ function UI:RefreshLedger()
                 sub.expandBtn:Hide()
                 sub.text:SetPoint("LEFT", 40, 0)
                 sub.actionBtn:Hide()
+                sub.deleteBtn:Hide()
 
                 local isGold = (tx.itemID == 0 or tx.itemLink == "GOLD")
                 local dir = (tx.type == "OUT") and (isGold and "|cffff6666GOLD OUT|r" or "|cffff6666OUT|r") or (isGold and "|cffffd700GOLD IN|r" or "|cff44dd77IN|r")
@@ -924,7 +925,7 @@ function UI:RefreshLedger()
                             VM.Ledger:AssignUnattributed(tx.id, chosenName)
                         end)
                     end)
-                elseif VM:IsOfficer() then
+                elseif VM:IsOfficer() and tx.isManual == true then
                     sub.deleteBtn:Show()
                     sub.deleteBtn:SetScript("OnClick", function()
                         VM.Ledger:DeleteTransaction(tx.id)
@@ -999,7 +1000,7 @@ function UI:BuildRankingPanel(panel)
 
     local cTotal = colHeader:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     cTotal:SetPoint("LEFT", 585, 0)
-    cTotal:SetText("Total Value")
+    cTotal:SetText("Net Total")
 
     panel.scroll = CreateScrollArea(panel, -72, 8)
 end
@@ -1067,12 +1068,16 @@ function UI:RefreshRanking()
         row:SetPoint("TOPLEFT", 6, -y)
         row:Show()
 
+        local dispGold = grp.netGold ~= nil and math.max(0, grp.netGold) or grp.totalGoldIn
+        local dispItems = grp.netItems ~= nil and math.max(0, grp.netItems) or grp.totalItemsIn
+        local dispTotal = grp.netTotal ~= nil and grp.netTotal or grp.totalInValue
+
         if grp.isLegacy then
             row.rankText:SetText("|cff808080-|r")
             row.nameText:SetText("|cff808080" .. grp.mainName .. " [Legacy]|r")
-            row.goldText:SetText("|cff808080" .. VM:FormatMoney(grp.totalGoldIn) .. "|r")
-            row.itemsText:SetText("|cff808080" .. VM:FormatMoney(grp.totalItemsIn) .. "|r")
-            row.totalText:SetText("|cff808080" .. VM:FormatMoney(grp.totalInValue) .. "|r")
+            row.goldText:SetText("|cff808080" .. VM:FormatMoney(dispGold) .. "|r")
+            row.itemsText:SetText("|cff808080" .. VM:FormatMoney(dispItems) .. "|r")
+            row.totalText:SetText("|cff808080" .. VM:FormatMoney(dispTotal) .. "|r")
         else
             local rankBadge = tostring(idx)
             if idx == 1 then rankBadge = "|cffffd700#1|r"
@@ -1082,9 +1087,9 @@ function UI:RefreshRanking()
 
             row.rankText:SetText(rankBadge)
             row.nameText:SetText("|cffffffff" .. grp.mainName .. "|r")
-            row.goldText:SetText(VM:FormatMoney(grp.totalGoldIn))
-            row.itemsText:SetText(VM:FormatMoney(grp.totalItemsIn))
-            row.totalText:SetText("|cff44dd77" .. VM:FormatMoney(grp.totalInValue) .. "|r")
+            row.goldText:SetText(VM:FormatMoney(dispGold))
+            row.itemsText:SetText(VM:FormatMoney(dispItems))
+            row.totalText:SetText("|cff44dd77" .. VM:FormatMoney(dispTotal) .. "|r")
         end
 
         y = y + 30

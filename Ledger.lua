@@ -28,6 +28,7 @@ function Ledger:RecordFulfillment(req, officerName)
         updatedAt = now,
         officer = VM:NormalizeName(officerName),
         source = "REQUEST",
+        isManual = false,
         deleted = false
     }
 
@@ -48,6 +49,7 @@ function Ledger:RecordDeposit(playerName, itemID, itemLink, count, source)
     end
 
     local now = time()
+    local isMan = (source == "MANUAL")
     local tx = {
         id = GenerateTxID("IN"),
         type = "IN",
@@ -62,6 +64,7 @@ function Ledger:RecordDeposit(playerName, itemID, itemLink, count, source)
         updatedAt = now,
         officer = VM:GetPlayerName(),
         source = source or "BANK_LOG",
+        isManual = isMan,
         deleted = false
     }
 
@@ -72,6 +75,7 @@ end
 
 function Ledger:RecordGoldDeposit(playerName, copperAmount, source)
     local now = time()
+    local isMan = (source == "MANUAL_GOLD" or source == "MANUAL")
     local tx = {
         id = GenerateTxID("GOLD_IN"),
         type = "IN",
@@ -86,6 +90,7 @@ function Ledger:RecordGoldDeposit(playerName, copperAmount, source)
         updatedAt = now,
         officer = VM:GetPlayerName(),
         source = source or "BANK_MONEY_LOG",
+        isManual = isMan,
         deleted = false
     }
 
@@ -110,6 +115,7 @@ function Ledger:RecordGoldWithdrawal(playerName, copperAmount, source)
         updatedAt = now,
         officer = VM:GetPlayerName(),
         source = source or "BANK_MONEY_LOG",
+        isManual = false,
         deleted = false
     }
 
@@ -130,7 +136,7 @@ end
 function Ledger:DeleteTransaction(txID)
     if not VM:IsOfficer() then return end
     local tx = VM.db.ledger[txID]
-    if not tx then return end
+    if not tx or not tx.isManual then return end
     tx.deleted = true
     tx.updatedAt = time()
     VM.Comms:BroadcastTransaction(tx)
@@ -218,12 +224,20 @@ function Ledger:GetDonationRanking(sortMode, useHistorical)
     local ranked = {}
 
     for _, grp in ipairs(allGroups) do
-        if grp.mainName ~= "UNATTRIBUTED" and grp.totalInValue > 0 then
-            local metric = grp.totalInValue
+        local netTotal = grp.totalInValue - grp.totalOutValue
+        local netGold = grp.totalGoldIn - (grp.totalGoldOut or 0)
+        local netItems = grp.totalItemsIn - (grp.totalOutValue - (grp.totalGoldOut or 0))
+
+        grp.netTotal = netTotal
+        grp.netGold = netGold
+        grp.netItems = netItems
+
+        if grp.mainName ~= "UNATTRIBUTED" and netTotal > 0 then
+            local metric = netTotal
             if sortMode == "GOLD" then
-                metric = grp.totalGoldIn
+                metric = netGold
             elseif sortMode == "ITEMS" then
-                metric = grp.totalItemsIn
+                metric = netItems
             end
 
             if metric > 0 then
@@ -236,8 +250,8 @@ function Ledger:GetDonationRanking(sortMode, useHistorical)
         if a.isLegacy ~= b.isLegacy then
             return not a.isLegacy
         end
-        local valA = (sortMode == "GOLD" and a.totalGoldIn) or (sortMode == "ITEMS" and a.totalItemsIn) or a.totalInValue
-        local valB = (sortMode == "GOLD" and b.totalGoldIn) or (sortMode == "ITEMS" and b.totalItemsIn) or b.totalInValue
+        local valA = (sortMode == "GOLD" and a.netGold) or (sortMode == "ITEMS" and a.netItems) or a.netTotal
+        local valB = (sortMode == "GOLD" and b.netGold) or (sortMode == "ITEMS" and b.netItems) or b.netTotal
         if valA ~= valB then
             return valA > valB
         end

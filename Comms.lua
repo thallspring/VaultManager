@@ -139,6 +139,10 @@ function Comms:OnMessageReceived(msg, sender)
         if peerEpoch < (VM.db.dbEpoch or 1) then return end
 
         if peerVersion > VM.VERSION then
+            if not Comms.notifiedNewVersion then
+                Comms.notifiedNewVersion = true
+                print("|cff00ccff[Vault Manager]|r A newer version of Vault Manager is available on CurseForge. Please update your addon!")
+            end
             VM.newerVersionAvailable = true
             if VM.UI and VM.UI.RefreshAll then VM.UI:RefreshAll() end
         end

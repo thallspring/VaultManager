@@ -61,8 +61,23 @@ function VM:IsOfficer()
 end
 
 function VM:IsOfficerName(name)
-    local rankIndex = self.db.rosterCache[self:NormalizeName(name)]
-    return type(rankIndex) == "number" and rankIndex <= VM.OFFICER_MAX_RANK_INDEX
+    local norm = self:NormalizeName(name)
+    if norm == "" then return false end
+    local rankIndex = self.db.rosterCache[norm]
+    if type(rankIndex) ~= "number" then
+        if IsInGuild() then
+            local total = GetNumGuildMembers() or 0
+            for i = 1, total do
+                local rName, _, rIndex = GetGuildRosterInfo(i)
+                if rName and self:NormalizeName(rName) == norm then
+                    self.db.rosterCache[norm] = rIndex or 99
+                    return (rIndex ~= nil and rIndex <= VM.OFFICER_MAX_RANK_INDEX)
+                end
+            end
+        end
+        return false
+    end
+    return rankIndex <= VM.OFFICER_MAX_RANK_INDEX
 end
 
 function VM:UpdateRosterCache()

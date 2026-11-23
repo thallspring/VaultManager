@@ -2,7 +2,7 @@ local _, VM = ...
 VM.Fulfillment = {}
 local Fulfillment = VM.Fulfillment
 
-Fulfillment.activeOrder = nil -- Den ordre officeren er i gang med at udlevere
+Fulfillment.activeOrder = nil -- Order currently being fulfilled by officer
 
 function Fulfillment:Init()
     local f = CreateFrame("Frame")
@@ -19,7 +19,7 @@ function Fulfillment:Init()
         elseif event == "MAIL_SEND_SUCCESS" then
             if self.activeOrder then
                 self:CompleteRequest(self.activeOrder.id)
-                print("|cff00ccff[Vault Manager]|r Mail sendt – bestilling markeret som fuldendt!")
+                print("|cff00ccff[Vault Manager]|r Mail sent - order marked as fulfilled!")
                 self.activeOrder = nil
             end
         elseif event == "TRADE_SHOW" then
@@ -30,18 +30,18 @@ function Fulfillment:Init()
             -- arg1 == 1 (player accepted), arg2 == 1 (target accepted)
             if self.activeOrder and arg1 == 1 and arg2 == 1 then
                 self:CompleteRequest(self.activeOrder.id)
-                print("|cff00ccff[Vault Manager]|r Trade gennemført – bestilling markeret som fuldendt!")
+                print("|cff00ccff[Vault Manager]|r Trade completed - order marked as fulfilled!")
                 self.activeOrder = nil
             end
         end
     end)
 end
 
--- Opret ny anmodning (Medlem)
+-- Create new request (Member)
 function Fulfillment:CreateRequest(tabIndex, itemKey, count)
     local rule = VM:GetTabRule(tabIndex)
     if rule.mode == "LOCKED" then
-        print("|cffff4444[Vault Manager]|r Denne bank-tab er låst og kan ikke bestilles fra.")
+        print("|cffff4444[Vault Manager]|r This bank tab is locked and cannot be ordered from.")
         return
     end
 
@@ -60,7 +60,7 @@ function Fulfillment:CreateRequest(tabIndex, itemKey, count)
 
     local available = itemData.count - VM:GetReservedCount(itemKey, tabIndex)
     if count <= 0 or count > available then
-        print("|cffff4444[Vault Manager]|r Ikke nok ledige items (Ledig: " .. available .. ").")
+        print("|cffff4444[Vault Manager]|r Not enough available items (Available: " .. available .. ").")
         return
     end
 
@@ -91,11 +91,11 @@ function Fulfillment:CreateRequest(tabIndex, itemKey, count)
 
     VM.db.requests[reqID] = req
     VM.Comms:BroadcastRequest(req)
-    print(string.format("|cff00ccff[Vault Manager]|r Anmodning sendt: %dx %s", count, itemData.link))
+    print(string.format("|cff00ccff[Vault Manager]|r Request sent: %dx %s", count, itemData.link))
     if VM.UI then VM.UI:RefreshAll() end
 end
 
--- Godkend anmodning (Officer) -> Aktiverer Soft-Lock
+-- Approve request (Officer) -> Activates soft-lock
 function Fulfillment:ApproveRequest(reqID)
     if not VM:IsOfficer() then return end
     local req = VM.db.requests[reqID]
@@ -109,7 +109,7 @@ function Fulfillment:ApproveRequest(reqID)
     if VM.UI then VM.UI:RefreshAll() end
 end
 
--- Afvis anmodning (Officer)
+-- Reject request (Officer)
 function Fulfillment:RejectRequest(reqID)
     if not VM:IsOfficer() then return end
     local req = VM.db.requests[reqID]
@@ -123,7 +123,7 @@ function Fulfillment:RejectRequest(reqID)
     if VM.UI then VM.UI:RefreshAll() end
 end
 
--- Markér bestilling som fuldendt -> Bogfør i regnskab & frigiv soft-lock
+-- Mark order as fulfilled -> Record in ledger & release soft-lock
 function Fulfillment:CompleteRequest(reqID)
     if not VM:IsOfficer() then return end
     local req = VM.db.requests[reqID]
@@ -149,7 +149,7 @@ function Fulfillment:GetApprovedOrders()
     return list
 end
 
--- Viser popup når en officer åbner Guild Bank og der ligger godkendte ordrer
+-- Shows popup when an officer opens the Guild Bank and there are approved orders
 function Fulfillment:OnGuildBankOpened()
     local approved = self:GetApprovedOrders()
     if #approved > 0 and VM.UI then
@@ -157,10 +157,10 @@ function Fulfillment:OnGuildBankOpened()
     end
 end
 
--- Finder items i spillerens egne tasker og lægger dem i Send Mail
+-- Finds items in player's bags and places them in Send Mail
 function Fulfillment:PopulateMail(req)
     if not SendMailFrame or not SendMailFrame:IsVisible() then
-        MailFrameTab_OnClick(nil, 2) -- Skift til Send Mail tab
+        MailFrameTab_OnClick(nil, 2) -- Switch to Send Mail tab
     end
     SendMailNameEditBox:SetText(req.requester)
     SendMailSubjectEditBox:SetText(string.format("Guild Bank: %dx %s", req.count, req.itemName))
@@ -201,11 +201,11 @@ function Fulfillment:PopulateMail(req)
     end
 end
 
--- Finder items i spillerens tasker og lægger dem i Trade-vinduet
+-- Finds items in player's bags and places them in Trade window
 function Fulfillment:PopulateTrade(req)
     local tradeTarget = VM:NormalizeName(UnitName("NPC") or "")
     if tradeTarget ~= req.requester then
-        print(string.format("|cffffaa00[Vault Manager]|r Du handler med %s, men ordren er til %s.", tradeTarget, req.requester))
+        print(string.format("|cffffaa00[Vault Manager]|r Trading with %s, but order is for %s.", tradeTarget, req.requester))
         return
     end
 

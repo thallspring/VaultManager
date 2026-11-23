@@ -132,6 +132,8 @@ end
 
 function Scanner:ScanBank()
     local numTabs = GB_API.GetNumTabs()
+    if numTabs == 0 then return 0 end
+
     local newTabs = {}
     local totalItemsScanned = 0
     local uniqueItemsCount = 0
@@ -183,6 +185,20 @@ function Scanner:ScanBank()
         end
     end
 
+    if totalItemsScanned == 0 and VM.db.inventory and VM.db.inventory.tabs and next(VM.db.inventory.tabs) then
+        local hasExistingItems = false
+        for _, tabData in pairs(VM.db.inventory.tabs) do
+            if tabData.items and next(tabData.items) then
+                hasExistingItems = true
+                break
+            end
+        end
+        if hasExistingItems then
+            VM:LogDebug("ScanBank skipped overwriting with empty data (server data pending).")
+            return 0
+        end
+    end
+
     VM.db.inventory = {
         lastScan = time(),
         scannedBy = VM:GetPlayerName(),
@@ -197,6 +213,7 @@ end
 function Scanner:ScanLogs()
     local numTabs = GB_API.GetNumTabs()
     local addedCount = 0
+    VM.db.processedBankLogs = VM.db.processedBankLogs or {}
 
     for tab = 1, numTabs do
         if QueryGuildBankLog then QueryGuildBankLog(tab) end
@@ -216,17 +233,21 @@ function Scanner:ScanLogs()
                 local normName = (name and name ~= "") and VM:NormalizeName(name) or "UNATTRIBUTED"
                 count = tonumber(count) or 1
 
-                local exists = false
-                for _, existingTx in pairs(VM.db.ledger) do
-                    if not existingTx.deleted and existingTx.player == normName and existingTx.count == count and (existingTx.itemLink == cleanLink or existingTx.itemName == cleanLink) then
-                        exists = true
-                        break
+                local sig = string.format("t%d_i%d_%s_%s_%d", tab, i, normName, cleanLink, count)
+                if not VM.db.processedBankLogs[sig] then
+                    VM.db.processedBankLogs[sig] = true
+                    local exists = false
+                    for _, existingTx in pairs(VM.db.ledger) do
+                        if not existingTx.deleted and existingTx.player == normName and existingTx.count == count and (existingTx.itemLink == cleanLink or existingTx.itemName == cleanLink) then
+                            exists = true
+                            break
+                        end
                     end
-                end
 
-                if not exists then
-                    VM.Ledger:RecordDeposit(normName, itemID, cleanLink, count, "BANK_LOG")
-                    addedCount = addedCount + 1
+                    if not exists then
+                        VM.Ledger:RecordDeposit(normName, itemID, cleanLink, count, "BANK_LOG")
+                        addedCount = addedCount + 1
+                    end
                 end
             end
         end
@@ -247,6 +268,7 @@ function Scanner:ScanMoneyLogs()
     end
     local numMoneyTx = GB_API.GetNumMoneyTransactions()
     local addedCount = 0
+    VM.db.processedBankLogs = VM.db.processedBankLogs or {}
 
     for i = 1, numMoneyTx do
         local txType, name, amount = GB_API.GetMoneyTransaction(i)
@@ -256,17 +278,21 @@ function Scanner:ScanMoneyLogs()
             local normName = (name and name ~= "") and VM:NormalizeName(name) or "UNATTRIBUTED"
             local copper = tonumber(amount) or 0
 
-            local exists = false
-            for _, existingTx in pairs(VM.db.ledger) do
-                if not existingTx.deleted and existingTx.player == normName and (existingTx.unitPriceAtTime * (existingTx.count or 1)) == copper and (existingTx.itemLink == "GOLD" or existingTx.source == "BANK_MONEY_LOG") then
-                    exists = true
-                    break
+            local sig = string.format("money_%d_%s_%d", i, normName, copper)
+            if not VM.db.processedBankLogs[sig] then
+                VM.db.processedBankLogs[sig] = true
+                local exists = false
+                for _, existingTx in pairs(VM.db.ledger) do
+                    if not existingTx.deleted and existingTx.player == normName and (existingTx.unitPriceAtTime * (existingTx.count or 1)) == copper and (existingTx.itemLink == "GOLD" or existingTx.source == "BANK_MONEY_LOG") then
+                        exists = true
+                        break
+                    end
                 end
-            end
 
-            if not exists then
-                VM.Ledger:RecordGoldDeposit(normName, copper, "BANK_MONEY_LOG")
-                addedCount = addedCount + 1
+                if not exists then
+                    VM.Ledger:RecordGoldDeposit(normName, copper, "BANK_MONEY_LOG")
+                    addedCount = addedCount + 1
+                end
             end
         end
     end

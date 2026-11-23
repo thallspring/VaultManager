@@ -2,6 +2,14 @@
 
 All notable changes to **Vault Manager** will be documented in this file.
 
+## [1.1.3] - 2026-11-23
+
+### Fixed
+- **Guild Bank & Tab Caching:** Prevented asynchronous guild bank scans from overwriting valid cached inventory data with empty tables when opening the bank before server packet data arrives.
+- **Transaction Deduplication:** Implemented robust deterministic transaction log deduplication using processed entry signatures (`processedBankLogs`) to eliminate duplicate ledger entries on repeated scans.
+- **Officer & Version Validation:** Enhanced officer rank safety with dynamic guild roster fallback (`IsOfficerName`), and added a one-time session notification when a peer is running a newer addon version.
+- **Localization:** Translated all comments and output messages strictly to English across all addon modules.
+
 ## [1.1.0] - 2026-11-22
 
 ### Added

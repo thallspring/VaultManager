@@ -2,9 +2,10 @@ local ADDON_NAME, VM = ...
 _G.VaultManager = VM
 
 VM.PREFIX = "VMGR_V1"
-VM.VERSION = 3
+VM.VERSION = 4
 VM.OFFICER_MAX_RANK_INDEX = 1
 VM.debugLog = {}
+VM.pendingTradePayments = {}
 
 function VM:LogDebug(msg)
     local line = string.format("[%s] %s", date("%H:%M:%S"), tostring(msg or ""))
@@ -29,6 +30,8 @@ local DEFAULT_DB = {
     rosterCache = {},
     uiPrefs = {
         useHistoricalPrices = false,
+        hideOfficers = false,
+        rankingPeriod = "ALL",
     }
 }
 
@@ -266,15 +269,63 @@ function VM:GetRosterHierarchy(includeLegacy)
 end
 
 function VM:HasPriceAddon()
-    return Auctionator ~= nil and Auctionator.API ~= nil and Auctionator.API.v1 ~= nil
+    if Auctionator and Auctionator.API and Auctionator.API.v1 then return true end
+    if Atr_GetAuctionBuyout then return true end
+    if TSM_API and TSM_API.GetCustomPriceValueFromItemString then return true end
+    if aux and aux.history then return true end
+    if AucAdvanced and AucAdvanced.API and AucAdvanced.API.GetMarketValue then return true end
+    return false
 end
 
-function VM:GetItemAHPrice(itemID)
-    if not itemID or not self:HasPriceAddon() then return nil end
-    local ok, price = pcall(Auctionator.API.v1.GetAuctionPriceByItemID, ADDON_NAME, itemID)
-    if ok and type(price) == "number" and price > 0 then
-        return price
+function VM:GetItemAHPrice(itemID, itemLink)
+    if not itemID or itemID == 0 then return nil end
+
+    -- 1. TradeSkillMaster (TSM_API)
+    if TSM_API and TSM_API.GetCustomPriceValueFromItemString then
+        local ok, price = pcall(TSM_API.GetCustomPriceValueFromItemString, "DBMarket", "i:" .. tostring(itemID))
+        if ok and type(price) == "number" and price > 0 then
+            return price
+        end
     end
+
+    -- 2. Auctionator (API v1 or classic Atr_GetAuctionBuyout)
+    if Auctionator and Auctionator.API and Auctionator.API.v1 then
+        local ok, price = pcall(Auctionator.API.v1.GetAuctionPriceByItemID, ADDON_NAME, itemID)
+        if ok and type(price) == "number" and price > 0 then
+            return price
+        end
+    end
+    if Atr_GetAuctionBuyout then
+        local ok, price = pcall(Atr_GetAuctionBuyout, itemLink or itemID)
+        if ok and type(price) == "number" and price > 0 then
+            return price
+        end
+    end
+
+    -- 3. Aux (aux.history)
+    if aux and aux.history and aux.history.value then
+        local ok, price = pcall(aux.history.value, itemID)
+        if ok and type(price) == "number" and price > 0 then
+            return price
+        end
+    end
+
+    -- 4. Auctioneer (AucAdvanced)
+    if AucAdvanced and AucAdvanced.API and AucAdvanced.API.GetMarketValue then
+        local ok, price = pcall(AucAdvanced.API.GetMarketValue, itemLink or ("item:" .. tostring(itemID)))
+        if ok and type(price) == "number" and price > 0 then
+            return price
+        end
+    end
+
+    -- 5. Vendor Sell Price Fallback
+    if GetItemInfo then
+        local _, _, _, _, _, _, _, _, _, _, sellPrice = GetItemInfo(itemID)
+        if type(sellPrice) == "number" and sellPrice > 0 then
+            return sellPrice
+        end
+    end
+
     return nil
 end
 
@@ -362,6 +413,10 @@ initFrame:SetScript("OnEvent", function(_, event, arg1)
         VM.Comms:Init()
         VM.Fulfillment:Init()
         VM.UI:Init()
+
+        if VM.Ledger and VM.Ledger.CompactMonthlyHistory then
+            VM.Ledger:CompactMonthlyHistory()
+        end
 
         SLASH_VAULTMANAGER1 = "/vm"
         SLASH_VAULTMANAGER2 = "/vaultmanager"

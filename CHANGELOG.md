@@ -2,6 +2,20 @@
 
 All notable changes to **Vault Manager** will be documented in this file.
 
+## [1.2.0] - 2026-11-23
+
+### Added & Enhanced
+- **Expandable Nested Ranking Breakdown:** Every player row in the Ranking tab is now expandable (+/- toggle), displaying all transactions with Date, Direction (`[IN]`, `[OUT]`, `[GOLD IN]`, `[GOLD OUT]`), item/gold links, locked price at transaction time, and current AH value.
+- **Ranking Terminology & Controls:** Adopted clear "Contributed", "Received", and "Net Balance" columns. Added a "Hide Officers" checkbox toggle and a period filter dropdown ("All-Time", "Current Month", "Previous Month").
+- **Officer Payment Tracking & Attribution:**
+  - *Trade-to-Bank Auto-Attribution:* Hooked trade money transfers so gold handed to officers during fulfillment auto-attributes to the paying member upon bank deposit.
+  - *Manual Gold Reassignment:* Added a "Reassign" button on `[GOLD IN]` entries in the Ledger for officers to attribute deposits to the actual paying member while preserving raw audit trails.
+- **Automatic Scanning & Dynamic Status Button:** Full bank scanning runs automatically on bank frame open and slot changes with a 0.6s debounce timer. Added a central status button in the header reflecting scan state ("Scan Complete", "Scanning...", "Force Scan").
+- **Multi-Addon AH Pricing & Peer Snapshots:** Unified price lookup across TradeSkillMaster (TSM), Auctionator, Aux, Auctioneer, and vendor fallbacks. Snapshots are synchronized via P2P so peers without AH addons see consistent pricing.
+- **Markdown & CSV Data Export:** Enhanced the Export modal to generate copy-ready Markdown tables formatted for Discord pasting as well as CSV.
+- **Monthly History Compaction:** Added automated rollup of ledger transactions older than 60 days into monthly summary entries per Main, keeping SavedVariables compact and sync lightweight.
+- **Protocol & Version Bump:** Bumped `VM.VERSION` to 4 and updated peer version alerts.
+
 ## [1.1.6] - 2026-11-23
 
 ### Fixed & Added

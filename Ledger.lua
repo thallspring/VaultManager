@@ -38,7 +38,7 @@ function Ledger:RecordFulfillment(req, officerName)
 end
 
 function Ledger:RecordDeposit(playerName, itemID, itemLink, count, source)
-    local ahPrice = VM:GetItemAHPrice(itemID) or 0
+    local ahPrice = VM:GetItemAHPrice(itemID, itemLink) or 0
     local cleanLink = itemLink or "item:0"
     local itemName = "Item " .. tostring(itemID or 0)
     if cleanLink:find("%[") then
@@ -73,13 +73,16 @@ function Ledger:RecordDeposit(playerName, itemID, itemLink, count, source)
     return tx
 end
 
-function Ledger:RecordGoldDeposit(playerName, copperAmount, source)
+function Ledger:RecordGoldDeposit(playerName, copperAmount, source, rawSender, attributedTo)
     local now = time()
     local isMan = (source == "MANUAL_GOLD" or source == "MANUAL")
+    local finalPlayer = attributedTo or playerName
     local tx = {
         id = GenerateTxID("GOLD_IN"),
         type = "IN",
-        player = (playerName == "UNATTRIBUTED") and "UNATTRIBUTED" or VM:NormalizeName(playerName),
+        player = (finalPlayer == "UNATTRIBUTED") and "UNATTRIBUTED" or VM:NormalizeName(finalPlayer),
+        rawSender = (rawSender and rawSender ~= "") and VM:NormalizeName(rawSender) or VM:NormalizeName(playerName),
+        attributedTo = (attributedTo and attributedTo ~= "") and VM:NormalizeName(attributedTo) or VM:NormalizeName(playerName),
         itemID = 0,
         itemLink = "GOLD",
         itemName = "Gold Deposit",
@@ -124,6 +127,22 @@ function Ledger:RecordGoldWithdrawal(playerName, copperAmount, source)
     return tx
 end
 
+function Ledger:ReassignGoldDeposit(txID, newPlayerName)
+    if not VM:IsOfficer() then return end
+    local tx = VM.db.ledger[txID]
+    if not tx then return end
+    local norm = VM:NormalizeName(newPlayerName)
+    if norm == "" then return end
+
+    tx.rawSender = tx.rawSender or tx.player
+    tx.attributedTo = norm
+    tx.player = norm
+    tx.updatedAt = time()
+
+    VM.Comms:BroadcastTransaction(tx)
+    if VM.UI then VM.UI:RefreshAll() end
+end
+
 function Ledger:AssignUnattributed(txID, memberName)
     local tx = VM.db.ledger[txID]
     if not tx then return end
@@ -152,16 +171,34 @@ function Ledger:GetTransactionValue(tx, useHistorical)
     if useHistorical then
         unitVal = tx.unitPriceAtTime or 0
     else
-        unitVal = VM:GetItemAHPrice(tx.itemID) or tx.unitPriceAtTime or 0
+        unitVal = VM:GetItemAHPrice(tx.itemID, tx.itemLink) or tx.unitPriceAtTime or 0
     end
     return unitVal * (tx.count or 0)
 end
 
-function Ledger:GetAggregatedByMain(useHistorical)
+local function MatchesPeriod(txTimestamp, period)
+    if not period or period == "ALL" or period == "" then return true end
+    local txDate = date("*t", txTimestamp or 0)
+    local nowDate = date("*t", time())
+    if period == "CURRENT" then
+        return txDate.year == nowDate.year and txDate.month == nowDate.month
+    elseif period == "PREVIOUS" then
+        local prevMonth = nowDate.month - 1
+        local prevYear = nowDate.year
+        if prevMonth <= 0 then
+            prevMonth = 12
+            prevYear = prevYear - 1
+        end
+        return txDate.year == prevYear and txDate.month == prevMonth
+    end
+    return true
+end
+
+function Ledger:GetAggregatedByMain(useHistorical, periodFilter)
     local groups = {}
 
     for _, tx in pairs(VM.db.ledger) do
-        if not tx.deleted then
+        if not tx.deleted and MatchesPeriod(tx.timestamp, periodFilter) then
             local key = (tx.player == "UNATTRIBUTED") and "UNATTRIBUTED" or VM:GetMainFor(tx.player)
             if not groups[key] then
                 groups[key] = {
@@ -178,7 +215,13 @@ function Ledger:GetAggregatedByMain(useHistorical)
             end
 
             local val = self:GetTransactionValue(tx, useHistorical)
-            if tx.type == "OUT" then
+            if tx.type == "SUMMARY" then
+                groups[key].totalInValue = groups[key].totalInValue + (tx.contributed or 0)
+                groups[key].totalOutValue = groups[key].totalOutValue + (tx.received or 0)
+                groups[key].totalGoldIn = groups[key].totalGoldIn + (tx.goldIn or 0)
+                groups[key].totalGoldOut = (groups[key].totalGoldOut or 0) + (tx.goldOut or 0)
+                groups[key].totalItemsIn = groups[key].totalItemsIn + (tx.itemsIn or 0)
+            elseif tx.type == "OUT" then
                 groups[key].totalOutValue = groups[key].totalOutValue + val
                 groups[key].totalCharged = groups[key].totalCharged + ((tx.chargedUnitPrice or 0) * (tx.count or 0))
                 if tx.itemID == 0 or tx.itemLink == "GOLD" then
@@ -218,29 +261,23 @@ function Ledger:GetAggregatedByMain(useHistorical)
     return sorted
 end
 
--- Donation leaderboard (sortMode: "TOTAL" | "GOLD" | "ITEMS")
-function Ledger:GetDonationRanking(sortMode, useHistorical)
-    local allGroups = self:GetAggregatedByMain(useHistorical)
+-- Donation leaderboard (sortMode: "TOTAL" | "GOLD" | "ITEMS", periodFilter, hideOfficers)
+function Ledger:GetDonationRanking(sortMode, useHistorical, periodFilter, hideOfficers)
+    local allGroups = self:GetAggregatedByMain(useHistorical, periodFilter)
     local ranked = {}
 
     for _, grp in ipairs(allGroups) do
-        local netTotal = grp.totalInValue - grp.totalOutValue
-        local netGold = grp.totalGoldIn - (grp.totalGoldOut or 0)
-        local netItems = grp.totalItemsIn - (grp.totalOutValue - (grp.totalGoldOut or 0))
+        local isOfficer = VM:IsOfficerName(grp.mainName)
+        if (not hideOfficers or not isOfficer) and grp.mainName ~= "UNATTRIBUTED" then
+            local netTotal = grp.totalInValue - grp.totalOutValue
+            local netGold = grp.totalGoldIn - (grp.totalGoldOut or 0)
+            local netItems = grp.totalItemsIn - (grp.totalOutValue - (grp.totalGoldOut or 0))
 
-        grp.netTotal = netTotal
-        grp.netGold = netGold
-        grp.netItems = netItems
+            grp.netTotal = netTotal
+            grp.netGold = netGold
+            grp.netItems = netItems
 
-        if grp.mainName ~= "UNATTRIBUTED" and netTotal > 0 then
-            local metric = netTotal
-            if sortMode == "GOLD" then
-                metric = netGold
-            elseif sortMode == "ITEMS" then
-                metric = netItems
-            end
-
-            if metric > 0 then
+            if netTotal > 0 or grp.totalInValue > 0 then
                 table.insert(ranked, grp)
             end
         end
@@ -259,4 +296,89 @@ function Ledger:GetDonationRanking(sortMode, useHistorical)
     end)
 
     return ranked
+end
+
+-- Monthly History Compaction (Rolls up ledger entries older than 60 days into monthly summaries)
+function Ledger:CompactMonthlyHistory()
+    if not VM.db or not VM.db.ledger then return end
+    local cutoff = time() - (60 * 86400)
+    local groups = {}
+
+    for id, tx in pairs(VM.db.ledger) do
+        if not tx.deleted and not tx.isCompacted and (tx.timestamp or 0) < cutoff and tx.type ~= "SUMMARY" then
+            local ym = date("%Y-%m", tx.timestamp or 0)
+            local main = (tx.player == "UNATTRIBUTED") and "UNATTRIBUTED" or VM:GetMainFor(tx.player)
+            local key = main .. "_" .. ym
+            if not groups[key] then
+                groups[key] = {
+                    txs = {},
+                    totalIn = 0,
+                    totalOut = 0,
+                    totalGoldIn = 0,
+                    totalGoldOut = 0,
+                    totalItemsIn = 0,
+                    main = main,
+                    ym = ym,
+                    ts = tx.timestamp or 0
+                }
+            end
+
+            local val = self:GetTransactionValue(tx, true)
+            if tx.type == "OUT" then
+                groups[key].totalOut = groups[key].totalOut + val
+                if tx.itemID == 0 or tx.itemLink == "GOLD" then
+                    groups[key].totalGoldOut = groups[key].totalGoldOut + val
+                end
+            else
+                groups[key].totalIn = groups[key].totalIn + val
+                if tx.itemID == 0 or tx.itemLink == "GOLD" then
+                    groups[key].totalGoldIn = groups[key].totalGoldIn + val
+                else
+                    groups[key].totalItemsIn = groups[key].totalItemsIn + val
+                end
+            end
+            table.insert(groups[key].txs, id)
+        end
+    end
+
+    local compactedCount = 0
+    for key, g in pairs(groups) do
+        if #g.txs > 1 then
+            local summaryID = string.format("SUM_%s_%s", g.main, g.ym)
+            local summaryTx = {
+                id = summaryID,
+                type = "SUMMARY",
+                player = g.main,
+                itemName = string.format("%s Monthly Summary", g.ym),
+                itemLink = "SUMMARY",
+                itemID = 0,
+                isManual = false,
+                isCompacted = true,
+                contributed = g.totalIn,
+                received = g.totalOut,
+                goldIn = g.totalGoldIn,
+                goldOut = g.totalGoldOut,
+                itemsIn = g.totalItemsIn,
+                unitPriceAtTime = g.totalIn - g.totalOut,
+                chargedUnitPrice = 0,
+                count = 1,
+                timestamp = g.ts,
+                updatedAt = time(),
+                officer = VM:GetPlayerName(),
+                source = "COMPACTED",
+                deleted = false
+            }
+
+            for _, oldID in ipairs(g.txs) do
+                VM.db.ledger[oldID] = nil
+            end
+
+            VM.db.ledger[summaryID] = summaryTx
+            compactedCount = compactedCount + 1
+        end
+    end
+
+    if compactedCount > 0 then
+        VM:LogDebug(string.format("Compacted %d monthly ledger summaries.", compactedCount))
+    end
 end

@@ -141,7 +141,7 @@ function Comms:OnMessageReceived(msg, sender)
         if peerVersion > VM.VERSION then
             if not Comms.notifiedNewVersion then
                 Comms.notifiedNewVersion = true
-                print("|cff00ccff[Vault Manager]|r A newer version of Vault Manager is available on CurseForge. Please update your addon!")
+                print(string.format("|cff00ccff[Vault Manager]|r A newer version of Vault Manager is available on CurseForge (peer running protocol v%d). Please update your addon!", peerVersion))
             end
             VM.newerVersionAvailable = true
             if VM.UI and VM.UI.RefreshAll then VM.UI:RefreshAll() end
@@ -204,6 +204,7 @@ function Comms:OnMessageReceived(msg, sender)
         local itemName = UnescapeStr(parts[6])
         local itemLink = UnescapeStr(parts[7])
         local icon = UnescapeStr(parts[8])
+        local ahPrice = tonumber(parts[9]) or 0
         if VM.db.inventory.lastScan == 0 then return end
         if scanTime >= (VM.db.inventory.lastScan or 0) and tabIdx and (itemID or itemName) then
             local key = (itemID and itemID ~= 0) and itemID or itemName
@@ -213,7 +214,8 @@ function Comms:OnMessageReceived(msg, sender)
                 count = count,
                 name = itemName,
                 link = itemLink,
-                icon = icon
+                icon = icon,
+                ahPrice = ahPrice
             }
             if VM.UI then VM.UI:RefreshAll() end
         end
@@ -288,6 +290,9 @@ function Comms:OnMessageReceived(msg, sender)
             itemLink = UnescapeStr(parts[13]),
             deleted = isNewFormat and (tonumber(parts[14]) == 1) or false,
             updatedAt = tonumber(isNewFormat and parts[15] or parts[14]) or tonumber(parts[9]) or 0,
+            rawSender = (#parts >= 16) and UnescapeStr(parts[16]) or UnescapeStr(parts[4]),
+            attributedTo = (#parts >= 17) and UnescapeStr(parts[17]) or UnescapeStr(parts[4]),
+            isManual = (UnescapeStr(parts[11]) == "MANUAL_GOLD" or UnescapeStr(parts[11]) == "MANUAL")
         }
         local existing = VM.db.ledger[tx.id]
         if not fromOfficer and (existing or (tx.source ~= "BANK_LOG" and tx.source ~= "BANK_MONEY_LOG")) then return end
@@ -306,9 +311,9 @@ function Comms:BroadcastInventory()
         self:SendRaw(string.format("INV_TAB|%d|%d|%s|%s",
             inv.lastScan, tabIdx, EscapeStr(tabData.name), EscapeStr(tabData.icon)))
         for itemID, item in pairs(tabData.items) do
-            self:SendRaw(string.format("INV_ITEM|%d|%d|%d|%d|%s|%s|%s",
+            self:SendRaw(string.format("INV_ITEM|%d|%d|%d|%d|%s|%s|%s|%d",
                 inv.lastScan, tabIdx, item.itemID or 0, item.count,
-                EscapeStr(item.name), EscapeStr(item.link), EscapeStr(item.icon)))
+                EscapeStr(item.name), EscapeStr(item.link), EscapeStr(item.icon), item.ahPrice or 0))
         end
     end
 end
@@ -342,11 +347,12 @@ end
 function Comms:BroadcastTransaction(tx)
     if not VM.db.inventory or VM.db.inventory.lastScan == 0 then return end
     local delVal = tx.deleted and 1 or 0
-    self:SendRaw(string.format("TX|%s|%s|%s|%s|%d|%d|%d|%d|%s|%s|%s|%s|%d|%d",
+    self:SendRaw(string.format("TX|%s|%s|%s|%s|%d|%d|%d|%d|%s|%s|%s|%s|%d|%d|%s|%s",
         EscapeStr(tx.id), EscapeStr(tx.type), EscapeStr(tx.player),
         tostring(tx.itemID), tx.count, tx.unitPriceAtTime or 0, tx.chargedUnitPrice or 0,
         tx.timestamp or 0, EscapeStr(tx.officer), EscapeStr(tx.source),
-        EscapeStr(tx.itemName), EscapeStr(tx.itemLink), delVal, tx.updatedAt or tx.timestamp or 0))
+        EscapeStr(tx.itemName), EscapeStr(tx.itemLink), delVal, tx.updatedAt or tx.timestamp or 0,
+        EscapeStr(tx.rawSender or tx.player), EscapeStr(tx.attributedTo or tx.player)))
 end
 
 function Comms:BroadcastLedgerSync()

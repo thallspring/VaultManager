@@ -4,12 +4,17 @@ local Fulfillment = VM.Fulfillment
 
 Fulfillment.activeOrder = nil -- Order currently being fulfilled by officer
 
+local currentTradeTargetMoney = 0
+local currentTradeTargetName = ""
+
 function Fulfillment:Init()
     local f = CreateFrame("Frame")
     f:RegisterEvent("MAIL_SHOW")
     f:RegisterEvent("MAIL_SEND_SUCCESS")
     f:RegisterEvent("TRADE_SHOW")
+    f:RegisterEvent("TRADE_MONEY_CHANGED")
     f:RegisterEvent("TRADE_ACCEPT_UPDATE")
+    f:RegisterEvent("TRADE_CLOSED")
 
     f:SetScript("OnEvent", function(_, event, arg1, arg2)
         if event == "MAIL_SHOW" then
@@ -23,16 +28,36 @@ function Fulfillment:Init()
                 self.activeOrder = nil
             end
         elseif event == "TRADE_SHOW" then
+            currentTradeTargetMoney = 0
+            currentTradeTargetName = VM:NormalizeName(UnitName("NPC") or "")
             if self.activeOrder then
                 C_Timer.After(0.2, function() self:PopulateTrade(self.activeOrder) end)
             end
+        elseif event == "TRADE_MONEY_CHANGED" then
+            currentTradeTargetMoney = GetTargetTradeMoney and GetTargetTradeMoney() or 0
         elseif event == "TRADE_ACCEPT_UPDATE" then
             -- arg1 == 1 (player accepted), arg2 == 1 (target accepted)
-            if self.activeOrder and arg1 == 1 and arg2 == 1 then
-                self:CompleteRequest(self.activeOrder.id)
-                print("|cff00ccff[Vault Manager]|r Trade completed - order marked as fulfilled!")
-                self.activeOrder = nil
+            if arg1 == 1 and arg2 == 1 then
+                if currentTradeTargetMoney > 0 and currentTradeTargetName ~= "" then
+                    VM.pendingTradePayments = VM.pendingTradePayments or {}
+                    local payerMain = VM:GetMainFor(currentTradeTargetName)
+                    table.insert(VM.pendingTradePayments, {
+                        amount = currentTradeTargetMoney,
+                        payer = payerMain,
+                        rawPayer = currentTradeTargetName,
+                        timestamp = time()
+                    })
+                    VM:LogDebug(string.format("Recorded pending trade payment: %s from %s", VM:FormatMoney(currentTradeTargetMoney), payerMain))
+                end
+                if self.activeOrder then
+                    self:CompleteRequest(self.activeOrder.id)
+                    print("|cff00ccff[Vault Manager]|r Trade completed - order marked as fulfilled!")
+                    self.activeOrder = nil
+                end
             end
+        elseif event == "TRADE_CLOSED" then
+            currentTradeTargetMoney = 0
+            currentTradeTargetName = ""
         end
     end)
 end

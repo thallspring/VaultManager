@@ -4,9 +4,11 @@ local Scanner = VM.BankScanner
 
 local MAX_SLOTS_PER_TAB = 98
 local lastScanTime = 0
-local SCAN_COOLDOWN = 4.0
-local logUpdatePending = false
-local logUpdateTimer = nil
+local SCAN_COOLDOWN = 2.0
+local debounceTimer = nil
+local DEBOUNCE_DELAY = 0.6
+
+Scanner.scanState = "READY" -- "READY" | "SCANNING" | "COMPLETE" | "STALE"
 
 local GB_API = {
     GetNumTabs = function() 
@@ -47,62 +49,65 @@ local GB_API = {
     end,
 }
 
+function Scanner:GetScanStatus()
+    local isBankOpen = GuildBankFrame and GuildBankFrame:IsVisible()
+    if self.scanState == "SCANNING" then
+        return "SCANNING", "Scanning...", { 0.85, 0.65, 0.15, 1 }
+    elseif self.scanState == "COMPLETE" then
+        return "COMPLETE", "Scan Complete", { 0.20, 0.75, 0.35, 1 }
+    elseif isBankOpen and self.scanState == "STALE" then
+        return "STALE", "Force Scan", { 0.85, 0.30, 0.30, 1 }
+    elseif isBankOpen then
+        return "READY", "Scan Bank", { 0.25, 0.55, 0.85, 1 }
+    else
+        return "READY", "Bank Closed", { 0.40, 0.40, 0.45, 1 }
+    end
+end
+
 function Scanner:Init()
     local f = CreateFrame("Frame")
     f:RegisterEvent("GUILDBANKFRAME_OPENED")
+    f:RegisterEvent("GUILDBANKFRAME_CLOSED")
     f:RegisterEvent("GUILDBANKBAGSLOTS_CHANGED")
     f:RegisterEvent("GUILDBANKLOG_UPDATE")
     f:RegisterEvent("GUILDBANK_UPDATE_MONEY")
     f:RegisterEvent("GUILDBANK_UPDATE_TABS")
 
-    local scanQueued = false
     f:SetScript("OnEvent", function(_, event)
         VM:LogDebug("BankScanner event: " .. tostring(event))
         if event == "GUILDBANKFRAME_OPENED" then
             if VM:IsOfficer() then
                 VM.Fulfillment:OnGuildBankOpened()
             end
+            self.scanState = "SCANNING"
             self:RequestAllTabsAndLogs()
-            self:ScheduleScan()
-        elseif event == "GUILDBANK_UPDATE_TABS" or event == "GUILDBANKBAGSLOTS_CHANGED" then
-            if not scanQueued then
-                scanQueued = true
-                C_Timer.After(1.0, function()
-                    scanQueued = false
-                    self:ScanBank()
-                end)
+            self:TriggerDebouncedScan()
+        elseif event == "GUILDBANKFRAME_CLOSED" then
+            if self.scanState == "SCANNING" then
+                self.scanState = "READY"
             end
+            if VM.UI and VM.UI.UpdateScanStatusButton then
+                VM.UI:UpdateScanStatusButton()
+            end
+        elseif event == "GUILDBANKBAGSLOTS_CHANGED" or event == "GUILDBANK_UPDATE_TABS" then
+            self:TriggerDebouncedScan()
         elseif event == "GUILDBANKLOG_UPDATE" or event == "GUILDBANK_UPDATE_MONEY" then
-            if logUpdatePending then
-                logUpdatePending = false
-                if logUpdateTimer then
-                    logUpdateTimer:Cancel()
-                    logUpdateTimer = nil
-                end
-                self:RunFullScanPass(true)
-            elseif not scanQueued then
-                scanQueued = true
-                C_Timer.After(1.5, function()
-                    scanQueued = false
-                    self:ScanLogs()
-                    self:ScanMoneyLogs()
-                end)
-            end
+            self:TriggerDebouncedScan()
         end
     end)
 end
 
-function Scanner:ScheduleScan()
-    local now = time()
-    if (now - lastScanTime) < SCAN_COOLDOWN then return end
-    lastScanTime = now
+function Scanner:TriggerDebouncedScan()
+    self.scanState = "SCANNING"
+    if VM.UI and VM.UI.UpdateScanStatusButton then
+        VM.UI:UpdateScanStatusButton()
+    end
 
-    self:RequestAllTabsAndLogs()
-    logUpdatePending = true
-    if logUpdateTimer then logUpdateTimer:Cancel() end
-    logUpdateTimer = C_Timer.NewTimer(2.5, function()
-        logUpdatePending = false
-        logUpdateTimer = nil
+    if debounceTimer then
+        debounceTimer:Cancel()
+    end
+    debounceTimer = C_Timer.NewTimer(DEBOUNCE_DELAY, function()
+        debounceTimer = nil
         self:RunFullScanPass(true)
     end)
 end
@@ -125,17 +130,20 @@ function Scanner:ForceScan()
     VM:LogDebug("ForceScan triggered")
     local now = time()
     if (now - lastScanTime) < SCAN_COOLDOWN then
-        print("|cff00ccff[Vault Manager]|r Please wait a few seconds before scanning again.")
+        print("|cff00ccff[Vault Manager]|r Please wait a moment before scanning again.")
         return
     end
     lastScanTime = now
 
+    self.scanState = "SCANNING"
+    if VM.UI and VM.UI.UpdateScanStatusButton then
+        VM.UI:UpdateScanStatusButton()
+    end
+
     self:RequestAllTabsAndLogs()
-    logUpdatePending = true
-    if logUpdateTimer then logUpdateTimer:Cancel() end
-    logUpdateTimer = C_Timer.NewTimer(2.5, function()
-        logUpdatePending = false
-        logUpdateTimer = nil
+    if debounceTimer then debounceTimer:Cancel() end
+    debounceTimer = C_Timer.NewTimer(0.8, function()
+        debounceTimer = nil
         self:RunFullScanPass(true)
     end)
 end
@@ -145,9 +153,14 @@ function Scanner:RunFullScanPass(isFinal)
     local logsAdded = self:ScanLogs()
     local moneyAdded = self:ScanMoneyLogs()
     
+    self.scanState = "COMPLETE"
     if isFinal then
         print(string.format("|cff00ccff[Vault Manager]|r Scan complete: %d items, %d item logs, %d gold logs stored.",
             itemCount or 0, logsAdded or 0, moneyAdded or 0))
+    end
+
+    if VM.UI and VM.UI.UpdateScanStatusButton then
+        VM.UI:UpdateScanStatusButton()
     end
 end
 
@@ -190,15 +203,19 @@ function Scanner:ScanBank()
                 local key = (itemID ~= 0) and itemID or itemName
 
                 texture = texture or "Interface\\Icons\\INV_Misc_QuestionMark"
+                local ahVal = VM:GetItemAHPrice(itemID, link) or 0
                 if not newTabs[tab].items[key] then
                     newTabs[tab].items[key] = {
                         itemID = itemID,
                         link = link,
                         name = itemName,
                         icon = texture,
+                        ahPrice = ahVal,
                         count = 0
                     }
                     uniqueItemsCount = uniqueItemsCount + 1
+                else
+                    if ahVal > 0 then newTabs[tab].items[key].ahPrice = ahVal end
                 end
                 newTabs[tab].items[key].count = newTabs[tab].items[key].count + count
                 totalItemsScanned = totalItemsScanned + count
@@ -216,6 +233,7 @@ function Scanner:ScanBank()
         end
         if hasExistingItems then
             VM:LogDebug("ScanBank skipped overwriting with empty data (server data pending).")
+            self.scanState = "STALE"
             return 0
         end
     end
@@ -324,7 +342,32 @@ function Scanner:ScanMoneyLogs()
 
                         if not exists then
                             if isDeposit then
-                                VM.Ledger:RecordGoldDeposit(normName, copper, "BANK_MONEY_LOG")
+                                -- Trade-to-Bank Auto-Attribution
+                                local attributedTo = normName
+                                local rawSender = normName
+                                if VM.pendingTradePayments and #VM.pendingTradePayments > 0 then
+                                    local cutoff = time() - 600
+                                    for idx = #VM.pendingTradePayments, 1, -1 do
+                                        local p = VM.pendingTradePayments[idx]
+                                        if p.timestamp < cutoff then
+                                            table.remove(VM.pendingTradePayments, idx)
+                                        elseif p.amount == copper then
+                                            attributedTo = p.payer
+                                            rawSender = normName
+                                            table.remove(VM.pendingTradePayments, idx)
+                                            print(string.format("|cff00ccff[Vault Manager]|r Auto-attributed %s gold deposit to |cffffff00%s|r (from recent trade).",
+                                                VM:FormatMoney(copper), attributedTo))
+                                            break
+                                        end
+                                    end
+                                end
+
+                                VM.Ledger:RecordGoldDeposit(attributedTo, copper, "BANK_MONEY_LOG", rawSender)
+
+                                if attributedTo == normName and normName == VM:GetPlayerName() and VM:IsOfficer() then
+                                    print(string.format("|cff00ccff[Vault Manager]|r Gold deposit of %s recorded. Use 'Reassign' in the Ledger if this was paid by another member.",
+                                        VM:FormatMoney(copper)))
+                                end
                             else
                                 VM.Ledger:RecordGoldWithdrawal(normName, copper, "BANK_MONEY_LOG")
                             end

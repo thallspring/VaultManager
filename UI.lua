@@ -223,24 +223,35 @@ function UI:RefreshExportContent()
     if not exportModalFrame or not exportModalFrame:IsShown() then return end
     local isCSV = exportModalFrame.csvToggle:GetChecked()
     local useHist = VM.db.uiPrefs.useHistoricalPrices
-    local ranked = VM.Ledger:GetDonationRanking("TOTAL", useHist)
+    local period = VM.db.uiPrefs.rankingPeriod or "ALL"
+    local hideOff = VM.db.uiPrefs.hideOfficers or false
+    local ranked = VM.Ledger:GetDonationRanking("TOTAL", useHist, period, hideOff)
+
+    local function StripColor(str)
+        return tostring(str or ""):gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", "")
+    end
 
     local lines = {}
     if isCSV then
-        table.insert(lines, "Main,TotalInValue,GoldIn,ItemsIn")
-        for _, grp in ipairs(ranked) do
-            table.insert(lines, string.format("%s,%d,%d,%d",
-                grp.mainName, grp.totalInValue, grp.totalGoldIn, grp.totalItemsIn))
+        table.insert(lines, "Rank,Player,Contributed,Received,NetBalance")
+        for idx, grp in ipairs(ranked) do
+            local rankBadge = grp.isLegacy and "-" or ("#" .. idx)
+            local net = grp.netTotal or (grp.totalInValue - grp.totalOutValue)
+            table.insert(lines, string.format("%s,%s,%d,%d,%d",
+                rankBadge, grp.mainName, grp.totalInValue, grp.totalOutValue, net))
         end
     else
-        table.insert(lines, "| Main Character | Total Donated | Pure Gold | Mats & Gear |")
-        table.insert(lines, "|---|---|---|---|")
-        for _, grp in ipairs(ranked) do
-            table.insert(lines, string.format("| %s | %s | %s | %s |",
+        table.insert(lines, "| Rank | Player | Contributed | Received | Net Balance |")
+        table.insert(lines, "| :--- | :--- | :--- | :--- | :--- |")
+        for idx, grp in ipairs(ranked) do
+            local rankBadge = grp.isLegacy and "-" or ("#" .. idx)
+            local net = grp.netTotal or (grp.totalInValue - grp.totalOutValue)
+            table.insert(lines, string.format("| %s | %s | %s | %s | %s |",
+                rankBadge,
                 grp.mainName,
-                VM:FormatMoney(grp.totalInValue),
-                VM:FormatMoney(grp.totalGoldIn),
-                VM:FormatMoney(grp.totalItemsIn)))
+                StripColor(VM:FormatMoney(grp.totalInValue)),
+                StripColor(VM:FormatMoney(grp.totalOutValue)),
+                StripColor(VM:FormatMoney(net))))
         end
     end
 
@@ -379,6 +390,12 @@ function UI:CreateMainFrame()
     local title = headerBar:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
     title:SetPoint("LEFT", 14, 0)
     title:SetText("|cff26a6f2VAULT|r |cffffffffMANAGER|r")
+
+    mainFrame.scanStatusBtn = CreateModernButton(headerBar, 120, 22, "Scan Bank", { 0.25, 0.55, 0.85, 1 })
+    mainFrame.scanStatusBtn:SetPoint("CENTER", headerBar, "CENTER", 40, 0)
+    mainFrame.scanStatusBtn:SetScript("OnClick", function()
+        VM.BankScanner:ForceScan()
+    end)
 
     mainFrame.scanInfo = headerBar:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     mainFrame.scanInfo:SetPoint("RIGHT", -42, 0)
@@ -908,8 +925,9 @@ function UI:RefreshLedger()
                 local charTag = (tx.player ~= grp.mainName and tx.player ~= "UNATTRIBUTED") and (" (" .. tx.player .. ")") or ""
 
                 if isGold then
-                    sub.text:SetText(string.format("|cff999999%s|r [%s]%s: %s",
-                        dateStr, dir, charTag, VM:FormatMoney(val)))
+                    local senderTag = (tx.rawSender and tx.rawSender ~= tx.player) and string.format(" (deposited by %s)", tx.rawSender) or ""
+                    sub.text:SetText(string.format("|cff999999%s|r [%s]%s%s: %s",
+                        dateStr, dir, charTag, senderTag, VM:FormatMoney(val)))
                 elseif grp.isLegacy then
                     sub.text:SetText(string.format("|cff808080%s [%s]%s: %dx %s — Value: %s|r",
                         dateStr, tx.type == "OUT" and "OUT" or "IN", charTag, tx.count, tx.itemName, VM:FormatMoney(val)))
@@ -920,9 +938,18 @@ function UI:RefreshLedger()
 
                 if grp.mainName == "UNATTRIBUTED" and VM:IsOfficer() then
                     sub.actionBtn:Show()
+                    sub.actionBtn:SetText("Assign Member")
                     sub.actionBtn:SetScript("OnClick", function()
                         UI:OpenRosterPicker(sub.actionBtn, false, function(chosenName)
                             VM.Ledger:AssignUnattributed(tx.id, chosenName)
+                        end)
+                    end)
+                elseif VM:IsOfficer() and isGold and tx.type == "IN" then
+                    sub.actionBtn:Show()
+                    sub.actionBtn:SetText("Reassign")
+                    sub.actionBtn:SetScript("OnClick", function()
+                        UI:OpenRosterPicker(sub.actionBtn, false, function(chosenName)
+                            VM.Ledger:ReassignGoldDeposit(tx.id, chosenName)
                         end)
                     end)
                 elseif VM:IsOfficer() and tx.isManual == true then
@@ -941,8 +968,10 @@ function UI:RefreshLedger()
 end
 
 --------------------------------------------------------------------------------
--- TAB 4: RANKING (Top Donors: Total / Pure Gold / Mats + Gear)
+-- TAB 4: RANKING (Top Donors: Net Balance / Pure Gold / Mats + Gear)
 --------------------------------------------------------------------------------
+local expandedRankingMains = {}
+
 function UI:BuildRankingPanel(panel)
     local topBar = CreateFrame("Frame", nil, panel)
     topBar:SetHeight(32)
@@ -951,24 +980,49 @@ function UI:BuildRankingPanel(panel)
 
     local filterLabel = topBar:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     filterLabel:SetPoint("LEFT", 2, 0)
-    filterLabel:SetText("Rank by:")
+    filterLabel:SetText("Rank:")
 
     panel.sortButtons = {}
     local modes = {
-        { key = "TOTAL", label = "Total Value" },
+        { key = "TOTAL", label = "Net Balance" },
         { key = "GOLD", label = "Pure Gold" },
         { key = "ITEMS", label = "Mats + Gear" },
     }
 
     for i, m in ipairs(modes) do
-        local btn = CreateModernButton(topBar, 110, 24, m.label)
-        btn:SetPoint("LEFT", 60 + (i - 1) * 116, 0)
+        local btn = CreateModernButton(topBar, 92, 24, m.label)
+        btn:SetPoint("LEFT", 40 + (i - 1) * 96, 0)
         btn:SetScript("OnClick", function()
             rankingSortMode = m.key
             UI:RefreshRanking()
         end)
         panel.sortButtons[m.key] = btn
     end
+
+    local hideOfficersCb = CreateFrame("CheckButton", nil, topBar, "UICheckButtonTemplate")
+    hideOfficersCb:SetSize(20, 20)
+    hideOfficersCb:SetPoint("LEFT", 336, 0)
+    hideOfficersCb.label = hideOfficersCb:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    hideOfficersCb.label:SetPoint("LEFT", hideOfficersCb, "RIGHT", 4, 0)
+    hideOfficersCb.label:SetText("Hide Officers")
+    hideOfficersCb:SetChecked(VM.db and VM.db.uiPrefs and VM.db.uiPrefs.hideOfficers or false)
+    hideOfficersCb:SetScript("OnClick", function(cb)
+        VM.db.uiPrefs.hideOfficers = cb:GetChecked()
+        UI:RefreshRanking()
+    end)
+    panel.hideOfficersCb = hideOfficersCb
+
+    local periodBtn = CreateModernDropdown(topBar, 120, 24, "All-Time")
+    periodBtn:SetPoint("LEFT", 450, 0)
+    periodBtn:SetScript("OnClick", function(btn)
+        local cur = VM.db.uiPrefs.rankingPeriod or "ALL"
+        local nextP = (cur == "ALL") and "CURRENT" or ((cur == "CURRENT") and "PREVIOUS" or "ALL")
+        VM.db.uiPrefs.rankingPeriod = nextP
+        local lbl = (nextP == "ALL") and "All-Time" or ((nextP == "CURRENT") and "Current Month" or "Previous Month")
+        btn:SetText(lbl)
+        UI:RefreshRanking()
+    end)
+    panel.periodBtn = periodBtn
 
     local exportBtn = CreateModernButton(topBar, 76, 24, "Export", THEME.accent)
     exportBtn:SetPoint("RIGHT", 0, 0)
@@ -987,20 +1041,20 @@ function UI:BuildRankingPanel(panel)
     cRank:SetText("#")
 
     local cName = colHeader:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    cName:SetPoint("LEFT", 48, 0)
+    cName:SetPoint("LEFT", 60, 0)
     cName:SetText("Player (Main)")
 
-    local cGold = colHeader:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    cGold:SetPoint("LEFT", 290, 0)
-    cGold:SetText("Pure Gold")
+    local cContributed = colHeader:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    cContributed:SetPoint("LEFT", 290, 0)
+    cContributed:SetText("Contributed")
 
-    local cItems = colHeader:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    cItems:SetPoint("LEFT", 435, 0)
-    cItems:SetText("Mats + Gear")
+    local cReceived = colHeader:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    cReceived:SetPoint("LEFT", 440, 0)
+    cReceived:SetText("Received")
 
     local cTotal = colHeader:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    cTotal:SetPoint("LEFT", 585, 0)
-    cTotal:SetText("Net Total")
+    cTotal:SetPoint("LEFT", 590, 0)
+    cTotal:SetText("Net Balance")
 
     panel.scroll = CreateScrollArea(panel, -72, 8)
 end
@@ -1012,6 +1066,14 @@ function UI:RefreshRanking()
     local content = panel.scroll.content
     if not content then return end
 
+    if panel.hideOfficersCb then
+        panel.hideOfficersCb:SetChecked(VM.db.uiPrefs.hideOfficers or false)
+    end
+    if panel.periodBtn then
+        local p = VM.db.uiPrefs.rankingPeriod or "ALL"
+        panel.periodBtn:SetText((p == "ALL") and "All-Time" or ((p == "CURRENT") and "Current Month" or "Previous Month"))
+    end
+
     for key, btn in pairs(panel.sortButtons) do
         if key == rankingSortMode then
             btn:SetBackdropColor(0.15, 0.28, 0.42, 1)
@@ -1022,62 +1084,92 @@ function UI:RefreshRanking()
         end
     end
 
-    local content = panel.scroll.content
     for _, r in ipairs(panel.scroll.rows) do r:Hide() end
 
     local useHist = VM.db.uiPrefs.useHistoricalPrices
-    local ranked = VM.Ledger:GetDonationRanking(rankingSortMode, useHist)
+    local period = VM.db.uiPrefs.rankingPeriod or "ALL"
+    local hideOff = VM.db.uiPrefs.hideOfficers or false
+    local ranked = VM.Ledger:GetDonationRanking(rankingSortMode, useHist, period, hideOff)
 
-    local y = 0
-    for idx, grp in ipairs(ranked) do
-        local row = panel.scroll.rows[idx]
+    local rowIdx = 0
+    local function GetRankingRow()
+        rowIdx = rowIdx + 1
+        local row = panel.scroll.rows[rowIdx]
         if not row then
             row = CreateFrame("Frame", nil, content, "BackdropTemplate")
-            row:SetSize(732, 28)
+            row:SetSize(732, 26)
+
+            row.expandBtn = CreateModernButton(row, 20, 20, "+")
+            row.expandBtn:SetPoint("LEFT", 6, 0)
 
             row.rankText = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-            row.rankText:SetPoint("LEFT", 10, 0)
-            row.rankText:SetWidth(35)
+            row.rankText:SetPoint("LEFT", 30, 0)
+            row.rankText:SetWidth(26)
             row.rankText:SetJustifyH("LEFT")
 
             row.nameText = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-            row.nameText:SetPoint("LEFT", 48, 0)
-            row.nameText:SetWidth(230)
+            row.nameText:SetPoint("LEFT", 60, 0)
+            row.nameText:SetWidth(220)
             row.nameText:SetJustifyH("LEFT")
 
             row.goldText = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-            row.goldText:SetPoint("LEFT", 286, 0)
-            row.goldText:SetWidth(135)
+            row.goldText:SetPoint("LEFT", 290, 0)
+            row.goldText:SetWidth(140)
             row.goldText:SetJustifyH("LEFT")
 
             row.itemsText = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-            row.itemsText:SetPoint("LEFT", 431, 0)
+            row.itemsText:SetPoint("LEFT", 440, 0)
             row.itemsText:SetWidth(140)
             row.itemsText:SetJustifyH("LEFT")
 
             row.totalText = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-            row.totalText:SetPoint("LEFT", 581, 0)
-            row.totalText:SetWidth(145)
+            row.totalText:SetPoint("LEFT", 590, 0)
+            row.totalText:SetWidth(140)
             row.totalText:SetJustifyH("LEFT")
 
-            panel.scroll.rows[idx] = row
-        end
+            row.detailText = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+            row.detailText:SetPoint("LEFT", 34, 0)
+            row.detailText:SetWidth(690)
+            row.detailText:SetJustifyH("LEFT")
 
+            panel.scroll.rows[rowIdx] = row
+        end
+        row:Show()
+        return row
+    end
+
+    local y = 0
+    for idx, grp in ipairs(ranked) do
+        local isExpanded = expandedRankingMains[grp.mainName]
+        local row = GetRankingRow()
         local baseBg = grp.isLegacy and { 0.08, 0.08, 0.09, 0.85 } or ((idx % 2 == 0) and THEME.rowEven or THEME.rowOdd)
         ApplyModernBackdrop(row, baseBg, { 0, 0, 0, 0 })
         row:SetPoint("TOPLEFT", 6, -y)
-        row:Show()
 
-        local dispGold = grp.netGold ~= nil and math.max(0, grp.netGold) or grp.totalGoldIn
-        local dispItems = grp.netItems ~= nil and math.max(0, grp.netItems) or grp.totalItemsIn
-        local dispTotal = grp.netTotal ~= nil and grp.netTotal or grp.totalInValue
+        row.detailText:Hide()
+        row.expandBtn:Show()
+        row.expandBtn:SetText(isExpanded and "-" or "+")
+        row.expandBtn:SetScript("OnClick", function()
+            expandedRankingMains[grp.mainName] = not expandedRankingMains[grp.mainName]
+            UI:RefreshRanking()
+        end)
+
+        row.rankText:Show()
+        row.nameText:Show()
+        row.goldText:Show()
+        row.itemsText:Show()
+        row.totalText:Show()
+
+        local dispContributed = grp.totalInValue
+        local dispReceived = grp.totalOutValue
+        local dispNet = grp.netTotal or (dispContributed - dispReceived)
 
         if grp.isLegacy then
             row.rankText:SetText("|cff808080-|r")
             row.nameText:SetText("|cff808080" .. grp.mainName .. " [Legacy]|r")
-            row.goldText:SetText("|cff808080" .. VM:FormatMoney(dispGold) .. "|r")
-            row.itemsText:SetText("|cff808080" .. VM:FormatMoney(dispItems) .. "|r")
-            row.totalText:SetText("|cff808080" .. VM:FormatMoney(dispTotal) .. "|r")
+            row.goldText:SetText("|cff808080" .. VM:FormatMoney(dispContributed) .. "|r")
+            row.itemsText:SetText("|cff808080" .. VM:FormatMoney(dispReceived) .. "|r")
+            row.totalText:SetText("|cff808080" .. VM:FormatMoney(dispNet) .. "|r")
         else
             local rankBadge = tostring(idx)
             if idx == 1 then rankBadge = "|cffffd700#1|r"
@@ -1087,12 +1179,42 @@ function UI:RefreshRanking()
 
             row.rankText:SetText(rankBadge)
             row.nameText:SetText("|cffffffff" .. grp.mainName .. "|r")
-            row.goldText:SetText(VM:FormatMoney(dispGold))
-            row.itemsText:SetText(VM:FormatMoney(dispItems))
-            row.totalText:SetText("|cff44dd77" .. VM:FormatMoney(dispTotal) .. "|r")
+            row.goldText:SetText(VM:FormatMoney(dispContributed))
+            row.itemsText:SetText(VM:FormatMoney(dispReceived))
+            row.totalText:SetText("|cff44dd77" .. VM:FormatMoney(dispNet) .. "|r")
         end
 
-        y = y + 30
+        y = y + 28
+
+        if isExpanded and grp.transactions then
+            for _, tx in ipairs(grp.transactions) do
+                local sub = GetRankingRow()
+                ApplyModernBackdrop(sub, THEME.rowOdd, { 0, 0, 0, 0 })
+                sub:SetPoint("TOPLEFT", 6, -y)
+
+                sub.expandBtn:Hide()
+                sub.rankText:Hide()
+                sub.nameText:Hide()
+                sub.goldText:Hide()
+                sub.itemsText:Hide()
+                sub.totalText:Hide()
+                sub.detailText:Show()
+
+                local isGold = (tx.itemID == 0 or tx.itemLink == "GOLD")
+                local dir = (tx.type == "OUT") and (isGold and "|cffff6666[GOLD OUT]|r" or "|cffff6666[OUT]|r")
+                    or (isGold and "|cffffd700[GOLD IN]|r" or "|cff44dd77[IN]|r")
+                local dateStr = date("%d/%m %H:%M", tx.timestamp or 0)
+                local itemDisplay = isGold and "Gold" or (tx.itemLink or tx.itemName)
+                local transVal = VM.Ledger:GetTransactionValue(tx, true)
+                local currVal = VM.Ledger:GetTransactionValue(tx, false)
+                local charTag = (tx.player ~= grp.mainName and tx.player ~= "UNATTRIBUTED") and (" (" .. tx.player .. ")") or ""
+
+                sub.detailText:SetText(string.format("|cff888888%s|r %s %s%s  —  Price: %s  |  Now: %s",
+                    dateStr, dir, itemDisplay, charTag, VM:FormatMoney(transVal), VM:FormatMoney(currVal)))
+
+                y = y + 22
+            end
+        end
     end
 
     content:SetHeight(math.max(1, y))
@@ -1430,9 +1552,18 @@ function UI:ShowOfficerBankPopup(orders)
     content:SetHeight(math.max(1, y))
 end
 
+function UI:UpdateScanStatusButton()
+    if not mainFrame or not mainFrame.scanStatusBtn or not VM.BankScanner then return end
+    local status, text, color = VM.BankScanner:GetScanStatus()
+    mainFrame.scanStatusBtn:SetText(text)
+    mainFrame.scanStatusBtn:SetBackdropColor(color[1], color[2], color[3], color[4] or 1)
+end
+
 function UI:RefreshAll()
     if not mainFrame or not mainFrame:IsShown() then return end
     if not mainFrame.navButtons or not mainFrame.panels or not mainFrame.scanInfo then return end
+
+    self:UpdateScanStatusButton()
 
     if VM.newerVersionAvailable then
         mainFrame.scanInfo:SetText("|cffffcc33Update available|r")

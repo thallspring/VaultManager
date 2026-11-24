@@ -42,6 +42,7 @@ local function InitGuildSubTables(db)
     db.mains = db.mains or {}
     db.roster = db.roster or db.mains
     db.rosterCache = db.rosterCache or {}
+    db.memberClasses = db.memberClasses or {}
     db.archivedMembers = db.archivedMembers or {}
     db.tabRules = db.tabRules or {}
     db.scanMetadata = db.scanMetadata or db.inventory
@@ -50,6 +51,47 @@ local function InitGuildSubTables(db)
     return db
 end
 VM.InitGuildSubTables = InitGuildSubTables
+
+VM.CLASS_COLORS = {
+    WARRIOR = "C79C6E",
+    PALADIN = "F58CBA",
+    HUNTER = "ABD473",
+    ROGUE = "FFF569",
+    PRIEST = "FFFFFF",
+    SHAMAN = "0070DE",
+    MAGE = "69CCF0",
+    WARLOCK = "9482C9",
+    DRUID = "FF7D0A",
+    DEATHKNIGHT = "C41F3B",
+}
+
+function VM:NormalizeClassToken(classStr)
+    if not classStr or classStr == "" then return nil end
+    local upper = strupper(classStr):gsub("%s+", "")
+    return upper
+end
+
+function VM:GetClassHex(charName)
+    local norm = self:NormalizeName(charName)
+    if norm == "" then return nil end
+    local classToken = self.db and self.db.memberClasses and self.db.memberClasses[norm]
+    if classToken and self.CLASS_COLORS[classToken] then
+        return self.CLASS_COLORS[classToken]
+    end
+    return nil
+end
+
+function VM:ColorizeName(charName, fallbackHex)
+    if not charName or charName == "" then return "" end
+    local hex = self:GetClassHex(charName)
+    if hex then
+        return string.format("|cff%s%s|r", hex, charName)
+    elseif fallbackHex then
+        return string.format("|cff%s%s|r", fallbackHex, charName)
+    else
+        return charName
+    end
+end
 
 VM.db = InitGuildSubTables({})
 
@@ -127,13 +169,32 @@ function VM:UpdateRosterCache()
     local total = GetNumGuildMembers()
     if total and total > 0 then
         local fresh = {}
+        self.db.memberClasses = self.db.memberClasses or {}
         for i = 1, total do
-            local name, _, rankIndex = GetGuildRosterInfo(i)
+            local name, _, rankIndex, _, class, _, _, _, _, _, classFileName = GetGuildRosterInfo(i)
             if name then
-                fresh[self:NormalizeName(name)] = rankIndex
+                local norm = self:NormalizeName(name)
+                fresh[norm] = rankIndex
+                local token = classFileName
+                if not token or token == "" then
+                    token = self:NormalizeClassToken(class)
+                else
+                    token = strupper(token):gsub("%s+", "")
+                end
+                if token and token ~= "" then
+                    self.db.memberClasses[norm] = token
+                end
             end
         end
         self.db.rosterCache = fresh
+    end
+    local pName = self:GetPlayerName()
+    if pName ~= "" then
+        self.db.memberClasses = self.db.memberClasses or {}
+        local _, pClass = UnitClass("player")
+        if pClass then
+            self.db.memberClasses[pName] = strupper(pClass):gsub("%s+", "")
+        end
     end
 end
 
@@ -1037,6 +1098,9 @@ guildEventFrame:RegisterEvent("PLAYER_GUILD_UPDATE")
 guildEventFrame:RegisterEvent("GUILD_ROSTER_UPDATE")
 guildEventFrame:SetScript("OnEvent", function(_, event)
     if event == "PLAYER_ENTERING_WORLD" or event == "PLAYER_GUILD_UPDATE" or event == "GUILD_ROSTER_UPDATE" then
+        if event == "PLAYER_ENTERING_WORLD" or event == "GUILD_ROSTER_UPDATE" then
+            VM:UpdateRosterCache()
+        end
         if event == "PLAYER_GUILD_UPDATE" then
             if VM.SwitchGuildContext then
                 VM:SwitchGuildContext(event)
@@ -1044,11 +1108,13 @@ guildEventFrame:SetScript("OnEvent", function(_, event)
         end
         if C_Timer and C_Timer.After then
             C_Timer.After(0.5, function()
+                VM:UpdateRosterCache()
                 if VM.SwitchGuildContext then
                     VM:SwitchGuildContext(event)
                 end
             end)
         else
+            VM:UpdateRosterCache()
             if VM.SwitchGuildContext then
                 VM:SwitchGuildContext(event)
             end

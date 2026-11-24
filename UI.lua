@@ -419,7 +419,7 @@ function UI:RefreshRosterPicker(filter)
             row:Show()
 
             local isLeg = VM:IsLegacyMember(name)
-            row.label:SetText(isLeg and ("|cff808080" .. name .. " (Legacy)|r") or name)
+            row.label:SetText(isLeg and (VM:ColorizeName(name, "808080") .. " |cff808080(Legacy)|r") or VM:ColorizeName(name))
 
             row:SetScript("OnEnter", function(selfRow)
                 selfRow:SetBackdropColor(THEME.rowHover[1], THEME.rowHover[2], THEME.rowHover[3], 1)
@@ -872,9 +872,9 @@ function UI:RefreshRequests()
             priceNote = "  |cffaaaaaa(" .. VM:FormatMoney(req.quotedUnitPrice * req.count) .. ")|r"
         end
 
-        row.info:SetText(string.format("[%s]  |cffffffff%s|r  —  %dx %s%s",
+        row.info:SetText(string.format("[%s]  %s  —  %dx %s%s",
             statusColors[req.status] or req.status,
-            req.requester, req.count, req.itemLink or req.itemName, priceNote))
+            VM:ColorizeName(req.requester), req.count, req.itemLink or req.itemName, priceNote))
 
         row.btn1:Hide()
         row.btn2:Hide()
@@ -1056,15 +1056,15 @@ function UI:RefreshLedger()
             header.text:SetText(string.format("|cffff5555UNATTRIBUTED DEPOSITS|r  —  Donated: %s%s  |cff999999(%d entries)|r",
                 VM:FormatMoney(grp.totalInValue), goldSubNote, #grp.transactions))
         elseif grp.isLegacy then
-            header.text:SetText(string.format("|cff808080%s [Legacy Member]|r  |cff707070—  Received: %s  |  Donated: %s%s  (%d entries)|r",
-                grp.mainName,
+            header.text:SetText(string.format("%s |cff808080[Legacy Member]|r  |cff707070—  Received: %s  |  Donated: %s%s  (%d entries)|r",
+                VM:ColorizeName(grp.mainName, "808080"),
                 VM:FormatMoney(grp.totalOutValue),
                 VM:FormatMoney(grp.totalInValue),
                 goldSubNote,
                 #grp.transactions))
         else
-            header.text:SetText(string.format("|cffffcc33%s|r  —  Received: %s  |  Donated: %s%s  |cff999999(%d entries)|r",
-                grp.mainName,
+            header.text:SetText(string.format("%s  —  Received: %s  |  Donated: %s%s  |cff999999(%d entries)|r",
+                VM:ColorizeName(grp.mainName),
                 VM:FormatMoney(grp.totalOutValue),
                 VM:FormatMoney(grp.totalInValue),
                 goldSubNote,
@@ -1103,10 +1103,10 @@ function UI:RefreshLedger()
                 local dir = (tx.type == "OUT") and (isGold and "|cffff6666GOLD OUT|r" or "|cffff6666OUT|r") or (isGold and "|cffffd700GOLD IN|r" or "|cff44dd77IN|r")
                 local val = VM.Ledger:GetTransactionValue(tx, useHist)
                 local dateStr = date("%d/%m %H:%M", tx.timestamp or 0)
-                local charTag = (tx.player ~= grp.mainName and tx.player ~= "UNATTRIBUTED") and (" (" .. tx.player .. ")") or ""
+                local charTag = (tx.player ~= grp.mainName and tx.player ~= "UNATTRIBUTED") and (" (" .. VM:ColorizeName(tx.player, grp.isLegacy and "808080" or nil) .. ")") or ""
 
                 if isGold then
-                    local senderTag = (tx.rawSender and tx.rawSender ~= tx.player) and string.format(" (deposited by %s)", tx.rawSender) or ""
+                    local senderTag = (tx.rawSender and tx.rawSender ~= tx.player) and string.format(" (deposited by %s)", VM:ColorizeName(tx.rawSender)) or ""
                     sub.text:SetText(string.format("|cff999999%s|r [%s]%s%s: %s",
                         dateStr, dir, charTag, senderTag, VM:FormatMoney(val)))
                 elseif grp.isLegacy then
@@ -1418,7 +1418,7 @@ function UI:RefreshRanking()
 
         if grp.isLegacy then
             row.rankText:SetText("|cff808080-|r")
-            row.nameText:SetText("|cff808080" .. grp.mainName .. " [Legacy]|r")
+            row.nameText:SetText(VM:ColorizeName(grp.mainName, "808080") .. " |cff808080[Legacy]|r")
             row.goldText:SetText("|cff808080" .. VM:FormatMoney(dispContributed) .. "|r")
             row.itemsText:SetText("|cff808080" .. VM:FormatMoney(dispReceived) .. "|r")
             row.totalText:SetText("|cff808080" .. VM:FormatMoney(dispNet) .. "|r")
@@ -1430,7 +1430,7 @@ function UI:RefreshRanking()
             else rankBadge = "|cff888888#" .. idx .. "|r" end
 
             row.rankText:SetText(rankBadge)
-            row.nameText:SetText("|cffffffff" .. grp.mainName .. "|r")
+            row.nameText:SetText(VM:ColorizeName(grp.mainName))
             row.goldText:SetText(VM:FormatMoney(dispContributed))
             row.itemsText:SetText(VM:FormatMoney(dispReceived))
             row.totalText:SetText("|cff44dd77" .. VM:FormatMoney(dispNet) .. "|r")
@@ -1476,7 +1476,7 @@ function UI:RefreshRanking()
                 local itemDisplay = isGold and "Gold" or (tx.itemLink or tx.itemName)
                 local lockedVal = VM.Ranking:GetTransactionValuation(tx, "locked")
                 local liveVal = VM.Ranking:GetTransactionValuation(tx, "live")
-                local charTag = (tx.player ~= grp.mainName and tx.player ~= "UNATTRIBUTED") and (" (" .. tx.player .. ")") or ""
+                local charTag = (tx.player ~= grp.mainName and tx.player ~= "UNATTRIBUTED") and (" (" .. VM:ColorizeName(tx.player, grp.isLegacy and "808080" or nil) .. ")") or ""
 
                 local lockedDisplay, liveDisplay
                 if priceMode == "locked" then
@@ -1760,9 +1760,9 @@ function UI:RefreshSettings()
 
             row.label:SetPoint("LEFT", hasAlts and 30 or 10, 0)
             if mainEntry.isLegacy then
-                row.label:SetText(string.format("|cff808080%s [Legacy]%s|r", mainName, hasAlts and string.format(" (%d alts)", #alts) or ""))
+                row.label:SetText(string.format("%s |cff808080[Legacy]%s|r", VM:ColorizeName(mainName, "808080"), hasAlts and string.format(" (%d alts)", #alts) or ""))
             else
-                row.label:SetText(string.format("|cffffcc33%s|r%s", mainName, hasAlts and string.format(" |cff888888(%d alts)|r", #alts) or ""))
+                row.label:SetText(string.format("%s%s", VM:ColorizeName(mainName), hasAlts and string.format(" |cff888888(%d alts)|r", #alts) or ""))
             end
 
             row.btn1:Show()
@@ -1788,7 +1788,7 @@ function UI:RefreshSettings()
 
                         subRow.expandBtn:Hide()
                         subRow.label:SetPoint("LEFT", 35, 0)
-                        subRow.label:SetText(string.format("|cffaaaaaa└─ %s|r", altName))
+                        subRow.label:SetText(string.format("|cff888888└─ |r%s", VM:ColorizeName(altName)))
 
                         subRow.btn1:Show()
                         subRow.btn1:SetText("Make Main")
@@ -1871,8 +1871,8 @@ function UI:ShowOfficerBankPopup(orders)
         ApplyModernBackdrop(row, (idx % 2 == 0) and THEME.rowEven or THEME.rowOdd, { 0, 0, 0, 0 })
         row:SetPoint("TOPLEFT", 2, -y)
         row:Show()
-        row.label:SetText(string.format("|cffffcc33%s|r: %dx %s (Tab %d)",
-            req.requester, req.count, req.itemLink or req.itemName, req.tab))
+        row.label:SetText(string.format("%s: %dx %s (Tab %d)",
+            VM:ColorizeName(req.requester), req.count, req.itemLink or req.itemName, req.tab))
 
         row.prepBtn:SetScript("OnClick", function()
             VM.Fulfillment.activeOrder = req

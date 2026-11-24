@@ -2,6 +2,18 @@
 
 All notable changes to **Vault Manager** will be documented in this file.
 
+## [1.4.0] - 2026-11-24
+
+### Added & Enhanced
+- **6-Tab Modern UI & Dedicated Settings Tab (`UI.lua`):** Restructured the main interface into a 6-tab navigation layout with two-tier toolbars and zebra-striped tables. Added a comprehensive Settings tab featuring Guild Bank Tab Rules, Interface & Notifications (scale, chat alerts, version notifications), Sync & Diagnostics, and Local Maintenance utilities.
+- **Zero-Config Guild Bank Tab Rules & Tamper Protection (`UI.lua`, `Comms.lua`):** Automated tab rule synchronization among guild officers with strict officer locking and deterministic anti-tamper signatures, eliminating manual Guild Info tagging. Added a direct configuration shortcut from the Vault tab.
+- **P2P Addon Version Check & Alerts (`Core.lua`, `Comms.lua`, `UI.lua`):** Added peer-to-peer addon version handshaking with optional chat notifications when a newer version is detected among guild members, accompanied by an update indicator in the header.
+- **Ranking Improvements (`Ranking.lua`, `UI.lua`):** Added "Historical values" vs. "Current values" valuation basis toggles, clean ASCII sort indicators (`▲` / `▼`), and an "Include Legacy Members" toggle with consistent rank numbering.
+- **Class Colorized Member Names & Status Indicators (`UI.lua`, `Core.lua`):** Colored character names by WoW class throughout all UI tabs and roster pickers. Added distinct "Synced" vs. "Scan Complete" freshness status indicators in the header, and hardened per-guild data isolation without realm dependencies.
+
+### Fixed
+- **WoW 1.60.1 Item Tooltip Hover Protection (`UI.lua`):** Fixed a nil reference error when hovering item links on WoW 1.60.1 by safely guarding tooltip methods and hyperlink resolution.
+
 ## [1.3.5] - 2026-11-24
 
 ### Fixed

@@ -664,7 +664,7 @@ function UI:CreateMainFrame()
     local title = headerBar:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
     title:SetPoint("LEFT", 14, 0)
     local getMeta = C_AddOns and C_AddOns.GetAddOnMetadata or GetAddOnMetadata
-    local ver = "v" .. ((getMeta and getMeta("VaultManager", "Version")) or "dev")
+    local ver = "v" .. ((getMeta and getMeta("VaultManager", "Version")) or "1.4.0")
     title:SetText(string.format("|cff26a6f2VAULT|r |cffffffffMANAGER|r |cff8899aa%s|r", ver))
 
     mainFrame.scanStatusBtn = CreateModernButton(headerBar, 110, 22, "Scan Bank", { 0.25, 0.55, 0.85, 1 })

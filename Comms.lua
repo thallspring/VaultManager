@@ -199,11 +199,16 @@ function Comms:OnMessageReceived(msg, sender)
         if scanTime > (VM.db.inventory.lastScan or 0) then
             VM.db.inventory.lastScan = scanTime
             VM.db.inventory.lastScanBy = scannedBy
+            VM.db.inventory.scannedBy = scannedBy
             VM.db.inventory.lastSyncedFrom = sender
             VM.db.inventory.tabs = {}
         elseif scanTime == (VM.db.inventory.lastScan or 0) then
             VM.db.inventory.lastSyncedFrom = sender
         end
+        if VM.BankScanner then
+            VM.BankScanner.scanState = "COMPLETE"
+        end
+        if VM.UI then VM.UI:RefreshAll() end
 
     elseif cmd == "INV_TAB" then
         local scanTime = tonumber(parts[2]) or 0

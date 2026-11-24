@@ -56,8 +56,19 @@ function Scanner:GetScanStatus()
     local isBankOpen = GuildBankFrame and GuildBankFrame:IsVisible()
     if self.scanState == "SCANNING" then
         return "SCANNING", "Scanning...", { 0.85, 0.65, 0.15, 1 }
-    elseif self.scanState == "COMPLETE" then
-        return "COMPLETE", "Scan Complete", { 0.20, 0.75, 0.35, 1 }
+    elseif self.scanState == "COMPLETE" or (VM.db and VM.db.inventory and VM.db.inventory.lastScan and VM.db.inventory.lastScan > 0) then
+        local inv = VM.db and VM.db.inventory
+        local lastSyncedFrom = inv and inv.lastSyncedFrom
+        local scannedBy = inv and inv.scannedBy
+        local lastScanBy = inv and inv.lastScanBy
+        local pName = UnitName("player") or VM:GetPlayerName()
+        local isSynced = (lastSyncedFrom and lastSyncedFrom ~= "") or (scannedBy and scannedBy ~= "" and scannedBy ~= pName) or (lastScanBy and lastScanBy ~= "" and lastScanBy ~= pName)
+
+        if isSynced then
+            return "COMPLETE", "Synced", { 0.20, 0.75, 0.35, 1 }
+        else
+            return "COMPLETE", "Scan Complete", { 0.20, 0.75, 0.35, 1 }
+        end
     elseif isBankOpen and self.scanState == "STALE" then
         return "STALE", "Force Scan", { 0.85, 0.30, 0.30, 1 }
     elseif isBankOpen then
@@ -279,6 +290,7 @@ function Scanner:ScanBank()
         lastScan = serverTime,
         lastScanBy = UnitName("player") or VM:GetPlayerName(),
         scannedBy = VM:GetPlayerName(),
+        lastSyncedFrom = nil,
         tabs = newTabs
     }
 

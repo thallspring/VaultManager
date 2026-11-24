@@ -1150,24 +1150,50 @@ function UI:BuildRankingPanel(panel)
     topBar:SetPoint("TOPLEFT", 10, -8)
     topBar:SetPoint("TOPRIGHT", -10, -8)
 
-    local basisBtn = CreateModernButton(topBar, 130, 24, (uiPrefs.rankingPriceMode == "locked") and "Basis: Locked" or "Basis: Live AH")
-    basisBtn:SetPoint("LEFT", 0, 0)
-    basisBtn:SetScript("OnClick", function(btn)
+    local histBtn = CreateModernButton(topBar, 110, 24, "Historical values")
+    histBtn:SetPoint("LEFT", 0, 0)
+    histBtn:SetScript("OnClick", function()
         local prefs = GetUIPrefs()
-        if prefs.rankingPriceMode == "locked" then
-            prefs.rankingPriceMode = "live"
-            btn:SetText("Basis: Live AH")
-        else
-            prefs.rankingPriceMode = "locked"
-            btn:SetText("Basis: Locked")
-        end
+        prefs.rankingPriceMode = "locked"
+        if panel.UpdateBasisButtons then panel.UpdateBasisButtons() end
         UI:RefreshRanking()
     end)
-    panel.basisBtn = basisBtn
+    panel.histBtn = histBtn
+
+    local liveBtn = CreateModernButton(topBar, 85, 24, "Live values")
+    liveBtn:SetPoint("LEFT", histBtn, "RIGHT", 4, 0)
+    liveBtn:SetScript("OnClick", function()
+        local prefs = GetUIPrefs()
+        prefs.rankingPriceMode = "live"
+        if panel.UpdateBasisButtons then panel.UpdateBasisButtons() end
+        UI:RefreshRanking()
+    end)
+    panel.liveBtn = liveBtn
+
+    local function UpdateBasisButtons()
+        local mode = GetUIPrefs().rankingPriceMode or "live"
+        if mode == "locked" then
+            histBtn:SetBackdropColor(0.15, 0.28, 0.42, 1)
+            histBtn:SetBackdropBorderColor(THEME.accent[1], THEME.accent[2], THEME.accent[3], 1)
+            histBtn.label:SetTextColor(1, 0.82, 0)
+            liveBtn:SetBackdropColor(THEME.btnBg[1], THEME.btnBg[2], THEME.btnBg[3], 1)
+            liveBtn:SetBackdropBorderColor(THEME.border[1], THEME.border[2], THEME.border[3], 1)
+            liveBtn.label:SetTextColor(0.6, 0.6, 0.6)
+        else
+            liveBtn:SetBackdropColor(0.15, 0.28, 0.42, 1)
+            liveBtn:SetBackdropBorderColor(THEME.accent[1], THEME.accent[2], THEME.accent[3], 1)
+            liveBtn.label:SetTextColor(1, 0.82, 0)
+            histBtn:SetBackdropColor(THEME.btnBg[1], THEME.btnBg[2], THEME.btnBg[3], 1)
+            histBtn:SetBackdropBorderColor(THEME.border[1], THEME.border[2], THEME.border[3], 1)
+            histBtn.label:SetTextColor(0.6, 0.6, 0.6)
+        end
+    end
+    panel.UpdateBasisButtons = UpdateBasisButtons
+    UpdateBasisButtons()
 
     local showLegacyCb = CreateFrame("CheckButton", nil, topBar, "UICheckButtonTemplate")
     showLegacyCb:SetSize(20, 20)
-    showLegacyCb:SetPoint("LEFT", 136, 0)
+    showLegacyCb:SetPoint("LEFT", liveBtn, "RIGHT", 10, 0)
     showLegacyCb.label = showLegacyCb:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     showLegacyCb.label:SetPoint("LEFT", showLegacyCb, "RIGHT", 4, 0)
     showLegacyCb.label:SetText("Show Legacy")
@@ -1181,7 +1207,7 @@ function UI:BuildRankingPanel(panel)
 
     local hideOfficersCb = CreateFrame("CheckButton", nil, topBar, "UICheckButtonTemplate")
     hideOfficersCb:SetSize(20, 20)
-    hideOfficersCb:SetPoint("LEFT", 240, 0)
+    hideOfficersCb:SetPoint("LEFT", 305, 0)
     hideOfficersCb.label = hideOfficersCb:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     hideOfficersCb.label:SetPoint("LEFT", hideOfficersCb, "RIGHT", 4, 0)
     hideOfficersCb.label:SetText("Hide Officers")
@@ -1193,8 +1219,8 @@ function UI:BuildRankingPanel(panel)
     end)
     panel.hideOfficersCb = hideOfficersCb
 
-    local periodBtn = CreateModernDropdown(topBar, 110, 24, "All-Time")
-    periodBtn:SetPoint("LEFT", 350, 0)
+    local periodBtn = CreateModernDropdown(topBar, 105, 24, "All-Time")
+    periodBtn:SetPoint("LEFT", 410, 0)
     periodBtn:SetScript("OnClick", function(btn)
         if rankingPeriodDropdownFrame and rankingPeriodDropdownFrame:IsShown() then
             rankingPeriodDropdownFrame:Hide()
@@ -1267,8 +1293,8 @@ function UI:RefreshRanking()
     VM.db.uiPrefs = VM.db.uiPrefs or {}
     local uiPrefs = GetUIPrefs()
 
-    if panel.basisBtn then
-        panel.basisBtn:SetText((uiPrefs.rankingPriceMode == "locked") and "Basis: Locked" or "Basis: Live AH")
+    if panel.UpdateBasisButtons then
+        panel.UpdateBasisButtons()
     end
     if panel.showLegacyCb then
         panel.showLegacyCb:SetChecked(uiPrefs.showLegacyRanking ~= false)
@@ -1287,7 +1313,7 @@ function UI:RefreshRanking()
     for key, btn in pairs(panel.sortHeaders) do
         local indicator = ""
         if key == sortBy then
-            indicator = (sortDir == "asc") and " ▲" or " ▼"
+            indicator = (sortDir == "asc") and " (^)" or " (v)"
             btn.label:SetTextColor(THEME.accent[1], THEME.accent[2], THEME.accent[3], 1)
         else
             btn.label:SetTextColor(0.9, 0.9, 0.9, 1)

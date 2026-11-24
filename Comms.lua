@@ -91,7 +91,8 @@ function Comms:SendHello()
     local mainTs = self:GetMaxTimestamp(VM.db.mains, "updatedAt")
     local ruleTs = self:GetRulesMaxTimestamp(VM.db.tabRules)
     local txTs = self:GetMaxTimestamp(VM.db.ledger, "updatedAt")
-    self:SendRaw(string.format("HELLO|%d|%d|%d|%d|%d|%d|%d", VM.VERSION, epoch, invTs, reqTs, mainTs, ruleTs, txTs))
+    local addonVer = VM:GetAddonVersion()
+    self:SendRaw(string.format("HELLO|%d|%d|%d|%d|%d|%d|%d|%s", VM.VERSION, epoch, invTs, reqTs, mainTs, ruleTs, txTs, EscapeStr(addonVer)))
 end
 
 local function CheckAndAdoptEpoch(peerEpoch)
@@ -103,7 +104,7 @@ local function CheckAndAdoptEpoch(peerEpoch)
         VM.db.requests = {}
         VM.db.tabRules = {}
         VM.db.mains = {}
-        print(string.format("|cff00ccff[Vault Manager]|r Guild reset detected from peer (Epoch %d). Local data reset.", peerEpoch))
+        VM:Print(string.format("Guild reset detected from peer (Epoch %d). Local data reset.", peerEpoch))
         if VM.UI then VM.UI:RefreshAll() end
         return true
     end
@@ -136,8 +137,18 @@ function Comms:OnMessageReceived(msg, sender)
         local peerVersion = 2
         local peerEpoch = 1
         local peerInvTs, peerReqTs, peerMainTs, peerRuleTs, peerTxTs = 0, 0, 0, 0, 0
+        local peerAddonVer = nil
 
-        if #parts >= 8 then
+        if #parts >= 9 then
+            peerVersion = tonumber(parts[2]) or 2
+            peerEpoch = tonumber(parts[3]) or 1
+            peerInvTs = tonumber(parts[4]) or 0
+            peerReqTs = tonumber(parts[5]) or 0
+            peerMainTs = tonumber(parts[6]) or 0
+            peerRuleTs = tonumber(parts[7]) or 0
+            peerTxTs = tonumber(parts[8]) or 0
+            peerAddonVer = UnescapeStr(parts[9])
+        elseif #parts >= 8 then
             peerVersion = tonumber(parts[2]) or 2
             peerEpoch = tonumber(parts[3]) or 1
             peerInvTs = tonumber(parts[4]) or 0
@@ -163,12 +174,18 @@ function Comms:OnMessageReceived(msg, sender)
         if CheckAndAdoptEpoch(peerEpoch) then return end
         if peerEpoch < (VM.db.dbEpoch or 1) then return end
 
-        if peerVersion > VM.VERSION then
-            if not Comms.notifiedNewVersion then
-                Comms.notifiedNewVersion = true
-                print(string.format("|cff00ccff[Vault Manager]|r A newer version of Vault Manager is available on CurseForge (peer running protocol v%d). Please update your addon!", peerVersion))
-            end
+        local hasNewerAddon = peerAddonVer and (peerAddonVer ~= "") and VM:IsNewerVersion(peerAddonVer, VM:GetAddonVersion())
+        local hasNewerProto = (peerVersion > VM.VERSION)
+
+        if hasNewerAddon or hasNewerProto then
             VM.newerVersionAvailable = true
+            local prefs = VM.db and VM.db.uiPrefs
+            local notifyEnabled = (prefs == nil or prefs.notifyNewerVersion ~= false)
+            if notifyEnabled and not Comms.notifiedNewVersion then
+                Comms.notifiedNewVersion = true
+                local displayVer = (peerAddonVer and peerAddonVer ~= "") and ("v" .. peerAddonVer) or ("protocol v" .. peerVersion)
+                print(string.format("|cff00ccff[Vault Manager]|r A newer version of Vault Manager (%s) is available on CurseForge. Please update your addon!", displayVer))
+            end
             if VM.UI and VM.UI.RefreshAll then VM.UI:RefreshAll() end
         end
 
@@ -283,7 +300,7 @@ function Comms:OnMessageReceived(msg, sender)
         if not existing or req.updatedAt > (existing.updatedAt or 0) then
             VM.db.requests[req.id] = req
             if VM:IsOfficer() and req.status == "PENDING" and not existing then
-                print(string.format("|cff00ccff[Vault Manager]|r New request from |cffffff00%s|r: %dx %s",
+                VM:Print(string.format("New request from |cffffff00%s|r: %dx %s",
                     req.requester, req.count, req.itemLink or req.itemName))
             end
             if VM.UI then VM.UI:RefreshAll() end
@@ -410,7 +427,7 @@ function Comms:BroadcastRequest(req)
 end
 
 function Comms:BroadcastTabRules()
-    if not VM.db.inventory or VM.db.inventory.lastScan == 0 then return end
+    if not VM.db or not VM.db.tabRules then return end
     local guildName = GetGuildInfo("player") or VM:GetActiveGuildKey() or ""
     for tabIdx, rule in pairs(VM.db.tabRules) do
         if rule and not rule.tampered then

@@ -2,7 +2,7 @@ local ADDON_NAME, VM = ...
 _G.VaultManager = VM
 
 VM.PREFIX = "VMGR_V1"
-VM.VERSION = 5
+VM.VERSION = 6
 VM.OFFICER_MAX_RANK_INDEX = 1
 VM.debugLog = {}
 VM.pendingTradePayments = {}
@@ -24,7 +24,56 @@ local DEFAULT_UI_PREFS = {
     rankingPeriod = "ALL",
     rankingSortBy = "net",
     rankingSortDir = "desc",
+    enableChatNotifications = true,
+    notifyNewerVersion = true,
 }
+
+function VM:Print(msg)
+    local prefs = self.db and self.db.uiPrefs
+    if prefs and prefs.enableChatNotifications == false then
+        return
+    end
+    print(string.format("|cff00ccff[Vault Manager]|r %s", tostring(msg)))
+end
+
+function VM:GetAddonVersion()
+    local getMeta = (C_AddOns and C_AddOns.GetAddOnMetadata) or GetAddOnMetadata
+    local ver = getMeta and getMeta("VaultManager", "Version")
+    if not ver or ver == "" then
+        ver = "1.0.0"
+    end
+    ver = tostring(ver):gsub("^[vV]", ""):gsub("^%s*(.-)%s*$", "%1")
+    return ver
+end
+
+function VM:ParseSemVer(verStr)
+    if not verStr then return 0, 0, 0 end
+    local clean = tostring(verStr):gsub("^[vV]", "")
+    local nums = {}
+    for n in clean:gmatch("%d+") do
+        table.insert(nums, tonumber(n) or 0)
+    end
+    return nums[1] or 0, nums[2] or 0, nums[3] or 0
+end
+
+function VM:CompareVersions(v1, v2)
+    local maj1, min1, pat1 = self:ParseSemVer(v1)
+    local maj2, min2, pat2 = self:ParseSemVer(v2)
+    if maj1 ~= maj2 then
+        return (maj1 > maj2) and 1 or -1
+    end
+    if min1 ~= min2 then
+        return (min1 > min2) and 1 or -1
+    end
+    if pat1 ~= pat2 then
+        return (pat1 > pat2) and 1 or -1
+    end
+    return 0
+end
+
+function VM:IsNewerVersion(remoteVer, localVer)
+    return self:CompareVersions(remoteVer, localVer) > 0
+end
 
 local function InitGuildSubTables(db)
     if not db then return end

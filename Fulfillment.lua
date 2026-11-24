@@ -24,7 +24,7 @@ function Fulfillment:Init()
         elseif event == "MAIL_SEND_SUCCESS" then
             if self.activeOrder then
                 self:CompleteRequest(self.activeOrder.id)
-                print("|cff00ccff[Vault Manager]|r Mail sent - order marked as fulfilled!")
+                VM:Print("Mail sent - order marked as fulfilled!")
                 self.activeOrder = nil
             end
         elseif event == "TRADE_SHOW" then
@@ -51,7 +51,7 @@ function Fulfillment:Init()
                 end
                 if self.activeOrder then
                     self:CompleteRequest(self.activeOrder.id)
-                    print("|cff00ccff[Vault Manager]|r Trade completed - order marked as fulfilled!")
+                    VM:Print("Trade completed - order marked as fulfilled!")
                     self.activeOrder = nil
                 end
             end
@@ -66,7 +66,7 @@ end
 function Fulfillment:CreateRequest(tabIndex, itemKey, count)
     local rule = VM:GetTabRule(tabIndex)
     if rule.mode == "LOCKED" then
-        print("|cffff4444[Vault Manager]|r This bank tab is locked and cannot be ordered from.")
+        VM:Print("|cffff4444This bank tab is locked and cannot be ordered from.|r")
         return
     end
 
@@ -85,7 +85,7 @@ function Fulfillment:CreateRequest(tabIndex, itemKey, count)
 
     local available = itemData.count - VM:GetReservedCount(itemKey, tabIndex)
     if count <= 0 or count > available then
-        print("|cffff4444[Vault Manager]|r Not enough available items (Available: " .. available .. ").")
+        VM:Print(string.format("|cffff4444Not enough available items (Available: %d).|r", available))
         return
     end
 
@@ -119,7 +119,7 @@ function Fulfillment:CreateRequest(tabIndex, itemKey, count)
 
     VM.db.requests[reqID] = req
     VM.Comms:BroadcastRequest(req)
-    print(string.format("|cff00ccff[Vault Manager]|r Request sent: %dx %s", count, itemData.link))
+    VM:Print(string.format("Request sent: %dx %s", count, itemData.link))
     if VM.UI then VM.UI:RefreshAll() end
 end
 

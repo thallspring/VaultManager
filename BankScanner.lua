@@ -163,7 +163,7 @@ function Scanner:ForceScan()
     VM:LogDebug("ForceScan triggered")
     local now = time()
     if (now - lastScanTime) < SCAN_COOLDOWN then
-        print("|cff00ccff[Vault Manager]|r Please wait a moment before scanning again.")
+        VM:Print("Please wait a moment before scanning again.")
         return
     end
     lastScanTime = now
@@ -195,7 +195,7 @@ function Scanner:RunFullScanPass(isFinal)
     isScanning = false
 
     if isFinal and not suppressChatPrint then
-        print(string.format("|cff00ccff[Vault Manager]|r Scan complete: %d items, %d item logs, %d gold logs stored.",
+        VM:Print(string.format("Scan complete: %d items, %d item logs, %d gold logs stored.",
             itemCount or 0, logsAdded or 0, moneyAdded or 0))
     end
     suppressChatPrint = false
@@ -447,7 +447,7 @@ function Scanner:ScanMoneyLogs()
                                             attributedTo = p.payer
                                             rawSender = normName
                                             table.remove(VM.pendingTradePayments, idx)
-                                            print(string.format("|cff00ccff[Vault Manager]|r Auto-attributed %s gold deposit to |cffffff00%s|r (from recent trade).",
+                                            VM:Print(string.format("Auto-attributed %s gold deposit to |cffffff00%s|r (from recent trade).",
                                                 VM:FormatMoney(copper), attributedTo))
                                             break
                                         end
@@ -457,7 +457,7 @@ function Scanner:ScanMoneyLogs()
                                 VM.Ledger:RecordGoldDeposit(attributedTo, copper, "BANK_MONEY_LOG", rawSender)
 
                                 if attributedTo == normName and normName == VM:GetPlayerName() and VM:IsOfficer() then
-                                    print(string.format("|cff00ccff[Vault Manager]|r Gold deposit of %s recorded. Use 'Reassign' in the Ledger if this was paid by another member.",
+                                    VM:Print(string.format("Gold deposit of %s recorded. Use 'Reassign' in the Ledger if this was paid by another member.",
                                         VM:FormatMoney(copper)))
                                 end
                             else

@@ -57,6 +57,8 @@ local function GetUIPrefs()
         rankingPeriod = "ALL",
         rankingSortBy = "net",
         rankingSortDir = "desc",
+        enableChatNotifications = true,
+        notifyNewerVersion = true,
     }
     for k, v in pairs(defaults) do
         if VM.db.uiPrefs[k] == nil then
@@ -72,13 +74,18 @@ local function ShowItemTooltip(selfFrame, itemLink, itemID, itemName, tx)
 
     local numID = tonumber(itemID)
     if numID and numID > 0 then
-        local _, realLink = GetItemInfo(numID)
-        if realLink then
-            GameTooltip:SetHyperlink(realLink)
+        if type(GameTooltip.SetItemByID) == "function" then
+            pcall(function() GameTooltip:SetItemByID(numID) end)
             handled = true
         else
-            pcall(function() GameTooltip:SetHyperlink("item:" .. numID) end)
-            handled = true
+            local _, realLink = GetItemInfo(numID)
+            if realLink then
+                GameTooltip:SetHyperlink(realLink)
+                handled = true
+            else
+                pcall(function() GameTooltip:SetHyperlink("item:" .. tostring(numID)) end)
+                handled = true
+            end
         end
     end
 
@@ -623,10 +630,24 @@ function UI:CreateMainFrame()
     mainFrame:EnableMouse(true)
     mainFrame:RegisterForDrag("LeftButton")
     mainFrame:SetScript("OnDragStart", mainFrame.StartMoving)
-    mainFrame:SetScript("OnDragStop", mainFrame.StopMovingOrSizing)
+    mainFrame:SetScript("OnDragStop", function(selfFrame)
+        selfFrame:StopMovingOrSizing()
+        local point, relativeTo, relativePoint, xOfs, yOfs = selfFrame:GetPoint()
+        local prefs = GetUIPrefs()
+        prefs.windowPos = { point = point, relativePoint = relativePoint, xOfs = xOfs, yOfs = yOfs }
+    end)
     ApplyModernBackdrop(mainFrame, THEME.bg, THEME.border)
     mainFrame:Hide()
     table.insert(UISpecialFrames, "VaultManagerMainFrame")
+
+    local prefs = GetUIPrefs()
+    if prefs.uiScale then
+        mainFrame:SetScale(prefs.uiScale)
+    end
+    if prefs.windowPos then
+        mainFrame:ClearAllPoints()
+        mainFrame:SetPoint(prefs.windowPos.point or "CENTER", UIParent, prefs.windowPos.relativePoint or "CENTER", prefs.windowPos.xOfs or 0, prefs.windowPos.yOfs or 0)
+    end
 
     local headerBar = CreateFrame("Frame", nil, mainFrame, "BackdropTemplate")
     headerBar:SetHeight(38)
@@ -680,9 +701,7 @@ function UI:CreateMainFrame()
         btn.activeBar:Hide()
 
         btn:SetScript("OnClick", function()
-            currentTab = i
-            if rosterPickerFrame then rosterPickerFrame:Hide() end
-            self:RefreshAll()
+            self:SelectTab(i)
         end)
         mainFrame.navButtons[i] = btn
     end
@@ -765,23 +784,22 @@ function UI:BuildInventoryPanel(panel)
     panel.ruleBannerBtn = ruleBannerBtn
 
     ruleBannerBtn:SetScript("OnEnter", function(selfBtn)
+        selfBtn.text:SetTextColor(1, 1, 1)
+        GameTooltip:SetOwner(selfBtn, "ANCHOR_RIGHT")
         if VM:IsOfficer() then
-            selfBtn.text:SetTextColor(1, 1, 1)
-            GameTooltip:SetOwner(selfBtn, "ANCHOR_RIGHT")
             GameTooltip:SetText("Click to configure Tab Rules in Settings")
-            GameTooltip:Show()
+        else
+            GameTooltip:SetText("Click to view Tab Rules in Settings")
         end
+        GameTooltip:Show()
     end)
     ruleBannerBtn:SetScript("OnLeave", function(selfBtn)
         selfBtn.text:SetTextColor(0.9, 0.9, 0.9)
         GameTooltip:Hide()
     end)
     ruleBannerBtn:SetScript("OnClick", function()
-        if VM:IsOfficer() then
-            currentTab = 6
-            if rosterPickerFrame then rosterPickerFrame:Hide() end
-            UI:RefreshAll()
-        end
+        GameTooltip:Hide()
+        UI:SelectTab(6)
     end)
 
     local searchBox = CreateModernEditBox(filterStrip, 140, 22, false)
@@ -1378,7 +1396,7 @@ function UI:BuildRankingPanel(panel)
     end)
     panel.histBtn = histBtn
 
-    local liveBtn = CreateModernButton(topBar, 85, 24, "Live values")
+    local liveBtn = CreateModernButton(topBar, 105, 24, "Current values")
     liveBtn:SetPoint("LEFT", histBtn, "RIGHT", 4, 0)
     liveBtn:SetScript("OnClick", function()
         local prefs = GetUIPrefs()
@@ -1704,11 +1722,11 @@ function UI:RefreshRanking()
 
                 local lockedDisplay, liveDisplay
                 if priceMode == "locked" then
-                    lockedDisplay = string.format("|cffffcc33Locked: %s (Active)|r", VM:FormatMoney(lockedVal))
-                    liveDisplay = string.format("|cff888888Now: %s|r", VM:FormatMoney(liveVal))
+                    lockedDisplay = string.format("|cffffcc33Historical: %s (Active)|r", VM:FormatMoney(lockedVal))
+                    liveDisplay = string.format("|cff888888Current: %s|r", VM:FormatMoney(liveVal))
                 else
-                    lockedDisplay = string.format("|cff888888Locked: %s|r", VM:FormatMoney(lockedVal))
-                    liveDisplay = string.format("|cff26a6f2Now: %s (Active)|r", VM:FormatMoney(liveVal))
+                    lockedDisplay = string.format("|cff888888Historical: %s|r", VM:FormatMoney(lockedVal))
+                    liveDisplay = string.format("|cff26a6f2Current: %s (Active)|r", VM:FormatMoney(liveVal))
                 end
 
                 sub.detailText:SetText(string.format("|cff888888%s|r %s %s%s  —  %s  |  %s",
@@ -1920,12 +1938,13 @@ function UI:BuildSettingsPanel(panel)
     VM.db.uiPrefs = VM.db.uiPrefs or {}
     local isOff = VM:IsOfficer()
 
+    -- Section 1: Guild Bank Tab Rules
     local ruleTitle = panel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     ruleTitle:SetPoint("TOPLEFT", 10, -10)
     if isOff then
-        ruleTitle:SetText("|cff26a6f2GUILD BANK TAB RULES|r  |cff44dd77(Officer Authorized)|r")
+        ruleTitle:SetText("|cff26a6f2Guild Bank Tab Rules|r  |cff44dd77(Officer Authorized)|r")
     else
-        ruleTitle:SetText("|cff26a6f2GUILD BANK TAB RULES|r  |cffff5555[Read-Only (Officer Rank Required)]|r")
+        ruleTitle:SetText("|cff26a6f2Guild Bank Tab Rules|r  |cffff5555[Read-Only (Officer Rank Required)]|r")
     end
 
     panel.tabRuleRows = {}
@@ -1937,78 +1956,99 @@ function UI:BuildSettingsPanel(panel)
 
         r.label = r:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
         r.label:SetPoint("LEFT", 10, 0)
-        r.label:SetWidth(90)
+        r.label:SetWidth(85)
         r.label:SetJustifyH("LEFT")
 
-        r.freeBtn = CreateModernButton(r, 80, 20, "Free-for-All")
-        r.freeBtn:SetPoint("LEFT", 105, 0)
+        r.freeBtn = CreateModernButton(r, 75, 20, "Free-for-All")
+        r.freeBtn:SetPoint("LEFT", 100, 0)
 
-        r.pctBtn = CreateModernButton(r, 75, 20, "% of AH")
-        r.pctBtn:SetPoint("LEFT", 190, 0)
+        r.pctBtn = CreateModernButton(r, 65, 20, "% of AH")
+        r.pctBtn:SetPoint("LEFT", 178, 0)
 
-        r.pctBox = CreateModernEditBox(r, 38, 20, true)
-        r.pctBox:SetPoint("LEFT", 270, 0)
+        r.pctBox = CreateModernEditBox(r, 34, 20, true)
+        r.pctBox:SetPoint("LEFT", 246, 0)
         r.pctBox:SetText("50")
 
-        r.lockBtn = CreateModernButton(r, 65, 20, "Locked")
-        r.lockBtn:SetPoint("LEFT", 313, 0)
+        r.lockBtn = CreateModernButton(r, 55, 20, "Locked")
+        r.lockBtn:SetPoint("LEFT", 283, 0)
+
+        r.saveBtn = CreateModernButton(r, 105, 20, "Save & Broadcast", THEME.accent)
+        r.saveBtn:SetPoint("LEFT", 341, 0)
 
         r.status = r:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-        r.status:SetPoint("LEFT", 385, 0)
-        r.status:SetWidth(350)
+        r.status:SetPoint("LEFT", 452, 0)
+        r.status:SetWidth(285)
         r.status:SetJustifyH("LEFT")
 
         panel.tabRuleRows[i] = r
     end
 
-    -- UI Personalization Section below Tab Rules
+    -- Section 2: Interface & Notifications
     local uiPersTitle = panel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    uiPersTitle:SetPoint("TOPLEFT", 10, -212)
-    uiPersTitle:SetText("|cff26a6f2UI PERSONALIZATION|r")
+    uiPersTitle:SetPoint("TOPLEFT", 10, -206)
+    uiPersTitle:SetText("|cff26a6f2Interface & Notifications|r")
 
-    -- Window Scale Slider
+    -- UI Scale Buttons (85%, 100%, 115%)
     local scaleLabel = panel:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    scaleLabel:SetPoint("TOPLEFT", 10, -236)
-    scaleLabel:SetText("Window Scale:")
+    scaleLabel:SetPoint("TOPLEFT", 10, -228)
+    scaleLabel:SetText("UI Scale:")
 
-    local scaleSlider = CreateFrame("Slider", "VaultManagerScaleSlider", panel, "OptionsSliderTemplate")
-    scaleSlider:SetSize(160, 16)
-    scaleSlider:SetPoint("LEFT", scaleLabel, "RIGHT", 12, 0)
-    scaleSlider:SetMinMaxValues(0.85, 1.15)
-    scaleSlider:SetValueStep(0.05)
-    scaleSlider:SetObeyStepOnDrag(true)
-    _G[scaleSlider:GetName() .. "Low"]:SetText("0.85")
-    _G[scaleSlider:GetName() .. "High"]:SetText("1.15")
-    scaleSlider.text = _G[scaleSlider:GetName() .. "Text"]
-
-    scaleSlider:SetScript("OnValueChanged", function(selfVal, value)
-        local rounded = math.floor(value * 100 + 0.5) / 100
-        if selfVal.text then
-            selfVal.text:SetText(string.format("Scale: %d%%", math.floor(rounded * 100 + 0.5)))
-        end
+    local scale85Btn = CreateModernButton(panel, 45, 20, "85%")
+    scale85Btn:SetPoint("LEFT", scaleLabel, "RIGHT", 8, 0)
+    scale85Btn:SetScript("OnClick", function()
         if not VM.db then VM.db = {} end
         VM.db.uiPrefs = VM.db.uiPrefs or {}
-        VM.db.uiPrefs.uiScale = rounded
-        if mainFrame then
-            mainFrame:SetScale(rounded)
-        end
+        VM.db.uiPrefs.uiScale = 0.85
+        if mainFrame then mainFrame:SetScale(0.85) end
+        if panel.UpdateScaleButtons then panel.UpdateScaleButtons() end
     end)
-    panel.scaleSlider = scaleSlider
+    panel.scale85Btn = scale85Btn
 
-    local scaleResetBtn = CreateModernButton(panel, 55, 20, "Reset")
-    scaleResetBtn:SetPoint("LEFT", scaleSlider, "RIGHT", 12, 0)
-    scaleResetBtn:SetScript("OnClick", function()
-        scaleSlider:SetValue(1.0)
+    local scale100Btn = CreateModernButton(panel, 45, 20, "100%")
+    scale100Btn:SetPoint("LEFT", scale85Btn, "RIGHT", 4, 0)
+    scale100Btn:SetScript("OnClick", function()
         if not VM.db then VM.db = {} end
         VM.db.uiPrefs = VM.db.uiPrefs or {}
         VM.db.uiPrefs.uiScale = 1.0
         if mainFrame then mainFrame:SetScale(1.0) end
+        if panel.UpdateScaleButtons then panel.UpdateScaleButtons() end
     end)
+    panel.scale100Btn = scale100Btn
+
+    local scale115Btn = CreateModernButton(panel, 45, 20, "115%")
+    scale115Btn:SetPoint("LEFT", scale100Btn, "RIGHT", 4, 0)
+    scale115Btn:SetScript("OnClick", function()
+        if not VM.db then VM.db = {} end
+        VM.db.uiPrefs = VM.db.uiPrefs or {}
+        VM.db.uiPrefs.uiScale = 1.15
+        if mainFrame then mainFrame:SetScale(1.15) end
+        if panel.UpdateScaleButtons then panel.UpdateScaleButtons() end
+    end)
+    panel.scale115Btn = scale115Btn
+
+    local function UpdateScaleButtons()
+        local scale = GetUIPrefs().uiScale or 1.0
+        local function StyleScaleBtn(btn, val)
+            if math.abs(scale - val) < 0.01 then
+                btn:SetBackdropColor(0.15, 0.28, 0.42, 1)
+                btn:SetBackdropBorderColor(THEME.accent[1], THEME.accent[2], THEME.accent[3], 1)
+                btn.label:SetTextColor(1, 0.82, 0)
+            else
+                btn:SetBackdropColor(THEME.btnBg[1], THEME.btnBg[2], THEME.btnBg[3], 1)
+                btn:SetBackdropBorderColor(THEME.border[1], THEME.border[2], THEME.border[3], 1)
+                btn.label:SetTextColor(0.6, 0.6, 0.6)
+            end
+        end
+        StyleScaleBtn(scale85Btn, 0.85)
+        StyleScaleBtn(scale100Btn, 1.0)
+        StyleScaleBtn(scale115Btn, 1.15)
+    end
+    panel.UpdateScaleButtons = UpdateScaleButtons
 
     -- Show Minimap Button checkbox
     local minimapCb = CreateFrame("CheckButton", nil, panel, "UICheckButtonTemplate")
-    minimapCb:SetSize(22, 22)
-    minimapCb:SetPoint("TOPLEFT", 380, -234)
+    minimapCb:SetSize(20, 20)
+    minimapCb:SetPoint("LEFT", scale115Btn, "RIGHT", 24, 0)
     minimapCb.label = minimapCb:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     minimapCb.label:SetPoint("LEFT", minimapCb, "RIGHT", 4, 0)
     minimapCb.label:SetText("Show Minimap Button")
@@ -2016,29 +2056,44 @@ function UI:BuildSettingsPanel(panel)
         if VM.Minimap and VM.Minimap.SetHidden then
             VM.Minimap.SetHidden(not cb:GetChecked())
         end
-        if not VM.db then VM.db = {} end
-        VM.db.uiPrefs = VM.db.uiPrefs or {}
-        VM.db.uiPrefs.showMinimap = cb:GetChecked()
+        local prefs = GetUIPrefs()
+        prefs.showMinimap = cb:GetChecked()
+        if VM.db and VM.db.minimap then
+            VM.db.minimap.hide = not cb:GetChecked()
+        end
     end)
     panel.minimapCb = minimapCb
 
-    -- Default Ranking Price Basis Selector (Deposit values vs Current values)
-    local basisLabel = panel:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    basisLabel:SetPoint("TOPLEFT", 10, -270)
-    basisLabel:SetText("Default Ranking Price Basis:")
+    -- Enable Chat Notifications checkbox
+    local chatNotifCb = CreateFrame("CheckButton", nil, panel, "UICheckButtonTemplate")
+    chatNotifCb:SetSize(20, 20)
+    chatNotifCb:SetPoint("LEFT", minimapCb.label, "RIGHT", 20, 0)
+    chatNotifCb.label = chatNotifCb:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    chatNotifCb.label:SetPoint("LEFT", chatNotifCb, "RIGHT", 4, 0)
+    chatNotifCb.label:SetText("Enable Chat Notifications")
+    chatNotifCb:SetScript("OnClick", function(cb)
+        local prefs = GetUIPrefs()
+        prefs.enableChatNotifications = cb:GetChecked()
+    end)
+    panel.chatNotifCb = chatNotifCb
 
-    local basisDepositBtn = CreateModernButton(panel, 110, 22, "Deposit values")
-    basisDepositBtn:SetPoint("LEFT", basisLabel, "RIGHT", 10, 0)
-    basisDepositBtn:SetScript("OnClick", function()
+    -- Default Ranking Mode Selector ("Historical values" / "Current values")
+    local basisLabel = panel:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    basisLabel:SetPoint("TOPLEFT", 10, -256)
+    basisLabel:SetText("Default Ranking Mode:")
+
+    local basisHistBtn = CreateModernButton(panel, 120, 20, "Historical values")
+    basisHistBtn:SetPoint("LEFT", basisLabel, "RIGHT", 8, 0)
+    basisHistBtn:SetScript("OnClick", function()
         local prefs = GetUIPrefs()
         prefs.rankingPriceMode = "locked"
         if panel.UpdateBasisButtons then panel.UpdateBasisButtons() end
         UI:RefreshRanking()
     end)
-    panel.basisDepositBtn = basisDepositBtn
+    panel.basisHistBtn = basisHistBtn
 
-    local basisCurrentBtn = CreateModernButton(panel, 110, 22, "Current values")
-    basisCurrentBtn:SetPoint("LEFT", basisDepositBtn, "RIGHT", 4, 0)
+    local basisCurrentBtn = CreateModernButton(panel, 120, 20, "Current values")
+    basisCurrentBtn:SetPoint("LEFT", basisHistBtn, "RIGHT", 4, 0)
     basisCurrentBtn:SetScript("OnClick", function()
         local prefs = GetUIPrefs()
         prefs.rankingPriceMode = "live"
@@ -2050,9 +2105,9 @@ function UI:BuildSettingsPanel(panel)
     local function UpdateBasisButtons()
         local mode = GetUIPrefs().rankingPriceMode or "live"
         if mode == "locked" then
-            basisDepositBtn:SetBackdropColor(0.15, 0.28, 0.42, 1)
-            basisDepositBtn:SetBackdropBorderColor(THEME.accent[1], THEME.accent[2], THEME.accent[3], 1)
-            basisDepositBtn.label:SetTextColor(1, 0.82, 0)
+            basisHistBtn:SetBackdropColor(0.15, 0.28, 0.42, 1)
+            basisHistBtn:SetBackdropBorderColor(THEME.accent[1], THEME.accent[2], THEME.accent[3], 1)
+            basisHistBtn.label:SetTextColor(1, 0.82, 0)
             basisCurrentBtn:SetBackdropColor(THEME.btnBg[1], THEME.btnBg[2], THEME.btnBg[3], 1)
             basisCurrentBtn:SetBackdropBorderColor(THEME.border[1], THEME.border[2], THEME.border[3], 1)
             basisCurrentBtn.label:SetTextColor(0.6, 0.6, 0.6)
@@ -2060,20 +2115,33 @@ function UI:BuildSettingsPanel(panel)
             basisCurrentBtn:SetBackdropColor(0.15, 0.28, 0.42, 1)
             basisCurrentBtn:SetBackdropBorderColor(THEME.accent[1], THEME.accent[2], THEME.accent[3], 1)
             basisCurrentBtn.label:SetTextColor(1, 0.82, 0)
-            basisDepositBtn:SetBackdropColor(THEME.btnBg[1], THEME.btnBg[2], THEME.btnBg[3], 1)
-            basisDepositBtn:SetBackdropBorderColor(THEME.border[1], THEME.border[2], THEME.border[3], 1)
-            basisDepositBtn.label:SetTextColor(0.6, 0.6, 0.6)
+            basisHistBtn:SetBackdropColor(THEME.btnBg[1], THEME.btnBg[2], THEME.btnBg[3], 1)
+            basisHistBtn:SetBackdropBorderColor(THEME.border[1], THEME.border[2], THEME.border[3], 1)
+            basisHistBtn.label:SetTextColor(0.6, 0.6, 0.6)
         end
     end
     panel.UpdateBasisButtons = UpdateBasisButtons
 
-    -- Default Ranking Filters Checkboxes
+    -- Notify in Chat on Newer Addon Version checkbox
+    local newerVerNotifCb = CreateFrame("CheckButton", nil, panel, "UICheckButtonTemplate")
+    newerVerNotifCb:SetSize(20, 20)
+    newerVerNotifCb:SetPoint("LEFT", basisCurrentBtn, "RIGHT", 20, 0)
+    newerVerNotifCb.label = newerVerNotifCb:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    newerVerNotifCb.label:SetPoint("LEFT", newerVerNotifCb, "RIGHT", 4, 0)
+    newerVerNotifCb.label:SetText("Notify in Chat on Newer Addon Version")
+    newerVerNotifCb:SetScript("OnClick", function(cb)
+        local prefs = GetUIPrefs()
+        prefs.notifyNewerVersion = cb:GetChecked()
+    end)
+    panel.newerVerNotifCb = newerVerNotifCb
+
+    -- Include Legacy Members by default checkbox
     local legacyFilterCb = CreateFrame("CheckButton", nil, panel, "UICheckButtonTemplate")
-    legacyFilterCb:SetSize(22, 22)
-    legacyFilterCb:SetPoint("TOPLEFT", 10, -302)
+    legacyFilterCb:SetSize(20, 20)
+    legacyFilterCb:SetPoint("TOPLEFT", 10, -282)
     legacyFilterCb.label = legacyFilterCb:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     legacyFilterCb.label:SetPoint("LEFT", legacyFilterCb, "RIGHT", 4, 0)
-    legacyFilterCb.label:SetText("Include Legacy Members")
+    legacyFilterCb.label:SetText("Include Legacy Members by default")
     legacyFilterCb:SetScript("OnClick", function(cb)
         local prefs = GetUIPrefs()
         prefs.showLegacyRanking = cb:GetChecked()
@@ -2081,33 +2149,20 @@ function UI:BuildSettingsPanel(panel)
     end)
     panel.legacyFilterCb = legacyFilterCb
 
-    local hideOfficersFilterCb = CreateFrame("CheckButton", nil, panel, "UICheckButtonTemplate")
-    hideOfficersFilterCb:SetSize(22, 22)
-    hideOfficersFilterCb:SetPoint("TOPLEFT", 220, -302)
-    hideOfficersFilterCb.label = hideOfficersFilterCb:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    hideOfficersFilterCb.label:SetPoint("LEFT", hideOfficersFilterCb, "RIGHT", 4, 0)
-    hideOfficersFilterCb.label:SetText("Hide Officers")
-    hideOfficersFilterCb:SetScript("OnClick", function(cb)
-        local prefs = GetUIPrefs()
-        prefs.hideOfficers = cb:GetChecked()
-        UI:RefreshRanking()
-    end)
-    panel.hideOfficersFilterCb = hideOfficersFilterCb
-
-    -- Sync & Diagnostics Footer Section
+    -- Section 3: Sync & Diagnostics
     local diagTitle = panel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    diagTitle:SetPoint("TOPLEFT", 10, -345)
-    diagTitle:SetText("|cff26a6f2SYNC & DIAGNOSTICS|r")
+    diagTitle:SetPoint("TOPLEFT", 10, -312)
+    diagTitle:SetText("|cff26a6f2Sync & Diagnostics|r")
 
     local diagInfo = panel:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    diagInfo:SetPoint("TOPLEFT", 10, -368)
-    diagInfo:SetWidth(580)
+    diagInfo:SetPoint("TOPLEFT", 10, -334)
+    diagInfo:SetWidth(590)
     diagInfo:SetJustifyH("LEFT")
     panel.diagInfo = diagInfo
 
-    local forceSyncBtn = CreateModernButton(panel, 120, 24, "Force P2P Sync", THEME.accent)
-    forceSyncBtn:SetPoint("TOPRIGHT", -10, -365)
-    forceSyncBtn:SetScript("OnClick", function()
+    local requestSyncBtn = CreateModernButton(panel, 140, 24, "Request Guild Sync", THEME.accent)
+    requestSyncBtn:SetPoint("TOPRIGHT", -10, -330)
+    requestSyncBtn:SetScript("OnClick", function()
         if VM.Comms and VM.Comms.SendHello then
             VM.Comms:SendHello()
         end
@@ -2117,9 +2172,48 @@ function UI:BuildSettingsPanel(panel)
         if VM.BankScanner and VM.BankScanner.ForceScan then
             VM.BankScanner:ForceScan()
         end
-        print("|cff00ccff[Vault Manager]|r Forced P2P sync broadcast & guild bank scan triggered.")
+        VM:Print("Requested guild sync & broadcasted state.")
     end)
-    panel.forceSyncBtn = forceSyncBtn
+    panel.requestSyncBtn = requestSyncBtn
+
+    -- Section 4: Local Maintenance
+    local maintTitle = panel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    maintTitle:SetPoint("TOPLEFT", 10, -380)
+    maintTitle:SetText("|cff26a6f2Local Maintenance|r")
+
+    local resetPosBtn = CreateModernButton(panel, 160, 24, "Reset Window Position")
+    resetPosBtn:SetPoint("TOPLEFT", 10, -402)
+    resetPosBtn:SetScript("OnClick", function()
+        if mainFrame then
+            mainFrame:ClearAllPoints()
+            mainFrame:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
+        end
+        local prefs = GetUIPrefs()
+        prefs.windowPos = nil
+        VM:Print("Window position reset to center.")
+    end)
+    panel.resetPosBtn = resetPosBtn
+
+    local clearCacheBtn = CreateModernButton(panel, 140, 24, "Clear Local Cache", { 0.85, 0.35, 0.35, 1 })
+    clearCacheBtn:SetPoint("LEFT", resetPosBtn, "RIGHT", 10, 0)
+    clearCacheBtn:SetScript("OnClick", function()
+        if VM.db then
+            VM.db.inventory = { lastScan = 0, scannedBy = "", gold = 0, tabs = {} }
+            VM.db.vault = VM.db.inventory
+            VM.db.processedBankLogs = {}
+            VM.db.requests = {}
+            VM.db.fulfillments = VM.db.requests
+            VM.pendingTradePayments = {}
+        end
+        VM:Print("Local cache cleared (ledger, roster, and tab rules preserved).")
+        if VM.UI then VM.UI:RefreshAll() end
+    end)
+    panel.clearCacheBtn = clearCacheBtn
+
+    local maintDesc = panel:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+    maintDesc:SetPoint("LEFT", clearCacheBtn, "RIGHT", 12, 0)
+    maintDesc:SetText("Clears temporary bank and request cache without affecting ledger or rules.")
+    panel.maintDesc = maintDesc
 end
 
 function UI:RefreshSettings()
@@ -2131,12 +2225,8 @@ function UI:RefreshSettings()
     if not panel or not panel.tabRuleRows then return end
     local isOff = VM:IsOfficer()
 
-    if panel.scaleSlider then
-        local scale = uiPrefs.uiScale or 1.0
-        panel.scaleSlider:SetValue(scale)
-        if panel.scaleSlider.text then
-            panel.scaleSlider.text:SetText(string.format("Scale: %d%%", math.floor(scale * 100 + 0.5)))
-        end
+    if panel.UpdateScaleButtons then
+        panel.UpdateScaleButtons()
     end
     if panel.minimapCb then
         local showMM = (VM.db.minimap and VM.db.minimap.hide == true) and false or true
@@ -2149,114 +2239,154 @@ function UI:RefreshSettings()
     if panel.legacyFilterCb then
         panel.legacyFilterCb:SetChecked(uiPrefs.showLegacyRanking ~= false)
     end
-    if panel.hideOfficersFilterCb then
-        panel.hideOfficersFilterCb:SetChecked(uiPrefs.hideOfficers == true)
+    if panel.chatNotifCb then
+        panel.chatNotifCb:SetChecked(uiPrefs.enableChatNotifications ~= false)
+    end
+    if panel.newerVerNotifCb then
+        panel.newerVerNotifCb:SetChecked(uiPrefs.notifyNewerVersion ~= false)
     end
 
     if panel.diagInfo then
         local gKey = VM:GetActiveGuildKey() or "None"
         local protoVer = VM.VERSION or 6
+        local addonVer = VM:GetAddonVersion()
         local inv = VM.db and VM.db.inventory
         local lastScan = inv and inv.lastScan or 0
         local scanTimeStr = lastScan > 0 and date("%d/%m %H:%M", lastScan) or "Never"
         local scanBy = (inv and (inv.lastScanBy or inv.scannedBy)) or "None"
-        panel.diagInfo:SetText(string.format("Active Guild Bucket: |cffffffff%s|r  |  Protocol: |cff26a6f2v%d|r\nLast Sync Source: |cffffffff%s|r  |  Timestamp: |cffffffff%s|r",
-            gKey, protoVer, scanBy, scanTimeStr))
+
+        -- Calculate rule signature status
+        local validSigs = 0
+        local totalRules = 0
+        if VM.db and VM.db.tabRules then
+            local guildName = GetGuildInfo("player") or VM:GetActiveGuildKey() or ""
+            for idx, rule in pairs(VM.db.tabRules) do
+                if rule then
+                    totalRules = totalRules + 1
+                    local expected = VM:ComputeRuleSignature(guildName, idx, rule)
+                    if rule.sig and rule.sig == expected then
+                        validSigs = validSigs + 1
+                    end
+                end
+            end
+        end
+        local sigStatus = (totalRules == 0) and "|cffaaaaaaNo Rules Set|r" or (validSigs == totalRules and "|cff44dd77All Signatures Valid|r" or string.format("|cffff5555%d/%d Valid|r", validSigs, totalRules))
+
+        panel.diagInfo:SetText(string.format("Addon Version: |cffffffffv%s|r  |  Protocol: |cff26a6f2v%d|r  |  Rule Signatures: %s\nLast Bank Scan: |cffffffff%s|r (%s)  |  Guild Bucket: |cffffffff%s|r",
+            addonVer, protoVer, sigStatus, scanBy, scanTimeStr, gKey))
     end
 
     for i = 1, 6 do
         local r = panel.tabRuleRows[i]
-        local tabData = VM.db.inventory.tabs[i]
-        if tabData then
-            r:Show()
-            local rule = VM:GetTabRule(i)
-            r.label:SetText(string.format("Tab %d: %s", i, tabData.name or ""))
+        local tabData = VM.db.inventory and VM.db.inventory.tabs and VM.db.inventory.tabs[i]
+        local tabName = (tabData and tabData.name) or string.format("Tab %d", i)
+        r:Show()
+        local rule = VM:GetTabRule(i)
+        r.label:SetText(string.format("Tab %d: %s", i, tabName))
+        if not r.userEditedPct then
             r.pctBox:SetText(tostring(rule.percent or 50))
+        end
 
-            local mode = rule.mode or "FREE"
-            local byStr = (rule.updatedBy and rule.updatedBy ~= "") and (" (set by " .. rule.updatedBy .. ")") or ""
+        if not r.selectedMode then
+            r.selectedMode = rule.mode or "FREE"
+        end
 
-            if mode == "LOCKED" then
-                r.status:SetText(string.format("|cffff5555ACTIVE: Locked%s|r", byStr))
-            elseif mode == "PERCENT" then
-                r.status:SetText(string.format("|cffffcc33ACTIVE: %d%% of AH%s|r", rule.percent or 50, byStr))
-            else
-                r.status:SetText(string.format("|cff44dd77ACTIVE: Free-for-All%s|r", byStr))
-            end
+        local mode = rule.mode or "FREE"
+        local byStr = (rule.updatedBy and rule.updatedBy ~= "") and (" (set by " .. rule.updatedBy .. ")") or ""
 
-            local function StyleButton(btn, isActive, activeBg, activeBorder, activeText)
-                if not isOff then
-                    btn:Disable()
-                    btn:SetBackdropColor(THEME.btnDisabled[1], THEME.btnDisabled[2], THEME.btnDisabled[3], 0.4)
-                    btn:SetBackdropBorderColor(THEME.border[1], THEME.border[2], THEME.border[3], 0.4)
-                    btn.label:SetTextColor(0.4, 0.4, 0.4)
-                elseif isActive then
-                    btn:Enable()
-                    btn:SetBackdropColor(activeBg[1], activeBg[2], activeBg[3], 1)
-                    btn:SetBackdropBorderColor(activeBorder[1], activeBorder[2], activeBorder[3], 1)
-                    btn.label:SetTextColor(activeText[1], activeText[2], activeText[3])
-                else
-                    btn:Enable()
-                    btn:SetBackdropColor(THEME.btnBg[1], THEME.btnBg[2], THEME.btnBg[3], 1)
-                    btn:SetBackdropBorderColor(THEME.border[1], THEME.border[2], THEME.border[3], 0.8)
-                    btn.label:SetTextColor(0.6, 0.6, 0.6)
-                end
-            end
-
-            StyleButton(r.freeBtn, mode == "FREE", {0.10, 0.28, 0.18, 1}, {0.20, 0.80, 0.40, 1}, {0.3, 0.9, 0.5})
-            StyleButton(r.pctBtn, mode == "PERCENT", {0.32, 0.26, 0.10, 1}, {0.90, 0.70, 0.20, 1}, {1, 0.85, 0.2})
-            StyleButton(r.lockBtn, mode == "LOCKED", {0.32, 0.12, 0.12, 1}, {0.90, 0.30, 0.30, 1}, {1, 0.4, 0.4})
-
-            if isOff and mode == "PERCENT" then
-                r.pctBox:Enable()
-                r.pctBox:SetBackdropColor(0.05, 0.06, 0.08, 1)
-                r.pctBox:SetBackdropBorderColor(THEME.accent[1], THEME.accent[2], THEME.accent[3], 1)
-                r.pctBox:SetAlpha(1.0)
-            else
-                r.pctBox:ClearFocus()
-                r.pctBox:Disable()
-                r.pctBox:SetBackdropColor(0.05, 0.06, 0.08, 0.4)
-                r.pctBox:SetBackdropBorderColor(THEME.border[1], THEME.border[2], THEME.border[3], 0.3)
-                r.pctBox:SetAlpha(0.4)
-            end
-
-            if isOff then
-                r.freeBtn:SetScript("OnClick", function() VM:SetTabRule(i, "FREE", 50) end)
-                r.pctBtn:SetScript("OnClick", function()
-                    local p = tonumber(r.pctBox:GetText()) or 50
-                    if not p or p <= 0 then
-                        p = 50
-                        r.pctBox:SetText("50")
-                    end
-                    VM:SetTabRule(i, "PERCENT", p)
-                end)
-                r.lockBtn:SetScript("OnClick", function() VM:SetTabRule(i, "LOCKED", 50) end)
-                r.pctBox:SetScript("OnEnterPressed", function(selfBox)
-                    selfBox:ClearFocus()
-                    local p = tonumber(selfBox:GetText()) or 50
-                    if not p or p <= 0 then
-                        p = 50
-                        selfBox:SetText("50")
-                    end
-                    VM:SetTabRule(i, "PERCENT", p)
-                end)
-                r.pctBox:SetScript("OnEditFocusLost", function(selfBox)
-                    local p = tonumber(selfBox:GetText()) or 50
-                    if not p or p <= 0 then
-                        p = 50
-                        selfBox:SetText("50")
-                    end
-                    VM:SetTabRule(i, "PERCENT", p)
-                end)
-            else
-                r.freeBtn:SetScript("OnClick", nil)
-                r.pctBtn:SetScript("OnClick", nil)
-                r.lockBtn:SetScript("OnClick", nil)
-                r.pctBox:SetScript("OnEnterPressed", nil)
-                r.pctBox:SetScript("OnEditFocusLost", nil)
-            end
+        if mode == "LOCKED" then
+            r.status:SetText(string.format("|cffff5555ACTIVE: Locked%s|r", byStr))
+        elseif mode == "PERCENT" then
+            r.status:SetText(string.format("|cffffcc33ACTIVE: %d%% of AH%s|r", rule.percent or 50, byStr))
         else
-            r:Hide()
+            r.status:SetText(string.format("|cff44dd77ACTIVE: Free-for-All%s|r", byStr))
+        end
+
+        local function StyleButton(btn, isActive, activeBg, activeBorder, activeText)
+            if not isOff then
+                btn:Disable()
+                btn:SetBackdropColor(THEME.btnDisabled[1], THEME.btnDisabled[2], THEME.btnDisabled[3], 0.4)
+                btn:SetBackdropBorderColor(THEME.border[1], THEME.border[2], THEME.border[3], 0.4)
+                btn.label:SetTextColor(0.4, 0.4, 0.4)
+            elseif isActive then
+                btn:Enable()
+                btn:SetBackdropColor(activeBg[1], activeBg[2], activeBg[3], 1)
+                btn:SetBackdropBorderColor(activeBorder[1], activeBorder[2], activeBorder[3], 1)
+                btn.label:SetTextColor(activeText[1], activeText[2], activeText[3])
+            else
+                btn:Enable()
+                btn:SetBackdropColor(THEME.btnBg[1], THEME.btnBg[2], THEME.btnBg[3], 1)
+                btn:SetBackdropBorderColor(THEME.border[1], THEME.border[2], THEME.border[3], 0.8)
+                btn.label:SetTextColor(0.6, 0.6, 0.6)
+            end
+        end
+
+        local selMode = r.selectedMode or mode
+        StyleButton(r.freeBtn, selMode == "FREE", {0.10, 0.28, 0.18, 1}, {0.20, 0.80, 0.40, 1}, {0.3, 0.9, 0.5})
+        StyleButton(r.pctBtn, selMode == "PERCENT", {0.32, 0.26, 0.10, 1}, {0.90, 0.70, 0.20, 1}, {1, 0.85, 0.2})
+        StyleButton(r.lockBtn, selMode == "LOCKED", {0.32, 0.12, 0.12, 1}, {0.90, 0.30, 0.30, 1}, {1, 0.4, 0.4})
+
+        if not isOff then
+            r.saveBtn:Disable()
+            r.saveBtn:SetBackdropColor(THEME.btnDisabled[1], THEME.btnDisabled[2], THEME.btnDisabled[3], 0.4)
+            r.saveBtn:SetBackdropBorderColor(THEME.border[1], THEME.border[2], THEME.border[3], 0.4)
+            r.saveBtn.label:SetTextColor(0.4, 0.4, 0.4)
+        else
+            r.saveBtn:Enable()
+            r.saveBtn:SetBackdropColor(THEME.accent[1], THEME.accent[2], THEME.accent[3], 1)
+            r.saveBtn:SetBackdropBorderColor(THEME.accent[1], THEME.accent[2], THEME.accent[3], 1)
+            r.saveBtn.label:SetTextColor(1, 1, 1)
+        end
+
+        if isOff and selMode == "PERCENT" then
+            r.pctBox:Enable()
+            r.pctBox:SetBackdropColor(0.05, 0.06, 0.08, 1)
+            r.pctBox:SetBackdropBorderColor(THEME.accent[1], THEME.accent[2], THEME.accent[3], 1)
+            r.pctBox:SetAlpha(1.0)
+        else
+            r.pctBox:ClearFocus()
+            r.pctBox:Disable()
+            r.pctBox:SetBackdropColor(0.05, 0.06, 0.08, 0.4)
+            r.pctBox:SetBackdropBorderColor(THEME.border[1], THEME.border[2], THEME.border[3], 0.3)
+            r.pctBox:SetAlpha(0.4)
+        end
+
+        if isOff then
+            r.freeBtn:SetScript("OnClick", function()
+                r.selectedMode = "FREE"
+                UI:RefreshSettings()
+            end)
+            r.pctBtn:SetScript("OnClick", function()
+                r.selectedMode = "PERCENT"
+                UI:RefreshSettings()
+            end)
+            r.lockBtn:SetScript("OnClick", function()
+                r.selectedMode = "LOCKED"
+                UI:RefreshSettings()
+            end)
+            r.saveBtn:SetScript("OnClick", function()
+                local p = tonumber(r.pctBox:GetText()) or 50
+                if p <= 0 then p = 50 r.pctBox:SetText("50") end
+                r.userEditedPct = false
+                VM:SetTabRule(i, r.selectedMode, p)
+            end)
+            r.pctBox:SetScript("OnTextChanged", function(selfBox)
+                r.userEditedPct = true
+            end)
+            r.pctBox:SetScript("OnEnterPressed", function(selfBox)
+                selfBox:ClearFocus()
+                local p = tonumber(selfBox:GetText()) or 50
+                if p <= 0 then p = 50 selfBox:SetText("50") end
+                r.userEditedPct = false
+                VM:SetTabRule(i, r.selectedMode, p)
+            end)
+        else
+            r.freeBtn:SetScript("OnClick", nil)
+            r.pctBtn:SetScript("OnClick", nil)
+            r.lockBtn:SetScript("OnClick", nil)
+            r.saveBtn:SetScript("OnClick", nil)
+            r.pctBox:SetScript("OnTextChanged", nil)
+            r.pctBox:SetScript("OnEnterPressed", nil)
         end
     end
 end
@@ -2360,6 +2490,17 @@ function UI:RefreshAllTabs()
     self:RefreshSettings()
 end
 
+function UI:SelectTab(tabIndex)
+    if not tabIndex or tabIndex < 1 or tabIndex > 6 then return end
+    currentTab = tabIndex
+    if rosterPickerFrame then rosterPickerFrame:Hide() end
+    if bankValDropdownFrame then bankValDropdownFrame:Hide() end
+    if exportModalFrame then exportModalFrame:Hide() end
+    if rankingPeriodDropdownFrame then rankingPeriodDropdownFrame:Hide() end
+    self:RefreshAll()
+end
+UI.ShowTab = UI.SelectTab
+
 function UI:RefreshAll()
     if not mainFrame or not mainFrame:IsShown() then return end
     if not mainFrame.navButtons or not mainFrame.panels or not mainFrame.scanInfo then return end
@@ -2435,174 +2576,3 @@ function UI:RefreshAll()
     end
 end
 
---------------------------------------------------------------------------------
--- OFFICER BANK POPUP
---------------------------------------------------------------------------------
-function UI:CreateOfficerPopupFrame()
-    popupFrame = CreateFrame("Frame", "VaultManagerOfficerPopup", UIParent, "BackdropTemplate")
-    popupFrame:SetSize(480, 270)
-    popupFrame:SetPoint("TOP", 0, -110)
-    popupFrame:SetMovable(true)
-    popupFrame:EnableMouse(true)
-    popupFrame:RegisterForDrag("LeftButton")
-    popupFrame:SetScript("OnDragStart", popupFrame.StartMoving)
-    popupFrame:SetScript("OnDragStop", popupFrame.StopMovingOrSizing)
-    ApplyModernBackdrop(popupFrame, THEME.bg, THEME.accent)
-    popupFrame:Hide()
-
-    local title = popupFrame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    title:SetPoint("TOPLEFT", 14, -12)
-    title:SetText("|cff26a6f2APPROVED GUILD BANK REQUESTS|r")
-
-    local closeBtn = CreateModernButton(popupFrame, 22, 22, "X", { 0.85, 0.25, 0.25, 1 })
-    closeBtn:SetPoint("TOPRIGHT", -8, -8)
-    closeBtn:SetScript("OnClick", function() popupFrame:Hide() end)
-
-    popupFrame.scroll = CreateScrollArea(popupFrame, -38, 10)
-    popupFrame.scroll.content:SetSize(440, 1)
-end
-
-function UI:ShowOfficerBankPopup(orders)
-    if not popupFrame then self:CreateOfficerPopupFrame() end
-    if not popupFrame or not popupFrame.scroll then return end
-    local content = popupFrame.scroll.content
-    if not content then return end
-    popupFrame:Show()
-    for _, r in ipairs(popupFrame.scroll.rows) do r:Hide() end
-
-    local y = 0
-    for idx, req in ipairs(orders) do
-        local row = popupFrame.scroll.rows[idx]
-        if not row then
-            row = CreateFrame("Frame", nil, content, "BackdropTemplate")
-            row:SetSize(440, 28)
-
-            row.label = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-            row.label:SetPoint("LEFT", 8, 0)
-            row.label:SetWidth(260)
-            row.label:SetJustifyH("LEFT")
-
-            row.prepBtn = CreateModernButton(row, 76, 22, "Prepare", THEME.accent)
-            row.prepBtn:SetPoint("LEFT", 275, 0)
-
-            row.doneBtn = CreateModernButton(row, 76, 22, "Complete", { 0.25, 0.80, 0.45, 1 })
-            row.doneBtn:SetPoint("LEFT", 356, 0)
-
-            popupFrame.scroll.rows[idx] = row
-        end
-
-        ApplyModernBackdrop(row, (idx % 2 == 0) and THEME.rowEven or THEME.rowOdd, { 0, 0, 0, 0 })
-        row:SetPoint("TOPLEFT", 2, -y)
-        row:Show()
-        row.label:SetText(string.format("%s: %dx %s (Tab %d)",
-            VM:ColorizeName(req.requester), req.count, req.itemLink or req.itemName, req.tab))
-
-        row.prepBtn:SetScript("OnClick", function()
-            VM.Fulfillment.activeOrder = req
-            print(string.format("|cff00ccff[Vault Manager]|r Withdraw %dx %s from Tab %d, then open Mail or Trade with %s.",
-                req.count, req.itemName, req.tab, req.requester))
-        end)
-
-        row.doneBtn:SetScript("OnClick", function()
-            VM.Fulfillment:CompleteRequest(req.id)
-            local remaining = VM.Fulfillment:GetApprovedOrders()
-            if #remaining == 0 then
-                popupFrame:Hide()
-            else
-                UI:ShowOfficerBankPopup(remaining)
-            end
-        end)
-
-        y = y + 30
-    end
-    content:SetHeight(math.max(1, y))
-end
-
-function UI:UpdateScanStatusButton()
-    if not mainFrame or not mainFrame.scanStatusBtn or not VM.BankScanner then return end
-    local status, text, color = VM.BankScanner:GetScanStatus()
-    mainFrame.scanStatusBtn:SetText(text)
-    mainFrame.scanStatusBtn:SetBackdropColor(color[1], color[2], color[3], color[4] or 1)
-end
-
-function UI:RefreshAllTabs()
-    self:RefreshInventory()
-    self:RefreshRequests()
-    self:RefreshLedger()
-    self:RefreshRanking()
-    self:RefreshSettings()
-end
-
-function UI:RefreshAll()
-    if not mainFrame or not mainFrame:IsShown() then return end
-    if not mainFrame.navButtons or not mainFrame.panels or not mainFrame.scanInfo then return end
-
-    if VM.isUnguilded then
-        mainFrame.scanInfo:SetText("Not in a guild")
-        if mainFrame.scanStatusBtn then
-            mainFrame.scanStatusBtn:SetText("No Guild")
-            mainFrame.scanStatusBtn:SetBackdropColor(0.4, 0.4, 0.4, 1)
-        end
-        for i = 1, 5 do
-            if mainFrame.panels and mainFrame.panels[i] then
-                mainFrame.panels[i]:Hide()
-            end
-        end
-        return
-    end
-
-    self:UpdateScanStatusButton()
-
-    if VM.newerVersionAvailable then
-        mainFrame.scanInfo:SetText("|cffffcc33Update available|r")
-    else
-        local inv = VM.db and VM.db.inventory
-        local lastScan = inv and inv.lastScan or 0
-        if lastScan > 0 then
-            local diff = time() - lastScan
-            local hours = math.floor(diff / 3600)
-            local mins = math.floor((diff % 3600) / 60)
-            local timeAgo = hours > 0 and string.format("%dh %dm", hours, mins) or string.format("%dm", mins)
-            local scanBy = inv.lastScanBy or inv.scannedBy or "?"
-            local syncedFrom = inv.lastSyncedFrom
-            local syncNote = (syncedFrom and syncedFrom ~= "" and syncedFrom ~= VM:GetPlayerName() and syncedFrom ~= scanBy) and string.format(" (synced via %s)", syncedFrom) or ""
-
-            local colorTag = "|cff44dd77" -- green < 6h
-            if diff > 86400 then colorTag = "|cffff5555" -- red > 24h
-            elseif diff > 21600 then colorTag = "|cffffcc33" end -- yellow 6-24h
-
-            mainFrame.scanInfo:SetText(string.format("Vault scanned %s ago by %s%s", colorTag .. timeAgo .. "|r", scanBy, syncNote))
-        else
-            mainFrame.scanInfo:SetText("Vault not yet scanned")
-        end
-    end
-
-    for i = 1, 5 do
-        local btn = mainFrame.navButtons[i]
-        local panel = mainFrame.panels[i]
-        if btn and panel then
-            if i == currentTab then
-                if btn.activeBar then btn.activeBar:Show() end
-                btn:SetBackdropColor(0.14, 0.20, 0.28, 1)
-                btn:SetBackdropBorderColor(THEME.accent[1], THEME.accent[2], THEME.accent[3], 1)
-                panel:Show()
-            else
-                if btn.activeBar then btn.activeBar:Hide() end
-                btn:SetBackdropColor(THEME.btnBg[1], THEME.btnBg[2], THEME.btnBg[3], 1)
-                btn:SetBackdropBorderColor(THEME.border[1], THEME.border[2], THEME.border[3], 1)
-                panel:Hide()
-            end
-        end
-    end
-
-    if currentTab ~= 1 then
-        if bankValDropdownFrame then bankValDropdownFrame:Hide() end
-    end
-
-    if currentTab == 1 then self:RefreshInventory()
-    elseif currentTab == 2 then self:RefreshRequests()
-    elseif currentTab == 3 then self:RefreshLedger()
-    elseif currentTab == 4 then self:RefreshRanking()
-    elseif currentTab == 5 then self:RefreshSettings()
-    end
-end

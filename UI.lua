@@ -1660,7 +1660,7 @@ function UI:RefreshSettings()
             end
 
             if isOff then
-                r.freeBtn:SetScript("OnClick", function() VM:SetTabRule(i, "FREE", 0) end)
+                r.freeBtn:SetScript("OnClick", function() VM:SetTabRule(i, "FREE", 50) end)
                 r.pctBtn:SetScript("OnClick", function()
                     local p = tonumber(r.pctBox:GetText()) or 50
                     if not p or p <= 0 then
@@ -1669,9 +1669,17 @@ function UI:RefreshSettings()
                     end
                     VM:SetTabRule(i, "PERCENT", p)
                 end)
-                r.lockBtn:SetScript("OnClick", function() VM:SetTabRule(i, "LOCKED", 0) end)
+                r.lockBtn:SetScript("OnClick", function() VM:SetTabRule(i, "LOCKED", 50) end)
                 r.pctBox:SetScript("OnEnterPressed", function(selfBox)
                     selfBox:ClearFocus()
+                    local p = tonumber(selfBox:GetText()) or 50
+                    if not p or p <= 0 then
+                        p = 50
+                        selfBox:SetText("50")
+                    end
+                    VM:SetTabRule(i, "PERCENT", p)
+                end)
+                r.pctBox:SetScript("OnEditFocusLost", function(selfBox)
                     local p = tonumber(selfBox:GetText()) or 50
                     if not p or p <= 0 then
                         p = 50
@@ -1684,6 +1692,7 @@ function UI:RefreshSettings()
                 r.pctBtn:SetScript("OnClick", nil)
                 r.lockBtn:SetScript("OnClick", nil)
                 r.pctBox:SetScript("OnEnterPressed", nil)
+                r.pctBox:SetScript("OnEditFocusLost", nil)
             end
         else
             r:Hide()

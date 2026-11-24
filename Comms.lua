@@ -287,7 +287,6 @@ function Comms:OnMessageReceived(msg, sender)
         end
 
     elseif cmd == "RULE" then
-        if not fromOfficer and not VM:IsOfficerName(sender) then return end
         local tabIdx = tonumber(parts[2])
         local mode = UnescapeStr(parts[3])
         local pct = tonumber(parts[4]) or 50
@@ -295,11 +294,20 @@ function Comms:OnMessageReceived(msg, sender)
         local updatedBy = (#parts >= 6) and UnescapeStr(parts[6]) or sender
         local sig = (#parts >= 7) and UnescapeStr(parts[7]) or ""
 
+        if not tabIdx then return end
+
+        local cleanBy = updatedBy:match("^[^-]+") or updatedBy
+        cleanBy = VM:NormalizeName(cleanBy)
+
+        if cleanBy == "System(TamperReset)" or not VM:IsOfficerName(cleanBy) then
+            return
+        end
+
         VM:UpdateRosterCache()
         local normBy = VM:NormalizeName(updatedBy)
         if VM.db.rosterCache and next(VM.db.rosterCache) then
             local rankIdx = VM.db.rosterCache[normBy]
-            if rankIdx ~= nil and rankIdx > VM.OFFICER_MAX_RANK_INDEX then
+            if rankIdx ~= nil and rankIdx > VM.OFFICER_MAX_RANK_INDEX and rankIdx ~= 0 then
                 return
             end
         end
@@ -316,13 +324,15 @@ function Comms:OnMessageReceived(msg, sender)
             return
         end
         ruleData.sig = sig
-        ruleData.tampered = false
+        ruleData.tampered = nil
 
         local existing = VM.db.tabRules[tabIdx]
-        if tabIdx and (not existing or updatedAt >= (existing.updatedAt or 0)) then
-            VM.db.tabRules[tabIdx] = ruleData
-            if VM.UI then VM.UI:RefreshAll() end
+        if existing and (existing.updatedAt or 0) >= updatedAt then
+            return
         end
+
+        VM.db.tabRules[tabIdx] = ruleData
+        if VM.UI then VM.UI:RefreshAll() end
 
     elseif cmd == "MAIN" then
         if not fromOfficer then return end

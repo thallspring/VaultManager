@@ -270,6 +270,14 @@ function Scanner:ScanBank()
         end
     end
 
+    local bankMoney = 0
+    if GetGuildBankMoney then
+        local m = GetGuildBankMoney()
+        if type(m) == "number" and m >= 0 then
+            bankMoney = m
+        end
+    end
+
     if totalItemsScanned == 0 and VM.db.inventory and VM.db.inventory.tabs and next(VM.db.inventory.tabs) then
         local hasExistingItems = false
         for _, tabData in pairs(VM.db.inventory.tabs) do
@@ -281,6 +289,9 @@ function Scanner:ScanBank()
         if hasExistingItems then
             VM:LogDebug("ScanBank skipped overwriting with empty data (server data pending).")
             self.scanState = "STALE"
+            if bankMoney > 0 then
+                VM.db.inventory.gold = bankMoney
+            end
             return 0
         end
     end
@@ -291,6 +302,7 @@ function Scanner:ScanBank()
         lastScanBy = UnitName("player") or VM:GetPlayerName(),
         scannedBy = VM:GetPlayerName(),
         lastSyncedFrom = nil,
+        gold = bankMoney,
         tabs = newTabs
     }
 

@@ -200,6 +200,7 @@ function Comms:OnMessageReceived(msg, sender)
     elseif cmd == "INV_META" then
         local scanTime = tonumber(parts[2]) or 0
         local scannedBy = UnescapeStr(parts[3])
+        local gold = tonumber(parts[4]) or 0
         if scanTime == 0 then return end
 
         local nowServer = (GetServerTime and GetServerTime()) or time()
@@ -212,9 +213,11 @@ function Comms:OnMessageReceived(msg, sender)
             VM.db.inventory.lastScanBy = scannedBy
             VM.db.inventory.scannedBy = scannedBy
             VM.db.inventory.lastSyncedFrom = sender
+            VM.db.inventory.gold = gold
             VM.db.inventory.tabs = {}
         elseif scanTime == (VM.db.inventory.lastScan or 0) then
             VM.db.inventory.lastSyncedFrom = sender
+            if gold > 0 then VM.db.inventory.gold = gold end
         end
         if VM.BankScanner then
             VM.BankScanner.scanState = "COMPLETE"
@@ -383,7 +386,8 @@ function Comms:BroadcastInventory()
     local inv = VM.db.inventory
     if not inv or not inv.lastScan or inv.lastScan == 0 then return end
     local scanBy = inv.lastScanBy or inv.scannedBy or UnitName("player")
-    self:SendRaw(string.format("INV_META|%d|%s", inv.lastScan, EscapeStr(scanBy)))
+    local gold = tonumber(inv.gold) or 0
+    self:SendRaw(string.format("INV_META|%d|%s|%d", inv.lastScan, EscapeStr(scanBy), gold))
     for tabIdx, tabData in pairs(inv.tabs) do
         self:SendRaw(string.format("INV_TAB|%d|%d|%s|%s",
             inv.lastScan, tabIdx, EscapeStr(tabData.name), EscapeStr(tabData.icon)))

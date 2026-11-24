@@ -34,7 +34,8 @@ local function InitGuildSubTables(db)
             db.uiPrefs[k] = v
         end
     end
-    db.inventory = db.inventory or { lastScan = 0, scannedBy = "", tabs = {} }
+    db.inventory = db.inventory or { lastScan = 0, scannedBy = "", gold = 0, tabs = {} }
+    if db.inventory.gold == nil then db.inventory.gold = 0 end
     db.vault = db.vault or db.inventory
     db.ledger = db.ledger or {}
     db.requests = db.requests or {}
@@ -507,6 +508,75 @@ function VM:FormatMoney(copper)
     if s > 0 or g > 0 then txt = txt .. s .. "|cffc0c0c0s|r " end
     txt = txt .. c .. "|cffcd7f32c|r"
     return txt
+end
+
+function VM:FormatMoneyShort(copper)
+    if not copper or copper == 0 then return "0g" end
+    local g = math.floor(copper / 10000)
+    local s = math.floor((copper % 10000) / 100)
+    if g > 0 then
+        if s > 0 and g < 100 then
+            return string.format("%dg %ds", g, s)
+        else
+            return string.format("%dg", g)
+        end
+    elseif s > 0 then
+        return string.format("%ds", s)
+    else
+        return string.format("%dc", copper)
+    end
+end
+
+function VM:CalculateBankWealth()
+    local inv = self.db and self.db.inventory or {}
+    local gold = tonumber(inv.gold) or 0
+    local tabsResult = {}
+    local itemsTotal = 0
+
+    if inv.tabs then
+        local tabIndices = {}
+        for tabIdx in pairs(inv.tabs) do
+            table.insert(tabIndices, tonumber(tabIdx) or tabIdx)
+        end
+        table.sort(tabIndices, function(a, b) return tostring(a) < tostring(b) end)
+
+        for _, tabIdx in ipairs(tabIndices) do
+            local tabData = inv.tabs[tabIdx]
+            if tabData then
+                local tabItemCount = 0
+                local tabVal = 0
+                if tabData.items then
+                    local itemKeys = {}
+                    for k in pairs(tabData.items) do table.insert(itemKeys, k) end
+                    table.sort(itemKeys, function(a, b) return tostring(a) < tostring(b) end)
+                    for _, k in ipairs(itemKeys) do
+                        local item = tabData.items[k]
+                        if item then
+                            local count = tonumber(item.count) or 1
+                            tabItemCount = tabItemCount + count
+                            local price = self:GetEffectiveLivePrice(item.itemID, item.itemLink or item.link, item.ahPrice) or 0
+                            tabVal = tabVal + (price * count)
+                        end
+                    end
+                end
+                itemsTotal = itemsTotal + tabVal
+                table.insert(tabsResult, {
+                    index = tabIdx,
+                    name = tabData.name or ("Tab " .. tabIdx),
+                    itemCount = tabItemCount,
+                    value = tabVal
+                })
+            end
+        end
+    end
+
+    local total = gold + itemsTotal
+    return {
+        total = total,
+        gold = gold,
+        itemsTotal = itemsTotal,
+        tabs = tabsResult
+    }
 end
 
 function VM:GetTabRule(tabIndex)

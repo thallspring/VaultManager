@@ -198,6 +198,7 @@ function UI:Init()
     self:CreateRosterPickerFrame()
     self:CreateExportModal()
     self:CreateRankingPeriodPickerFrame()
+    self:CreateBankValDropdown()
 end
 
 function UI:Toggle()
@@ -207,6 +208,7 @@ function UI:Toggle()
         if rosterPickerFrame then rosterPickerFrame:Hide() end
         if exportModalFrame then exportModalFrame:Hide() end
         if rankingPeriodDropdownFrame then rankingPeriodDropdownFrame:Hide() end
+        if bankValDropdownFrame then bankValDropdownFrame:Hide() end
     else
         if VM.SwitchGuildContext then
             VM:SwitchGuildContext("UI_TOGGLE")
@@ -499,6 +501,98 @@ function UI:OpenRankingPeriodPicker(anchor)
 end
 
 --------------------------------------------------------------------------------
+-- BANK VALUE DROPDOWN PANEL
+--------------------------------------------------------------------------------
+local bankValDropdownFrame = nil
+
+function UI:CreateBankValDropdown()
+    bankValDropdownFrame = CreateFrame("Frame", "VaultManagerBankValDropdown", UIParent, "BackdropTemplate")
+    bankValDropdownFrame:SetSize(290, 240)
+    bankValDropdownFrame:SetFrameStrata("DIALOG")
+    ApplyModernBackdrop(bankValDropdownFrame, THEME.bg, THEME.accent)
+    bankValDropdownFrame:Hide()
+    table.insert(UISpecialFrames, "VaultManagerBankValDropdown")
+
+    local sf = CreateScrollArea(bankValDropdownFrame, -10, 10)
+    sf.content:SetSize(260, 1)
+    bankValDropdownFrame.scroll = sf
+end
+
+function UI:RefreshBankValDropdown()
+    if not bankValDropdownFrame or not bankValDropdownFrame:IsShown() then return end
+    local wealth = VM:CalculateBankWealth()
+    local content = bankValDropdownFrame.scroll.content
+    if not content then return end
+    if not bankValDropdownFrame.rows then bankValDropdownFrame.rows = {} end
+    for _, r in ipairs(bankValDropdownFrame.rows) do r:Hide() end
+
+    local rowIdx = 0
+    local y = 0
+
+    local function GetRow()
+        rowIdx = rowIdx + 1
+        local row = bankValDropdownFrame.rows[rowIdx]
+        if not row then
+            row = CreateFrame("Frame", nil, content, "BackdropTemplate")
+            row:SetSize(260, 22)
+            row.label = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+            row.label:SetPoint("LEFT", 6, 0)
+            row.label:SetPoint("RIGHT", -6, 0)
+            row.label:SetJustifyH("LEFT")
+            bankValDropdownFrame.rows[rowIdx] = row
+        end
+        row:Show()
+        return row
+    end
+
+    -- 1. Total Value
+    local r1 = GetRow()
+    ApplyModernBackdrop(r1, THEME.rowEven, {0,0,0,0})
+    r1:SetPoint("TOPLEFT", 0, -y)
+    r1.label:SetText(string.format("|cffffd700Total Value (Gold + Items):|r %s", VM:FormatMoney(wealth.total)))
+    y = y + 24
+
+    -- 2. Guild Bank Gold
+    local r2 = GetRow()
+    ApplyModernBackdrop(r2, THEME.rowOdd, {0,0,0,0})
+    r2:SetPoint("TOPLEFT", 0, -y)
+    r2.label:SetText(string.format("  • Guild Bank Gold: %s", VM:FormatMoney(wealth.gold)))
+    y = y + 22
+
+    -- 3. Items Subtotal
+    local r3 = GetRow()
+    ApplyModernBackdrop(r3, THEME.rowEven, {0,0,0,0})
+    r3:SetPoint("TOPLEFT", 0, -y)
+    r3.label:SetText(string.format("  • Items Subtotal: %s", VM:FormatMoney(wealth.itemsTotal)))
+    y = y + 24
+
+    -- 4. Separator
+    local sep = bankValDropdownFrame.sep
+    if not sep then
+        sep = bankValDropdownFrame:CreateTexture(nil, "OVERLAY")
+        sep:SetHeight(1)
+        sep:SetColorTexture(THEME.border[1], THEME.border[2], THEME.border[3], 1)
+        bankValDropdownFrame.sep = sep
+    end
+    sep:ClearAllPoints()
+    sep:SetPoint("TOPLEFT", 6, -y)
+    sep:SetPoint("TOPRIGHT", -6, -y)
+    y = y + 6
+
+    -- 5. Tabs
+    for idx, tabInfo in ipairs(wealth.tabs) do
+        local rTab = GetRow()
+        ApplyModernBackdrop(rTab, (idx % 2 == 0) and THEME.rowEven or THEME.rowOdd, {0,0,0,0})
+        rTab:SetPoint("TOPLEFT", 0, -y)
+        rTab.label:SetText(string.format("Tab %s: %s (%d items) — %s",
+            tostring(tabInfo.index), tabInfo.name, tabInfo.itemCount, VM:FormatMoney(tabInfo.value)))
+        y = y + 22
+    end
+
+    content:SetHeight(math.max(1, y))
+end
+
+--------------------------------------------------------------------------------
 -- MAIN FRAME (5 TABS)
 --------------------------------------------------------------------------------
 function UI:CreateMainFrame()
@@ -615,6 +709,25 @@ function UI:BuildInventoryPanel(panel)
     end)
     panel.scanBtn = scanBtn
 
+    local bankValBtn = CreateModernButton(panel, 145, 24, "Bank Value: 0g (v)", THEME.accent)
+    bankValBtn:SetPoint("TOPRIGHT", scanBtn, "TOPLEFT", -6, 0)
+    bankValBtn:SetScript("OnClick", function()
+        if not bankValDropdownFrame then UI:CreateBankValDropdown() end
+        local wealth = VM:CalculateBankWealth()
+        local isOpen = bankValDropdownFrame:IsShown()
+        if isOpen then
+            bankValDropdownFrame:Hide()
+            bankValBtn:SetText("Bank Value: " .. VM:FormatMoneyShort(wealth.total) .. " (v)")
+        else
+            bankValDropdownFrame:ClearAllPoints()
+            bankValDropdownFrame:SetPoint("TOPLEFT", bankValBtn, "BOTTOMLEFT", 0, -2)
+            bankValDropdownFrame:Show()
+            bankValBtn:SetText("Bank Value: " .. VM:FormatMoneyShort(wealth.total) .. " (^)")
+            UI:RefreshBankValDropdown()
+        end
+    end)
+    panel.bankValBtn = bankValBtn
+
     local searchBox = CreateModernEditBox(panel, 140, 24, false)
     searchBox:SetPoint("TOPRIGHT", -10, -10)
     searchBox.placeholder = searchBox:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
@@ -640,6 +753,15 @@ function UI:RefreshInventory()
     if not panel or not panel.scroll or not panel.bankTabButtons then return end
     local inv = VM.db and VM.db.inventory
     if not inv or not inv.tabs then return end
+
+    if panel.bankValBtn then
+        local wealth = VM:CalculateBankWealth()
+        local isOpen = bankValDropdownFrame and bankValDropdownFrame:IsShown()
+        panel.bankValBtn:SetText(string.format("Bank Value: %s %s", VM:FormatMoneyShort(wealth.total), isOpen and "(^)" or "(v)"))
+        if isOpen then
+            UI:RefreshBankValDropdown()
+        end
+    end
 
     for i = 1, 6 do
         local btn = panel.bankTabButtons[i]
@@ -1989,6 +2111,10 @@ function UI:RefreshAll()
                 panel:Hide()
             end
         end
+    end
+
+    if currentTab ~= 1 then
+        if bankValDropdownFrame then bankValDropdownFrame:Hide() end
     end
 
     if currentTab == 1 then self:RefreshInventory()

@@ -139,6 +139,7 @@ function UI:Init()
     self:CreateOfficerPopupFrame()
     self:CreateRosterPickerFrame()
     self:CreateExportModal()
+    self:CreateRankingPeriodPickerFrame()
 end
 
 function UI:Toggle()
@@ -147,6 +148,7 @@ function UI:Toggle()
         mainFrame:Hide()
         if rosterPickerFrame then rosterPickerFrame:Hide() end
         if exportModalFrame then exportModalFrame:Hide() end
+        if rankingPeriodDropdownFrame then rankingPeriodDropdownFrame:Hide() end
     else
         if IsInGuild() then
             if C_GuildInfo and C_GuildInfo.GuildRoster then C_GuildInfo.GuildRoster()
@@ -357,6 +359,61 @@ function UI:RefreshRosterPicker(filter)
         end
     end
     content:SetHeight(math.max(1, y))
+end
+
+--------------------------------------------------------------------------------
+-- RANKING PERIOD DROPDOWN PICKER
+--------------------------------------------------------------------------------
+local rankingPeriodDropdownFrame = nil
+
+function UI:CreateRankingPeriodPickerFrame()
+    rankingPeriodDropdownFrame = CreateFrame("Frame", "VaultManagerRankingPeriodPicker", UIParent, "BackdropTemplate")
+    rankingPeriodDropdownFrame:SetSize(120, 80)
+    rankingPeriodDropdownFrame:SetFrameStrata("FULLSCREEN_DIALOG")
+    ApplyModernBackdrop(rankingPeriodDropdownFrame, { 0.05, 0.06, 0.08, 0.98 }, THEME.accent)
+    rankingPeriodDropdownFrame:Hide()
+    table.insert(UISpecialFrames, "VaultManagerRankingPeriodPicker")
+
+    local options = {
+        { key = "ALL", label = "All-Time" },
+        { key = "CURRENT", label = "Current Month" },
+        { key = "PREVIOUS", label = "Previous Month" },
+    }
+
+    rankingPeriodDropdownFrame.buttons = {}
+    for i, opt in ipairs(options) do
+        local btn = CreateFrame("Button", nil, rankingPeriodDropdownFrame, "BackdropTemplate")
+        btn:SetSize(112, 22)
+        btn:SetPoint("TOPLEFT", 4, -4 - (i - 1) * 24)
+        ApplyModernBackdrop(btn, THEME.rowOdd, { 0, 0, 0, 0 })
+
+        btn.label = btn:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        btn.label:SetPoint("LEFT", 6, 0)
+        btn.label:SetText(opt.label)
+
+        btn:SetScript("OnEnter", function(self)
+            self:SetBackdropColor(THEME.rowHover[1], THEME.rowHover[2], THEME.rowHover[3], 1)
+        end)
+        btn:SetScript("OnLeave", function(self)
+            self:SetBackdropColor(THEME.rowOdd[1], THEME.rowOdd[2], THEME.rowOdd[3], THEME.rowOdd[4])
+        end)
+        btn:SetScript("OnClick", function()
+            rankingPeriodDropdownFrame:Hide()
+            VM.db.uiPrefs.rankingPeriod = opt.key
+            if mainFrame and mainFrame.panels and mainFrame.panels[4] and mainFrame.panels[4].periodBtn then
+                mainFrame.panels[4].periodBtn:SetText(opt.label)
+            end
+            UI:RefreshRanking()
+        end)
+        rankingPeriodDropdownFrame.buttons[i] = btn
+    end
+end
+
+function UI:OpenRankingPeriodPicker(anchor)
+    if not rankingPeriodDropdownFrame then self:CreateRankingPeriodPickerFrame() end
+    rankingPeriodDropdownFrame:ClearAllPoints()
+    rankingPeriodDropdownFrame:SetPoint("TOPLEFT", anchor, "BOTTOMLEFT", 0, -2)
+    rankingPeriodDropdownFrame:Show()
 end
 
 --------------------------------------------------------------------------------
@@ -1015,12 +1072,11 @@ function UI:BuildRankingPanel(panel)
     local periodBtn = CreateModernDropdown(topBar, 120, 24, "All-Time")
     periodBtn:SetPoint("LEFT", 450, 0)
     periodBtn:SetScript("OnClick", function(btn)
-        local cur = VM.db.uiPrefs.rankingPeriod or "ALL"
-        local nextP = (cur == "ALL") and "CURRENT" or ((cur == "CURRENT") and "PREVIOUS" or "ALL")
-        VM.db.uiPrefs.rankingPeriod = nextP
-        local lbl = (nextP == "ALL") and "All-Time" or ((nextP == "CURRENT") and "Current Month" or "Previous Month")
-        btn:SetText(lbl)
-        UI:RefreshRanking()
+        if rankingPeriodDropdownFrame and rankingPeriodDropdownFrame:IsShown() then
+            rankingPeriodDropdownFrame:Hide()
+        else
+            UI:OpenRankingPeriodPicker(btn)
+        end
     end)
     panel.periodBtn = periodBtn
 

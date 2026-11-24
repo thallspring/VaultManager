@@ -2,6 +2,12 @@
 
 All notable changes to **Vault Manager** will be documented in this file.
 
+## [1.2.1] - 2026-11-24
+
+### Fixed & Enhanced
+- **Infinite Scan Loop & Chat Spam Prevention:** Implemented `isScanning` and `ignoreEventsUntil` guards in `BankScanner.lua` to prevent server responses to internal queries from triggering cascading scan loops. Suppressed repeated chat spam during background slot and log updates, printing "Scan complete" only upon initial bank open or manual "Force Scan" while keeping the header status button locked cleanly on green "Scan Complete".
+- **Ranking Period Dropdown Menu:** Replaced the click-to-cycle ranking period button with a modern custom dropdown menu (`VaultManagerRankingPeriodPicker`) providing direct one-click selection between "All-Time", "Current Month", and "Previous Month".
+
 ## [1.2.0] - 2026-11-23
 
 ### Added & Enhanced

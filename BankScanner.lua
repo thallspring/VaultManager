@@ -7,6 +7,9 @@ local lastScanTime = 0
 local SCAN_COOLDOWN = 2.0
 local debounceTimer = nil
 local DEBOUNCE_DELAY = 0.6
+local isScanning = false
+local ignoreEventsUntil = 0
+local suppressChatPrint = false
 
 Scanner.scanState = "READY" -- "READY" | "SCANNING" | "COMPLETE" | "STALE"
 
@@ -75,14 +78,24 @@ function Scanner:Init()
 
     f:SetScript("OnEvent", function(_, event)
         VM:LogDebug("BankScanner event: " .. tostring(event))
+        if isScanning or GetTime() < ignoreEventsUntil then
+            if event == "GUILDBANKBAGSLOTS_CHANGED" or event == "GUILDBANKLOG_UPDATE" or event == "GUILDBANK_UPDATE_TABS" or event == "GUILDBANK_UPDATE_MONEY" then
+                return
+            end
+        end
+
         if event == "GUILDBANKFRAME_OPENED" then
             if VM:IsOfficer() then
                 VM.Fulfillment:OnGuildBankOpened()
             end
             self.scanState = "SCANNING"
+            isScanning = true
+            ignoreEventsUntil = GetTime() + 2.0
+            suppressChatPrint = false
             self:RequestAllTabsAndLogs()
-            self:TriggerDebouncedScan()
+            self:TriggerDebouncedScan(true)
         elseif event == "GUILDBANKFRAME_CLOSED" then
+            isScanning = false
             if self.scanState == "SCANNING" then
                 self.scanState = "READY"
             end
@@ -90,15 +103,21 @@ function Scanner:Init()
                 VM.UI:UpdateScanStatusButton()
             end
         elseif event == "GUILDBANKBAGSLOTS_CHANGED" or event == "GUILDBANK_UPDATE_TABS" then
-            self:TriggerDebouncedScan()
+            if isScanning or GetTime() < ignoreEventsUntil then return end
+            suppressChatPrint = true
+            self:TriggerDebouncedScan(false)
         elseif event == "GUILDBANKLOG_UPDATE" or event == "GUILDBANK_UPDATE_MONEY" then
-            self:TriggerDebouncedScan()
+            if isScanning or GetTime() < ignoreEventsUntil then return end
+            suppressChatPrint = true
+            self:TriggerDebouncedScan(false)
         end
     end)
 end
 
-function Scanner:TriggerDebouncedScan()
+function Scanner:TriggerDebouncedScan(isFinal)
     self.scanState = "SCANNING"
+    isScanning = true
+    ignoreEventsUntil = GetTime() + 2.0
     if VM.UI and VM.UI.UpdateScanStatusButton then
         VM.UI:UpdateScanStatusButton()
     end
@@ -108,11 +127,13 @@ function Scanner:TriggerDebouncedScan()
     end
     debounceTimer = C_Timer.NewTimer(DEBOUNCE_DELAY, function()
         debounceTimer = nil
-        self:RunFullScanPass(true)
+        self:RunFullScanPass(isFinal)
     end)
 end
 
 function Scanner:RequestAllTabsAndLogs()
+    isScanning = true
+    ignoreEventsUntil = GetTime() + 2.0
     local numTabs = GB_API.GetNumTabs()
     VM:LogDebug(string.format("RequestAllTabsAndLogs: %d tabs", numTabs))
     for tab = 1, numTabs do
@@ -136,6 +157,9 @@ function Scanner:ForceScan()
     lastScanTime = now
 
     self.scanState = "SCANNING"
+    isScanning = true
+    ignoreEventsUntil = GetTime() + 2.0
+    suppressChatPrint = false
     if VM.UI and VM.UI.UpdateScanStatusButton then
         VM.UI:UpdateScanStatusButton()
     end
@@ -149,15 +173,20 @@ function Scanner:ForceScan()
 end
 
 function Scanner:RunFullScanPass(isFinal)
+    isScanning = true
+    ignoreEventsUntil = GetTime() + 2.0
     local itemCount = self:ScanBank()
     local logsAdded = self:ScanLogs()
     local moneyAdded = self:ScanMoneyLogs()
     
     self.scanState = "COMPLETE"
-    if isFinal then
+    isScanning = false
+
+    if isFinal and not suppressChatPrint then
         print(string.format("|cff00ccff[Vault Manager]|r Scan complete: %d items, %d item logs, %d gold logs stored.",
             itemCount or 0, logsAdded or 0, moneyAdded or 0))
     end
+    suppressChatPrint = false
 
     if VM.UI and VM.UI.UpdateScanStatusButton then
         VM.UI:UpdateScanStatusButton()

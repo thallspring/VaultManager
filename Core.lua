@@ -477,34 +477,36 @@ end
 function VM:GetCharKey()
     local pName = self:GetPlayerName()
     if pName == "" then return "" end
-    local realm = self:GetRealmName()
-    return (realm ~= "") and (pName .. "-" .. realm) or (pName .. "-")
+    return pName
 end
 
 function VM:GetStoredGuildKeyForPlayer()
     if not VaultManagerDB or not VaultManagerDB.charGuilds then return nil end
     local pName = self:GetPlayerName()
     if pName == "" then return nil end
-    local realm = self:GetRealmName()
 
-    -- 1. Try exact charKey if realm is known
-    if realm ~= "" then
-        local exact = pName .. "-" .. realm
-        if VaultManagerDB.charGuilds[exact] and VaultManagerDB.charGuilds[exact] ~= "" then
-            return VaultManagerDB.charGuilds[exact]
-        end
+    if VaultManagerDB.charGuilds[pName] and VaultManagerDB.charGuilds[pName] ~= "" then
+        local gKey = VaultManagerDB.charGuilds[pName]
+        if gKey:sub(1, 1) == "-" then gKey = gKey:sub(2) end
+        local ext = gKey:match("^.-%-(.+)$")
+        if ext and ext ~= "" then gKey = ext end
+        return strtrim(gKey)
     end
 
-    -- 2. Fall back to matching by character name prefix UnitName("player") .. "-"
-    local prefix = pName .. "-"
     for cKey, gKey in pairs(VaultManagerDB.charGuilds) do
-        if cKey:sub(1, #prefix) == prefix and gKey and gKey ~= "" then
-            -- If realm is now known and cKey had empty realm, migrate cKey
-            if realm ~= "" and cKey ~= (pName .. "-" .. realm) then
-                VaultManagerDB.charGuilds[pName .. "-" .. realm] = gKey
+        local cleanC = self:NormalizeName(cKey)
+        if cleanC == pName and gKey and gKey ~= "" then
+            local cleanG = gKey
+            if cleanG:sub(1, 1) == "-" then cleanG = cleanG:sub(2) end
+            local ext = cleanG:match("^.-%-(.+)$")
+            if ext and ext ~= "" then cleanG = ext end
+            cleanG = strtrim(cleanG)
+
+            VaultManagerDB.charGuilds[pName] = cleanG
+            if cKey ~= pName then
                 VaultManagerDB.charGuilds[cKey] = nil
             end
-            return gKey
+            return cleanG
         end
     end
     return nil
@@ -512,26 +514,12 @@ end
 
 function VM:NormalizeGuildKey(guildName)
     if not guildName or guildName == "" then return nil end
-    local realm = self:GetRealmName()
-    local suffix = "-" .. guildName
-
-    if realm ~= "" then
-        return realm .. suffix
-    end
-
-    -- If realm is empty, check if any existing key in VaultManagerDB.guilds ends with "-" .. guildName
-    if VaultManagerDB and VaultManagerDB.guilds then
-        if VaultManagerDB.guilds[suffix] then
-            return suffix
-        end
-        for k in pairs(VaultManagerDB.guilds) do
-            if k == suffix or (k:len() >= #suffix and k:sub(-#suffix) == suffix) then
-                return k
-            end
-        end
-    end
-
-    return suffix
+    local clean = strtrim(guildName)
+    if clean:sub(1, 1) == "-" then clean = clean:sub(2) end
+    local ext = clean:match("^.-%-(.+)$")
+    if ext and ext ~= "" then clean = ext end
+    clean = strtrim(clean)
+    return clean ~= "" and clean or nil
 end
 
 function VM:MergeGuildData(target, source)
@@ -651,18 +639,22 @@ function VM:MergeSplitBucketsForGuild(guildName)
     if not guildName or guildName == "" or not VaultManagerDB or not VaultManagerDB.guilds then
         return
     end
-    local realm = self:GetRealmName()
-    if realm == "" then return end
+    local canonicalKey = self:NormalizeGuildKey(guildName)
+    if not canonicalKey or canonicalKey == "" then return end
 
-    local canonicalKey = realm .. "-" .. guildName
-    local suffix = "-" .. guildName
-
+    local suffix = "-" .. canonicalKey
     local canonicalBucket = VaultManagerDB.guilds[canonicalKey]
 
     local keysToMerge = {}
     for k in pairs(VaultManagerDB.guilds) do
         if k ~= canonicalKey then
-            if k == suffix or (k:len() >= #suffix and k:sub(-#suffix) == suffix) then
+            local cleanK = k
+            if cleanK:sub(1, 1) == "-" then cleanK = cleanK:sub(2) end
+            local ext = cleanK:match("^.-%-(.+)$")
+            if ext and ext ~= "" then cleanK = ext end
+            cleanK = strtrim(cleanK)
+
+            if cleanK == canonicalKey or k == suffix or (k:len() >= #suffix and k:sub(-#suffix) == suffix) then
                 table.insert(keysToMerge, k)
             end
         end
@@ -681,7 +673,12 @@ function VM:MergeSplitBucketsForGuild(guildName)
 
             if VaultManagerDB.charGuilds then
                 for c, g in pairs(VaultManagerDB.charGuilds) do
-                    if g == oldKey then
+                    local cleanG = g
+                    if cleanG:sub(1, 1) == "-" then cleanG = cleanG:sub(2) end
+                    local ext = cleanG:match("^.-%-(.+)$")
+                    if ext and ext ~= "" then cleanG = ext end
+                    cleanG = strtrim(cleanG)
+                    if g == oldKey or cleanG == canonicalKey then
                         VaultManagerDB.charGuilds[c] = canonicalKey
                     end
                 end
@@ -696,23 +693,16 @@ end
 
 function VM:MergeAllSplitBuckets()
     if not VaultManagerDB or not VaultManagerDB.guilds then return end
-    local realm = self:GetRealmName()
-    if realm == "" then return end
-
     local guildsToProcess = {}
     for k in pairs(VaultManagerDB.guilds) do
-        if k:sub(1, 1) == "-" then
-            local gName = k:sub(2)
+        if k and k ~= "" then
+            local gName = k
+            if gName:sub(1, 1) == "-" then gName = gName:sub(2) end
+            local ext = gName:match("^.-%-(.+)$")
+            if ext and ext ~= "" then gName = ext end
+            gName = strtrim(gName)
             if gName ~= "" then
                 guildsToProcess[gName] = true
-            end
-        else
-            local gName = k:match("^.-%-(.+)$")
-            if gName and gName ~= "" then
-                local canon = realm .. "-" .. gName
-                if k ~= canon then
-                    guildsToProcess[gName] = true
-                end
             end
         end
     end
@@ -734,11 +724,7 @@ function VM:GetActiveGuildKey()
 
     local storedKey = self:GetStoredGuildKeyForPlayer()
     if storedKey and storedKey ~= "" then
-        local gName = storedKey:match("^.-%-(.+)$") or storedKey:match("^%-(.+)$")
-        if gName and gName ~= "" then
-            return self:NormalizeGuildKey(gName)
-        end
-        return storedKey
+        return self:NormalizeGuildKey(storedKey)
     end
 
     return nil
@@ -755,87 +741,108 @@ function VM:SwitchGuildContext(triggerEvent)
         end
     end
 
-    local realm = self:GetRealmName()
     local pName = self:GetPlayerName()
-    local charKey = (realm ~= "") and (pName .. "-" .. realm) or (pName .. "-")
+    local charKey = pName
 
-    -- Clean up and normalize split character keys (e.g. "Thall-" vs "Thall-Realm")
-    if realm ~= "" and pName ~= "" then
-        local emptyRealmCharKey = pName .. "-"
-        if VaultManagerDB.charGuilds[emptyRealmCharKey] then
-            if not VaultManagerDB.charGuilds[charKey] or VaultManagerDB.charGuilds[charKey] == "" then
-                VaultManagerDB.charGuilds[charKey] = VaultManagerDB.charGuilds[emptyRealmCharKey]
+    -- Clean up and normalize split character keys
+    if pName ~= "" then
+        for cKey, gKey in pairs(VaultManagerDB.charGuilds) do
+            local cleanC = self:NormalizeName(cKey)
+            if cleanC == pName then
+                local cleanG = gKey
+                if cleanG:sub(1, 1) == "-" then cleanG = cleanG:sub(2) end
+                local ext = cleanG:match("^.-%-(.+)$")
+                if ext and ext ~= "" then cleanG = ext end
+                cleanG = strtrim(cleanG)
+
+                if not VaultManagerDB.charGuilds[pName] or VaultManagerDB.charGuilds[pName] == "" then
+                    VaultManagerDB.charGuilds[pName] = cleanG
+                end
+                if cKey ~= pName then
+                    VaultManagerDB.charGuilds[cKey] = nil
+                end
             end
-            VaultManagerDB.charGuilds[emptyRealmCharKey] = nil
         end
     end
 
     -- Automatically merge split guild buckets across VaultManagerDB.guilds
-    if realm ~= "" then
-        self:MergeAllSplitBuckets()
-    end
+    self:MergeAllSplitBuckets()
 
     local liveGuildName = GetGuildInfo("player")
     local guildKey = nil
 
     if liveGuildName and liveGuildName ~= "" then
-        if realm ~= "" then
-            self:MergeSplitBucketsForGuild(liveGuildName)
+        local gName = strtrim(liveGuildName)
+        if gName ~= "" then
+            self:MergeSplitBucketsForGuild(gName)
+            guildKey = self:NormalizeGuildKey(gName)
         end
-        guildKey = self:NormalizeGuildKey(liveGuildName)
     else
         -- Fall back to stored guild key for this character from VaultManagerDB.charGuilds
         local storedKey = self:GetStoredGuildKeyForPlayer()
         if storedKey and storedKey ~= "" then
-            local gName = storedKey:match("^.-%-(.+)$") or storedKey:match("^%-(.+)$")
-            if gName and gName ~= "" then
-                if realm ~= "" then
-                    self:MergeSplitBucketsForGuild(gName)
-                end
+            local gName = storedKey
+            if gName:sub(1, 1) == "-" then gName = gName:sub(2) end
+            local ext = gName:match("^.-%-(.+)$")
+            if ext and ext ~= "" then gName = ext end
+            gName = strtrim(gName)
+            if gName ~= "" then
+                self:MergeSplitBucketsForGuild(gName)
                 guildKey = self:NormalizeGuildKey(gName)
-            else
-                guildKey = storedKey
             end
         end
     end
 
+    local isLoginEvent = (triggerEvent == "ADDON_LOADED" or triggerEvent == "PLAYER_LOGIN" or triggerEvent == "PLAYER_ENTERING_WORLD")
+
     if not guildKey or guildKey == "" then
-        -- Never treat GetGuildInfo("player") == nil during login (ADDON_LOADED, PLAYER_LOGIN, PLAYER_ENTERING_WORLD) as leaving a guild
-        local isLoginEvent = (triggerEvent == "ADDON_LOADED" or triggerEvent == "PLAYER_LOGIN" or triggerEvent == "PLAYER_ENTERING_WORLD")
+        -- Never treat GetGuildInfo("player") == nil during login as leaving a guild
         if not isLoginEvent and triggerEvent == "PLAYER_GUILD_UPDATE" and not IsInGuild() then
             if charKey ~= "" then
                 VaultManagerDB.charGuilds[charKey] = nil
             end
         end
 
-        VM.isUnguilded = true
-        VM.db = {
-            inventory = { lastScan = 0, scannedBy = "", tabs = {} },
-            vault = { lastScan = 0, scannedBy = "", tabs = {} },
-            tabRules = {},
-            requests = {},
-            fulfillments = {},
-            ledger = {},
-            processedBankLogs = {},
-            mains = {},
-            roster = {},
-            rosterCache = {},
-            archivedMembers = {},
-            dbEpoch = 1,
-            uiPrefs = VaultManagerDB.uiPrefs,
-            scanMetadata = { lastScan = 0, scannedBy = "", tabs = {} },
-        }
-        InitGuildSubTables(VM.db)
-        if self.UI then self.UI:RefreshAll() end
-        return
+        if isLoginEvent and not guildKey then
+            for gK, _ in pairs(VaultManagerDB.guilds) do
+                if gK and gK ~= "" then
+                    local gName = gK
+                    if gName:sub(1, 1) == "-" then gName = gName:sub(2) end
+                    local ext = gName:match("^.-%-(.+)$")
+                    if ext and ext ~= "" then gName = ext end
+                    guildKey = strtrim(gName)
+                    break
+                end
+            end
+        end
+
+        if not guildKey or guildKey == "" then
+            VM.isUnguilded = true
+            VM.db = {
+                inventory = { lastScan = 0, scannedBy = "", tabs = {} },
+                vault = { lastScan = 0, scannedBy = "", tabs = {} },
+                tabRules = {},
+                requests = {},
+                fulfillments = {},
+                ledger = {},
+                processedBankLogs = {},
+                mains = {},
+                roster = {},
+                rosterCache = {},
+                archivedMembers = {},
+                dbEpoch = 1,
+                uiPrefs = VaultManagerDB.uiPrefs,
+                scanMetadata = { lastScan = 0, scannedBy = "", tabs = {} },
+            }
+            InitGuildSubTables(VM.db)
+            if self.UI then self.UI:RefreshAll() end
+            return
+        end
     end
 
     VM.isUnguilded = false
     if charKey ~= "" then
         VaultManagerDB.charGuilds[charKey] = guildKey
-    end
-    if realm ~= "" and pName ~= "" then
-        VaultManagerDB.charGuilds[pName .. "-" .. realm] = guildKey
     end
 
     if not VaultManagerDB.guilds[guildKey] then

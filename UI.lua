@@ -208,6 +208,9 @@ function UI:Toggle()
         if exportModalFrame then exportModalFrame:Hide() end
         if rankingPeriodDropdownFrame then rankingPeriodDropdownFrame:Hide() end
     else
+        if VM.SwitchGuildContext then
+            VM:SwitchGuildContext("UI_TOGGLE")
+        end
         if IsInGuild() then
             if C_GuildInfo and C_GuildInfo.GuildRoster then C_GuildInfo.GuildRoster()
             elseif GuildRoster then GuildRoster() end

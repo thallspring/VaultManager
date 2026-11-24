@@ -2,6 +2,14 @@
 
 All notable changes to **Vault Manager** will be documented in this file.
 
+## [1.3.3] - 2026-11-24
+
+### Fixed & Restored
+- **UI Prefs Crash Guard:** Added defensive initialization for `VM.db.uiPrefs` across `BuildLedgerPanel`, `BuildRankingPanel`, and `BuildSettingsPanel`, fixing `attempt to index field 'uiPrefs' (a nil value)` crash after per-guild database refactoring.
+- **Guild DB Sub-table Initialization:** Ensured all guild database instances in `VaultManagerDB.guilds` and `VM.db` consistently initialize all required sub-tables (`uiPrefs`, `vault`, `ledger`, `requests`, `fulfillments`, `roster`, `tabRules`, `scanMetadata`) on load, migration, and guild switch.
+- **Top-Level Slash Command Registration:** Registered `/vm` and `/vaultmanager` at the top level of `Core.lua` before `UI:Init()`, ensuring command availability regardless of UI initialization timing.
+- **Header Version & Layout Overlap:** Restored dynamic version tag display (`v1.3.3`) next to `VAULT MANAGER` in the header, and adjusted the scan status button and scan info anchors to eliminate text overlap.
+
 ## [1.3.2] - 2026-11-24
 
 ### Added & Enhanced

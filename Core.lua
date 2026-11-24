@@ -15,6 +15,41 @@ function VM:LogDebug(msg)
     end
 end
 
+local DEFAULT_UI_PREFS = {
+    useHistoricalPrices = false,
+    showLockedPrices = false,
+    rankingPriceMode = "live",
+    hideOfficers = false,
+    rankingPeriod = "ALL",
+}
+
+local function InitGuildSubTables(db)
+    if not db then return end
+    db.uiPrefs = db.uiPrefs or {}
+    for k, v in pairs(DEFAULT_UI_PREFS) do
+        if db.uiPrefs[k] == nil then
+            db.uiPrefs[k] = v
+        end
+    end
+    db.inventory = db.inventory or { lastScan = 0, scannedBy = "", tabs = {} }
+    db.vault = db.vault or db.inventory
+    db.ledger = db.ledger or {}
+    db.requests = db.requests or {}
+    db.fulfillments = db.fulfillments or db.requests
+    db.mains = db.mains or {}
+    db.roster = db.roster or db.mains
+    db.rosterCache = db.rosterCache or {}
+    db.archivedMembers = db.archivedMembers or {}
+    db.tabRules = db.tabRules or {}
+    db.scanMetadata = db.scanMetadata or db.inventory
+    db.processedBankLogs = db.processedBankLogs or {}
+    db.dbEpoch = db.dbEpoch or 1
+    return db
+end
+VM.InitGuildSubTables = InitGuildSubTables
+
+VM.db = InitGuildSubTables({})
+
 local DEFAULT_DB = {
     dbEpoch = 1,
     guilds = {},
@@ -431,7 +466,12 @@ function VM:SwitchGuildContext()
     VaultManagerDB = VaultManagerDB or {}
     VaultManagerDB.guilds = VaultManagerDB.guilds or {}
     VaultManagerDB.charGuilds = VaultManagerDB.charGuilds or {}
-    VaultManagerDB.uiPrefs = VaultManagerDB.uiPrefs or DEFAULT_DB.uiPrefs
+    VaultManagerDB.uiPrefs = VaultManagerDB.uiPrefs or {}
+    for k, v in pairs(DEFAULT_UI_PREFS) do
+        if VaultManagerDB.uiPrefs[k] == nil then
+            VaultManagerDB.uiPrefs[k] = v
+        end
+    end
 
     local guildKey = self:GetActiveGuildKey()
     local charKey = self:GetPlayerName() .. "-" .. (GetRealmName() or "")
@@ -442,15 +482,21 @@ function VM:SwitchGuildContext()
         VM.isUnguilded = true
         VM.db = {
             inventory = { lastScan = 0, scannedBy = "", tabs = {} },
+            vault = { lastScan = 0, scannedBy = "", tabs = {} },
             tabRules = {},
             requests = {},
+            fulfillments = {},
             ledger = {},
             processedBankLogs = {},
             mains = {},
+            roster = {},
             rosterCache = {},
             archivedMembers = {},
-            dbEpoch = 1
+            dbEpoch = 1,
+            uiPrefs = VaultManagerDB.uiPrefs,
+            scanMetadata = { lastScan = 0, scannedBy = "", tabs = {} },
         }
+        InitGuildSubTables(VM.db)
         if prevGuildKey and prevGuildKey ~= "" then
             local stillUsed = false
             for c, g in pairs(VaultManagerDB.charGuilds) do
@@ -482,39 +528,107 @@ function VM:SwitchGuildContext()
             VaultManagerDB.guilds[guildKey] = {
                 dbEpoch = VaultManagerDB.dbEpoch or 1,
                 inventory = VaultManagerDB.inventory,
+                vault = VaultManagerDB.vault or VaultManagerDB.inventory,
                 tabRules = VaultManagerDB.tabRules or {},
                 requests = VaultManagerDB.requests or {},
+                fulfillments = VaultManagerDB.fulfillments or VaultManagerDB.requests,
                 ledger = VaultManagerDB.ledger or {},
                 processedBankLogs = VaultManagerDB.processedBankLogs or {},
                 mains = VaultManagerDB.mains or {},
+                roster = VaultManagerDB.roster or VaultManagerDB.mains,
                 rosterCache = VaultManagerDB.rosterCache or {},
                 archivedMembers = VaultManagerDB.archivedMembers or {},
                 activeReturn = VaultManagerDB.activeReturn,
+                uiPrefs = VaultManagerDB.uiPrefs,
+                scanMetadata = VaultManagerDB.scanMetadata or VaultManagerDB.inventory,
             }
             VaultManagerDB.inventory = nil
+            VaultManagerDB.vault = nil
             VaultManagerDB.ledger = nil
             VaultManagerDB.requests = nil
+            VaultManagerDB.fulfillments = nil
             VaultManagerDB.tabRules = nil
             VaultManagerDB.mains = nil
+            VaultManagerDB.roster = nil
             VaultManagerDB.processedBankLogs = nil
             VaultManagerDB.rosterCache = nil
+            VaultManagerDB.scanMetadata = nil
         else
             VaultManagerDB.guilds[guildKey] = {
                 dbEpoch = 1,
                 inventory = { lastScan = 0, scannedBy = "", tabs = {} },
+                vault = { lastScan = 0, scannedBy = "", tabs = {} },
                 tabRules = {},
                 requests = {},
+                fulfillments = {},
                 ledger = {},
                 processedBankLogs = {},
                 mains = {},
+                roster = {},
                 rosterCache = {},
                 archivedMembers = {},
+                uiPrefs = VaultManagerDB.uiPrefs,
+                scanMetadata = { lastScan = 0, scannedBy = "", tabs = {} },
             }
         end
+        InitGuildSubTables(VaultManagerDB.guilds[guildKey])
     end
 
     VM.db = VaultManagerDB.guilds[guildKey]
+    InitGuildSubTables(VM.db)
     if self.UI then self.UI:RefreshAll() end
+end
+
+-- Top-level slash command registration before UI:Init()
+SLASH_VAULTMANAGER1 = "/vm"
+SLASH_VAULTMANAGER2 = "/vaultmanager"
+SlashCmdList["VAULTMANAGER"] = function(msg)
+    local args = { strsplit(" ", strtrim(msg or "")) }
+    local cmd = (args[1] or ""):lower()
+    if cmd == "scan" then
+        if VM.BankScanner then VM.BankScanner:ForceScan() end
+        print("|cff00ccff[Vault Manager]|r Manual Guild Bank scan triggered.")
+    elseif cmd == "debug" then
+        print("|cff00ccff[Vault Manager Debug Log (last 15)]|r")
+        local startIdx = math.max(1, #VM.debugLog - 14)
+        for i = startIdx, #VM.debugLog do
+            print("  " .. VM.debugLog[i])
+        end
+    elseif cmd == "resetlocal" then
+        if VM.db then
+            VM.db.inventory = { lastScan = 0, scannedBy = "", tabs = {} }
+            VM.db.vault = VM.db.inventory
+            VM.db.ledger = {}
+            VM.db.processedBankLogs = {}
+            VM.db.requests = {}
+            VM.db.fulfillments = VM.db.requests
+        end
+        print("|cff00ccff[Vault Manager]|r Local cache reset. (Not broadcasted to guild).")
+        if VM.UI then VM.UI:RefreshAll() end
+    elseif cmd == "resetguild" then
+        if not VM:IsOfficer() then
+            print("|cffff4444[Vault Manager]|r Only officers or Guild Master can perform a guild-wide reset.")
+            return
+        end
+        if VM.db then
+            VM.db.dbEpoch = (VM.db.dbEpoch or 1) + 1
+            VM.db.inventory = { lastScan = 0, scannedBy = "", tabs = {} }
+            VM.db.vault = VM.db.inventory
+            VM.db.ledger = {}
+            VM.db.processedBankLogs = {}
+            VM.db.requests = {}
+            VM.db.fulfillments = VM.db.requests
+            VM.db.tabRules = {}
+            VM.db.mains = {}
+            VM.db.roster = VM.db.mains
+        end
+        if VM.Comms then VM.Comms:BroadcastEpoch() end
+        local epoch = (VM.db and VM.db.dbEpoch) or 1
+        print("|cff00ccff[Vault Manager]|r Guild-wide reset performed (Epoch " .. epoch .. "). Broadcasted to guild.")
+        if VM.UI then VM.UI:RefreshAll() end
+    else
+        if VM.UI then VM.UI:Toggle() end
+    end
 end
 
 local guildEventFrame = CreateFrame("Frame")
@@ -539,6 +653,10 @@ initFrame:SetScript("OnEvent", function(_, event, arg1)
     if event == "ADDON_LOADED" and arg1 == ADDON_NAME then
         VaultManagerDB = VaultManagerDB or {}
         DeepCopyDefaults(VaultManagerDB, DEFAULT_DB)
+        VaultManagerDB.guilds = VaultManagerDB.guilds or {}
+        for _, gTable in pairs(VaultManagerDB.guilds) do
+            InitGuildSubTables(gTable)
+        end
         VM:SwitchGuildContext()
         VM:MigrateMainsFormat()
 
@@ -624,47 +742,6 @@ initFrame:SetScript("OnEvent", function(_, event, arg1)
 
         if VM.Ledger and VM.Ledger.CompactMonthlyHistory then
             VM.Ledger:CompactMonthlyHistory()
-        end
-
-        SLASH_VAULTMANAGER1 = "/vm"
-        SLASH_VAULTMANAGER2 = "/vaultmanager"
-        SlashCmdList["VAULTMANAGER"] = function(msg)
-            local args = { strsplit(" ", strtrim(msg or "")) }
-            local cmd = (args[1] or ""):lower()
-            if cmd == "scan" then
-                VM.BankScanner:ForceScan()
-                print("|cff00ccff[Vault Manager]|r Manual Guild Bank scan triggered.")
-            elseif cmd == "debug" then
-                print("|cff00ccff[Vault Manager Debug Log (last 15)]|r")
-                local startIdx = math.max(1, #VM.debugLog - 14)
-                for i = startIdx, #VM.debugLog do
-                    print("  " .. VM.debugLog[i])
-                end
-            elseif cmd == "resetlocal" then
-                VM.db.inventory = { lastScan = 0, scannedBy = "", tabs = {} }
-                VM.db.ledger = {}
-                VM.db.processedBankLogs = {}
-                VM.db.requests = {}
-                print("|cff00ccff[Vault Manager]|r Local cache reset. (Not broadcasted to guild).")
-                if VM.UI then VM.UI:RefreshAll() end
-            elseif cmd == "resetguild" then
-                if not VM:IsOfficer() then
-                    print("|cffff4444[Vault Manager]|r Only officers or Guild Master can perform a guild-wide reset.")
-                    return
-                end
-                VM.db.dbEpoch = (VM.db.dbEpoch or 1) + 1
-                VM.db.inventory = { lastScan = 0, scannedBy = "", tabs = {} }
-                VM.db.ledger = {}
-                VM.db.processedBankLogs = {}
-                VM.db.requests = {}
-                VM.db.tabRules = {}
-                VM.db.mains = {}
-                if VM.Comms then VM.Comms:BroadcastEpoch() end
-                print("|cff00ccff[Vault Manager]|r Guild-wide reset performed (Epoch " .. VM.db.dbEpoch .. "). Broadcasted to guild.")
-                if VM.UI then VM.UI:RefreshAll() end
-            else
-                VM.UI:Toggle()
-            end
         end
 
         print("|cff00ccff[Vault Manager]|r Loaded. Type |cffffff00/vm|r to open.")

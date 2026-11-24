@@ -72,6 +72,24 @@ local function HideItemTooltip()
     GameTooltip:Hide()
 end
 
+local function GetUIPrefs()
+    if not VM.db then VM.db = {} end
+    VM.db.uiPrefs = VM.db.uiPrefs or {}
+    local defaults = {
+        useHistoricalPrices = false,
+        showLockedPrices = false,
+        rankingPriceMode = "live",
+        hideOfficers = false,
+        rankingPeriod = "ALL",
+    }
+    for k, v in pairs(defaults) do
+        if VM.db.uiPrefs[k] == nil then
+            VM.db.uiPrefs[k] = v
+        end
+    end
+    return VM.db.uiPrefs
+end
+
 local function CreateModernButton(parent, width, height, text, accentColor)
     local btn = CreateFrame("Button", nil, parent, "BackdropTemplate")
     btn:SetSize(width, height)
@@ -251,10 +269,14 @@ end
 function UI:RefreshExportContent()
     if not exportModalFrame or not exportModalFrame:IsShown() then return end
     local isCSV = exportModalFrame.csvToggle:GetChecked()
-    local useHist = VM.db.uiPrefs.useHistoricalPrices
-    local period = VM.db.uiPrefs.rankingPeriod or "ALL"
-    local hideOff = VM.db.uiPrefs.hideOfficers or false
-    local ranked = VM.Ledger:GetDonationRanking("TOTAL", useHist, period, hideOff)
+    if not VM.db then VM.db = {} end
+    VM.db.uiPrefs = VM.db.uiPrefs or {}
+    local uiPrefs = GetUIPrefs()
+    local useHist = uiPrefs.useHistoricalPrices
+    local period = uiPrefs.rankingPeriod or "ALL"
+    local hideOff = uiPrefs.hideOfficers or false
+    local priceMode = uiPrefs.rankingPriceMode or "live"
+    local ranked = VM.Ledger:GetDonationRanking("TOTAL", useHist, period, hideOff, priceMode)
 
     local function StripColor(str)
         return tostring(str or ""):gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", "")
@@ -426,6 +448,8 @@ function UI:CreateRankingPeriodPickerFrame()
         end)
         btn:SetScript("OnClick", function()
             rankingPeriodDropdownFrame:Hide()
+            if not VM.db then VM.db = {} end
+            VM.db.uiPrefs = VM.db.uiPrefs or {}
             VM.db.uiPrefs.rankingPeriod = opt.key
             if mainFrame and mainFrame.panels and mainFrame.panels[4] and mainFrame.panels[4].periodBtn then
                 mainFrame.panels[4].periodBtn:SetText(opt.label)
@@ -473,17 +497,15 @@ function UI:CreateMainFrame()
 
     local title = headerBar:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
     title:SetPoint("LEFT", 14, 0)
-    title:SetText("|cff26a6f2VAULT|r |cffffffffMANAGER|r")
+    local getMeta = C_AddOns and C_AddOns.GetAddOnMetadata or GetAddOnMetadata
+    local ver = "v" .. ((getMeta and getMeta("VaultManager", "Version")) or "dev")
+    title:SetText(string.format("|cff26a6f2VAULT|r |cffffffffMANAGER|r |cff8899aa%s|r", ver))
 
-    mainFrame.scanStatusBtn = CreateModernButton(headerBar, 120, 22, "Scan Bank", { 0.25, 0.55, 0.85, 1 })
-    mainFrame.scanStatusBtn:SetPoint("CENTER", headerBar, "CENTER", 40, 0)
+    mainFrame.scanStatusBtn = CreateModernButton(headerBar, 110, 22, "Scan Bank", { 0.25, 0.55, 0.85, 1 })
+    mainFrame.scanStatusBtn:SetPoint("LEFT", title, "RIGHT", 14, 0)
     mainFrame.scanStatusBtn:SetScript("OnClick", function()
         VM.BankScanner:ForceScan()
     end)
-
-    mainFrame.scanInfo = headerBar:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    mainFrame.scanInfo:SetPoint("RIGHT", -42, 0)
-    mainFrame.scanInfo:SetTextColor(0.65, 0.70, 0.78)
 
     local closeBtn = CreateModernButton(headerBar, 24, 24, "X", { 0.85, 0.25, 0.25, 1 })
     closeBtn:SetPoint("RIGHT", -8, 0)
@@ -492,6 +514,12 @@ function UI:CreateMainFrame()
         if rosterPickerFrame then rosterPickerFrame:Hide() end
         if exportModalFrame then exportModalFrame:Hide() end
     end)
+
+    mainFrame.scanInfo = headerBar:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    mainFrame.scanInfo:SetPoint("RIGHT", closeBtn, "LEFT", -12, 0)
+    mainFrame.scanInfo:SetPoint("LEFT", mainFrame.scanStatusBtn, "RIGHT", 12, 0)
+    mainFrame.scanInfo:SetJustifyH("RIGHT")
+    mainFrame.scanInfo:SetTextColor(0.65, 0.70, 0.78)
 
     local tabNames = { "Vault & Requests", "Requests", "Ledger", "Ranking", "Settings & Mains" }
     mainFrame.navButtons = {}
@@ -857,6 +885,9 @@ end
 -- TAB 3: LEDGER
 --------------------------------------------------------------------------------
 function UI:BuildLedgerPanel(panel)
+    if not VM.db then VM.db = {} end
+    VM.db.uiPrefs = VM.db.uiPrefs or {}
+    local uiPrefs = GetUIPrefs()
     local topBar = CreateFrame("Frame", nil, panel)
     topBar:SetHeight(32)
     topBar:SetPoint("TOPLEFT", 10, -8)
@@ -865,14 +896,17 @@ function UI:BuildLedgerPanel(panel)
     local priceToggle = CreateFrame("CheckButton", nil, topBar, "UICheckButtonTemplate")
     priceToggle:SetSize(22, 22)
     priceToggle:SetPoint("LEFT", 0, 0)
-    priceToggle:SetChecked(VM.db.uiPrefs.useHistoricalPrices)
+    priceToggle:SetChecked(uiPrefs.useHistoricalPrices or false)
 
     local toggleLabel = topBar:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     toggleLabel:SetPoint("LEFT", priceToggle, "RIGHT", 4, 0)
     toggleLabel:SetText("Historical price (otherwise live AH)")
 
     priceToggle:SetScript("OnClick", function(cb)
-        VM.db.uiPrefs.useHistoricalPrices = cb:GetChecked()
+        if not VM.db then VM.db = {} end
+        VM.db.uiPrefs = VM.db.uiPrefs or {}
+        local prefs = GetUIPrefs()
+        prefs.useHistoricalPrices = cb:GetChecked()
         UI:RefreshLedger()
         UI:RefreshRanking()
     end)
@@ -929,7 +963,10 @@ function UI:RefreshLedger()
     if not content then return end
     for _, r in ipairs(panel.scroll.rows) do r:Hide() end
 
-    local useHist = VM.db.uiPrefs.useHistoricalPrices
+    if not VM.db then VM.db = {} end
+    VM.db.uiPrefs = VM.db.uiPrefs or {}
+    local uiPrefs = GetUIPrefs()
+    local useHist = uiPrefs.useHistoricalPrices
     local groups = VM.Ledger:GetAggregatedByMain(useHist)
 
     local rowIdx = 0
@@ -1086,6 +1123,8 @@ end
 local expandedRankingMains = {}
 
 function UI:BuildRankingPanel(panel)
+    if not VM.db then VM.db = {} end
+    VM.db.uiPrefs = VM.db.uiPrefs or {}
     local topBar = CreateFrame("Frame", nil, panel)
     topBar:SetHeight(32)
     topBar:SetPoint("TOPLEFT", 10, -8)
@@ -1112,15 +1151,19 @@ function UI:BuildRankingPanel(panel)
         panel.sortButtons[m.key] = btn
     end
 
+    local uiPrefs = GetUIPrefs()
     local hideOfficersCb = CreateFrame("CheckButton", nil, topBar, "UICheckButtonTemplate")
     hideOfficersCb:SetSize(20, 20)
     hideOfficersCb:SetPoint("LEFT", 336, 0)
     hideOfficersCb.label = hideOfficersCb:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     hideOfficersCb.label:SetPoint("LEFT", hideOfficersCb, "RIGHT", 4, 0)
     hideOfficersCb.label:SetText("Hide Officers")
-    hideOfficersCb:SetChecked(VM.db and VM.db.uiPrefs and VM.db.uiPrefs.hideOfficers or false)
+    hideOfficersCb:SetChecked(uiPrefs.hideOfficers or false)
     hideOfficersCb:SetScript("OnClick", function(cb)
-        VM.db.uiPrefs.hideOfficers = cb:GetChecked()
+        if not VM.db then VM.db = {} end
+        VM.db.uiPrefs = VM.db.uiPrefs or {}
+        local prefs = GetUIPrefs()
+        prefs.hideOfficers = cb:GetChecked()
         UI:RefreshRanking()
     end)
     panel.hideOfficersCb = hideOfficersCb
@@ -1178,11 +1221,14 @@ function UI:RefreshRanking()
     local content = panel.scroll.content
     if not content then return end
 
+    if not VM.db then VM.db = {} end
+    VM.db.uiPrefs = VM.db.uiPrefs or {}
+    local uiPrefs = GetUIPrefs()
     if panel.hideOfficersCb then
-        panel.hideOfficersCb:SetChecked(VM.db.uiPrefs.hideOfficers or false)
+        panel.hideOfficersCb:SetChecked(uiPrefs.hideOfficers or false)
     end
     if panel.periodBtn then
-        local p = VM.db.uiPrefs.rankingPeriod or "ALL"
+        local p = uiPrefs.rankingPeriod or "ALL"
         panel.periodBtn:SetText((p == "ALL") and "All-Time" or ((p == "CURRENT") and "Current Month" or "Previous Month"))
     end
 
@@ -1198,10 +1244,11 @@ function UI:RefreshRanking()
 
     for _, r in ipairs(panel.scroll.rows) do r:Hide() end
 
-    local useHist = VM.db.uiPrefs.useHistoricalPrices
-    local period = VM.db.uiPrefs.rankingPeriod or "ALL"
-    local hideOff = VM.db.uiPrefs.hideOfficers or false
-    local ranked = VM.Ledger:GetDonationRanking(rankingSortMode, useHist, period, hideOff)
+    local useHist = uiPrefs.useHistoricalPrices
+    local period = uiPrefs.rankingPeriod or "ALL"
+    local hideOff = uiPrefs.hideOfficers or false
+    local priceMode = uiPrefs.rankingPriceMode or "live"
+    local ranked = VM.Ledger:GetDonationRanking(rankingSortMode, useHist, period, hideOff, priceMode)
 
     local rowIdx = 0
     local function GetRankingRow()
@@ -1353,6 +1400,9 @@ end
 -- TAB 5: SETTINGS & MAINS (Hierarchical Roster Tree & Bank Tab Rules)
 --------------------------------------------------------------------------------
 function UI:BuildSettingsPanel(panel)
+    if not VM.db then VM.db = {} end
+    VM.db.uiPrefs = VM.db.uiPrefs or {}
+    local uiPrefs = GetUIPrefs()
     local ruleTitle = panel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     ruleTitle:SetPoint("TOPLEFT", 14, -12)
     ruleTitle:SetText("|cff26a6f2GUILD BANK TAB RULES|r  |cff888888(Officers / GM Only)|r")
@@ -1432,6 +1482,9 @@ function UI:BuildSettingsPanel(panel)
 end
 
 function UI:RefreshSettings()
+    if not VM.db then VM.db = {} end
+    VM.db.uiPrefs = VM.db.uiPrefs or {}
+    local uiPrefs = GetUIPrefs()
     if not mainFrame or not mainFrame.panels or not mainFrame.panels[5] then return end
     local panel = mainFrame.panels[5]
     if not panel or not panel.tabRuleRows or not panel.treeScroll then return end

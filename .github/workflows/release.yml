@@ -8,6 +8,8 @@ on:
 jobs:
   package:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
         with:
@@ -17,3 +19,4 @@ jobs:
         uses: BigWigsMods/packager@v2
         env:
           CF_API_KEY: ${{ secrets.CF_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

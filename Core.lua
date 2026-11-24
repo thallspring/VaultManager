@@ -17,18 +17,8 @@ end
 
 local DEFAULT_DB = {
     dbEpoch = 1,
-    inventory = {
-        lastScan = 0,
-        scannedBy = "",
-        tabs = {},
-    },
-    tabRules = {},
-    requests = {},
-    ledger = {},
-    processedBankLogs = {},
-    mains = {},
-    rosterCache = {},
-    archivedMembers = {},
+    guilds = {},
+    charGuilds = {},
     uiPrefs = {
         useHistoricalPrices = false,
         rankingPriceMode = "live",
@@ -429,6 +419,118 @@ function VM:GetReservedCount(itemID, tabIndex)
     return reserved
 end
 
+function VM:GetActiveGuildKey()
+    if not IsInGuild() then return nil end
+    local guildName = GetGuildInfo("player")
+    local realm = GetRealmName() or "Unknown"
+    if not guildName or guildName == "" then return nil end
+    return string.format("%s-%s", realm, guildName)
+end
+
+function VM:SwitchGuildContext()
+    VaultManagerDB = VaultManagerDB or {}
+    VaultManagerDB.guilds = VaultManagerDB.guilds or {}
+    VaultManagerDB.charGuilds = VaultManagerDB.charGuilds or {}
+    VaultManagerDB.uiPrefs = VaultManagerDB.uiPrefs or DEFAULT_DB.uiPrefs
+
+    local guildKey = self:GetActiveGuildKey()
+    local charKey = self:GetPlayerName() .. "-" .. (GetRealmName() or "")
+    local prevGuildKey = VaultManagerDB.charGuilds[charKey]
+
+    if not guildKey then
+        VaultManagerDB.charGuilds[charKey] = nil
+        VM.isUnguilded = true
+        VM.db = {
+            inventory = { lastScan = 0, scannedBy = "", tabs = {} },
+            tabRules = {},
+            requests = {},
+            ledger = {},
+            processedBankLogs = {},
+            mains = {},
+            rosterCache = {},
+            archivedMembers = {},
+            dbEpoch = 1
+        }
+        if prevGuildKey and prevGuildKey ~= "" then
+            local stillUsed = false
+            for c, g in pairs(VaultManagerDB.charGuilds) do
+                if g == prevGuildKey then stillUsed = true; break end
+            end
+            if not stillUsed then
+                VaultManagerDB.guilds[prevGuildKey] = nil
+            end
+        end
+        if self.UI then self.UI:RefreshAll() end
+        return
+    end
+
+    VM.isUnguilded = false
+    VaultManagerDB.charGuilds[charKey] = guildKey
+
+    if prevGuildKey and prevGuildKey ~= guildKey then
+        local stillUsed = false
+        for c, g in pairs(VaultManagerDB.charGuilds) do
+            if g == prevGuildKey then stillUsed = true; break end
+        end
+        if not stillUsed then
+            VaultManagerDB.guilds[prevGuildKey] = nil
+        end
+    end
+
+    if not VaultManagerDB.guilds[guildKey] then
+        if VaultManagerDB.inventory and (VaultManagerDB.inventory.lastScan > 0 or (VaultManagerDB.inventory.tabs and next(VaultManagerDB.inventory.tabs))) then
+            VaultManagerDB.guilds[guildKey] = {
+                dbEpoch = VaultManagerDB.dbEpoch or 1,
+                inventory = VaultManagerDB.inventory,
+                tabRules = VaultManagerDB.tabRules or {},
+                requests = VaultManagerDB.requests or {},
+                ledger = VaultManagerDB.ledger or {},
+                processedBankLogs = VaultManagerDB.processedBankLogs or {},
+                mains = VaultManagerDB.mains or {},
+                rosterCache = VaultManagerDB.rosterCache or {},
+                archivedMembers = VaultManagerDB.archivedMembers or {},
+                activeReturn = VaultManagerDB.activeReturn,
+            }
+            VaultManagerDB.inventory = nil
+            VaultManagerDB.ledger = nil
+            VaultManagerDB.requests = nil
+            VaultManagerDB.tabRules = nil
+            VaultManagerDB.mains = nil
+            VaultManagerDB.processedBankLogs = nil
+            VaultManagerDB.rosterCache = nil
+        else
+            VaultManagerDB.guilds[guildKey] = {
+                dbEpoch = 1,
+                inventory = { lastScan = 0, scannedBy = "", tabs = {} },
+                tabRules = {},
+                requests = {},
+                ledger = {},
+                processedBankLogs = {},
+                mains = {},
+                rosterCache = {},
+                archivedMembers = {},
+            }
+        end
+    end
+
+    VM.db = VaultManagerDB.guilds[guildKey]
+    if self.UI then self.UI:RefreshAll() end
+end
+
+local guildEventFrame = CreateFrame("Frame")
+guildEventFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
+guildEventFrame:RegisterEvent("PLAYER_GUILD_UPDATE")
+guildEventFrame:RegisterEvent("GUILD_ROSTER_UPDATE")
+guildEventFrame:SetScript("OnEvent", function(_, event)
+    if event == "PLAYER_ENTERING_WORLD" or event == "PLAYER_GUILD_UPDATE" or event == "GUILD_ROSTER_UPDATE" then
+        C_Timer.After(0.5, function()
+            if VM.SwitchGuildContext then
+                VM:SwitchGuildContext()
+            end
+        end)
+    end
+end)
+
 local initFrame = CreateFrame("Frame")
 initFrame:RegisterEvent("ADDON_LOADED")
 initFrame:RegisterEvent("PLAYER_LOGIN")
@@ -437,7 +539,7 @@ initFrame:SetScript("OnEvent", function(_, event, arg1)
     if event == "ADDON_LOADED" and arg1 == ADDON_NAME then
         VaultManagerDB = VaultManagerDB or {}
         DeepCopyDefaults(VaultManagerDB, DEFAULT_DB)
-        VM.db = VaultManagerDB
+        VM:SwitchGuildContext()
         VM:MigrateMainsFormat()
 
         -- Purge any old 0g or invalid unattributed gold ledger entries

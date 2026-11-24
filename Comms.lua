@@ -59,10 +59,14 @@ function Comms:Init()
 end
 
 function Comms:SendRaw(payload)
+    if VM.isUnguilded then return end
+    local guildName = GetGuildInfo("player") or ""
+    if guildName == "" then return end
+    local fullPayload = payload .. "|" .. EscapeStr(guildName)
     for _, existing in ipairs(MSG_QUEUE) do
-        if existing == payload then return end
+        if existing == fullPayload then return end
     end
-    table.insert(MSG_QUEUE, payload)
+    table.insert(MSG_QUEUE, fullPayload)
 end
 
 function Comms:BroadcastEpoch()
@@ -97,9 +101,19 @@ end
 
 function Comms:OnMessageReceived(msg, sender)
     if sender == VM:GetPlayerName() then return end
-    local fromOfficer = VM:IsOfficerName(sender)
+    if VM.isUnguilded then return end
+
     local parts = { strsplit("|", msg) }
+    if #parts < 2 then return end
+    local incomingGuild = UnescapeStr(parts[#parts])
+    local playerGuild = GetGuildInfo("player") or ""
+    if not playerGuild or playerGuild == "" or incomingGuild ~= playerGuild then
+        return -- Drop mismatched payloads silently
+    end
+    table.remove(parts, #parts)
+
     local cmd = parts[1]
+    local fromOfficer = VM:IsOfficerName(sender)
 
     if cmd == "EPOCH" then
         local peerEpoch = tonumber(parts[2]) or 1

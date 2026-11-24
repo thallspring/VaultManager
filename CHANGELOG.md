@@ -2,6 +2,13 @@
 
 All notable changes to **Vault Manager** will be documented in this file.
 
+## [1.3.2] - 2026-11-24
+
+### Added & Enhanced
+- **Strict Per-Guild Data Isolation:** Partitioned all guild-specific state (`inventory`, `ledger`, `requests`, `tabRules`, `mains`, `rosterCache`) inside `VaultManagerDB.guilds[guildKey]` keyed by realm and guild name (`realm-guildName`), with automatic root data migration on load.
+- **Guild Switch & Leave Detection:** Hooked `PLAYER_GUILD_UPDATE`, `PLAYER_ENTERING_WORLD`, and `GUILD_ROSTER_UPDATE` to automatically switch active database contexts upon joining a new guild and purge orphaned guild data when no other characters belong to the old guild. Displays a clean "Not in a guild" empty state and disables scanning/P2P when unguilded.
+- **Strict Guild Verification in P2P Comms:** Included guild name verification in all outgoing and incoming P2P addon messages, strictly verifying `incoming.guildName == GetGuildInfo("player")` and silently dropping mismatched payloads.
+
 ## [1.3.1] - 2026-11-24
 
 ### Fixed & Enhanced

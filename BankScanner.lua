@@ -77,6 +77,7 @@ function Scanner:Init()
     f:RegisterEvent("GUILDBANK_UPDATE_TABS")
 
     f:SetScript("OnEvent", function(_, event)
+        if VM.isUnguilded then return end
         VM:LogDebug("BankScanner event: " .. tostring(event))
         if isScanning or GetTime() < ignoreEventsUntil then
             if event == "GUILDBANKBAGSLOTS_CHANGED" or event == "GUILDBANKLOG_UPDATE" or event == "GUILDBANK_UPDATE_TABS" or event == "GUILDBANK_UPDATE_MONEY" then

@@ -1692,6 +1692,15 @@ function UI:RefreshAll()
     if not mainFrame or not mainFrame:IsShown() then return end
     if not mainFrame.navButtons or not mainFrame.panels or not mainFrame.scanInfo then return end
 
+    if VM.isUnguilded then
+        mainFrame.scanInfo:SetText("Not in a guild")
+        if mainFrame.scanStatusBtn then
+            mainFrame.scanStatusBtn:SetText("No Guild")
+            mainFrame.scanStatusBtn:SetBackdropColor(0.4, 0.4, 0.4, 1)
+        end
+        return
+    end
+
     self:UpdateScanStatusButton()
 
     if VM.newerVersionAvailable then

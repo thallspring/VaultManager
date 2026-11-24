@@ -481,6 +481,17 @@ function VM:GetItemAHPrice(itemID, itemLink)
     return nil
 end
 
+function VM:GetEffectiveLivePrice(itemID, itemLink, fallbackScanPrice)
+    local livePrice = self:GetItemAHPrice(itemID, itemLink)
+    if livePrice and livePrice > 0 then
+        return livePrice
+    end
+    if fallbackScanPrice and type(fallbackScanPrice) == "number" and fallbackScanPrice > 0 then
+        return fallbackScanPrice
+    end
+    return 0
+end
+
 function VM:FormatMoney(copper)
     if not copper then return "|cff777777N/A|r" end
     if copper == 0 then return "|cffaaaaaa0g|r" end

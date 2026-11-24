@@ -63,7 +63,7 @@ local function ShowItemTooltip(selfFrame, itemLink, itemID, itemName, tx)
         local uiPrefs = GetUIPrefs()
         local isLocked = (uiPrefs.rankingPriceMode == "locked")
         local lockedTotal = tx.unitPriceAtTime * (tx.count or 1)
-        local curPrice = (tx.itemID and tx.itemID > 0) and (VM:GetItemAHPrice(tx.itemID, tx.itemLink) or 0) or tx.unitPriceAtTime
+        local curPrice = (tx.itemID and tx.itemID > 0) and (VM:GetEffectiveLivePrice(tx.itemID, tx.itemLink, tx.unitPriceAtTime) or 0) or tx.unitPriceAtTime
         local curTotal = curPrice * (tx.count or 1)
 
         if isLocked then
@@ -769,20 +769,16 @@ function UI:RefreshInventory()
             row.stockText:SetText(string.format("In Stock: |cff44dd77%d|r", available))
         end
 
-        if VM:HasPriceAddon() then
-            local ah = VM:GetItemAHPrice(item.itemID)
-            if ah then
-                if rule.mode == "PERCENT" then
-                    local memberPrice = math.floor(ah * ((rule.percent or 50) / 100))
-                    row.priceText:SetText("Price: " .. VM:FormatMoney(memberPrice))
-                else
-                    row.priceText:SetText("AH: " .. VM:FormatMoney(ah))
-                end
+        local effectivePrice = VM:GetEffectiveLivePrice(item.itemID, item.itemLink or item.link, item.ahPrice)
+        if effectivePrice > 0 then
+            if rule.mode == "PERCENT" then
+                local memberPrice = math.floor(effectivePrice * ((rule.percent or 50) / 100))
+                row.priceText:SetText("Price: " .. VM:FormatMoney(memberPrice))
             else
-                row.priceText:SetText("|cff777777AH: Unknown|r")
+                row.priceText:SetText("AH: " .. VM:FormatMoney(effectivePrice))
             end
         else
-            row.priceText:SetText("")
+            row.priceText:SetText("|cff777777AH: Unknown|r")
         end
 
         if rule.mode == "LOCKED" or available <= 0 then
@@ -867,9 +863,23 @@ function UI:RefreshRequests()
             REJECTED = "|cffff5555REJECTED|r"
         }
 
+        local liveUnit = VM:GetEffectiveLivePrice(req.itemID, req.itemLink, req.priceAtRequest or req.quotedUnitPrice)
+        local liveCharged = liveUnit
+        if req.priceMode == "PERCENT" and (req.pricePercent or 50) > 0 and liveUnit > 0 then
+            liveCharged = math.floor(liveUnit * ((req.pricePercent or 50) / 100))
+        elseif req.priceMode == "FREE" then
+            liveCharged = 0
+        end
+
         local priceNote = ""
-        if req.quotedUnitPrice and req.quotedUnitPrice > 0 then
-            priceNote = "  |cffaaaaaa(" .. VM:FormatMoney(req.quotedUnitPrice * req.count) .. ")|r"
+        local reqTotal = (req.quotedUnitPrice or 0) * (req.count or 1)
+        local liveTotal = liveCharged * (req.count or 1)
+        if reqTotal > 0 and liveTotal > 0 and liveTotal ~= reqTotal then
+            priceNote = string.format("  |cffaaaaaa(Req: %s | Live: %s)|r", VM:FormatMoney(reqTotal), VM:FormatMoney(liveTotal))
+        elseif liveTotal > 0 then
+            priceNote = string.format("  |cffaaaaaa(%s)|r", VM:FormatMoney(liveTotal))
+        elseif reqTotal > 0 then
+            priceNote = string.format("  |cffaaaaaa(%s)|r", VM:FormatMoney(reqTotal))
         end
 
         row.info:SetText(string.format("[%s]  %s  —  %dx %s%s",

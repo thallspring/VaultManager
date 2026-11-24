@@ -13,9 +13,9 @@ function Ranking:GetTransactionValuation(tx, priceMode)
     local mode = priceMode or (VM.db and VM.db.uiPrefs and VM.db.uiPrefs.rankingPriceMode) or "live"
     local unitVal = 0
     if mode == "locked" then
-        unitVal = (tx.unitPriceAtTime and tx.unitPriceAtTime > 0) and tx.unitPriceAtTime or (VM:GetItemAHPrice(tx.itemID, tx.itemLink) or 0)
+        unitVal = (tx.unitPriceAtTime and tx.unitPriceAtTime > 0) and tx.unitPriceAtTime or (VM:GetEffectiveLivePrice(tx.itemID, tx.itemLink, tx.unitPriceAtTime) or 0)
     else -- "live"
-        local livePrice = VM:GetItemAHPrice(tx.itemID, tx.itemLink) or 0
+        local livePrice = VM:GetEffectiveLivePrice(tx.itemID, tx.itemLink, tx.unitPriceAtTime) or 0
         unitVal = (livePrice > 0) and livePrice or (tx.unitPriceAtTime or 0)
     end
     return unitVal * (tx.count or 0)

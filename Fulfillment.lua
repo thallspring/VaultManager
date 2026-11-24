@@ -89,10 +89,12 @@ function Fulfillment:CreateRequest(tabIndex, itemKey, count)
         return
     end
 
-    local ahPrice = (itemData.itemID ~= 0 and VM:GetItemAHPrice(itemData.itemID)) or 0
+    local effectivePrice = VM:GetEffectiveLivePrice(itemData.itemID, itemData.link or itemData.itemLink, itemData.ahPrice)
     local quotedUnit = 0
-    if rule.mode == "PERCENT" and ahPrice > 0 then
-        quotedUnit = math.floor(ahPrice * ((rule.percent or 50) / 100))
+    if rule.mode == "PERCENT" and effectivePrice > 0 then
+        quotedUnit = math.floor(effectivePrice * ((rule.percent or 50) / 100))
+    else
+        quotedUnit = effectivePrice
     end
 
     local reqID = string.format("REQ_%s_%d_%d", VM:GetPlayerName(), time(), math.random(1000, 9999))
@@ -110,6 +112,7 @@ function Fulfillment:CreateRequest(tabIndex, itemKey, count)
         approvedBy = "",
         fulfilledBy = "",
         quotedUnitPrice = quotedUnit,
+        priceAtRequest = effectivePrice,
         priceMode = rule.mode,
         pricePercent = rule.percent or 0
     }

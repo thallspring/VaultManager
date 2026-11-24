@@ -7,10 +7,14 @@ local function GenerateTxID(prefix)
 end
 
 function Ledger:RecordFulfillment(req, officerName)
-    local ahPrice = VM:GetItemAHPrice(req.itemID) or 0
+    local livePrice = VM:GetEffectiveLivePrice(req.itemID, req.itemLink, req.priceAtRequest or req.quotedUnitPrice)
     local unitCharged = 0
-    if req.priceMode == "PERCENT" and ahPrice > 0 then
-        unitCharged = math.floor(ahPrice * ((req.pricePercent or 50) / 100))
+    if req.priceMode == "PERCENT" and livePrice > 0 then
+        unitCharged = math.floor(livePrice * ((req.pricePercent or 50) / 100))
+    elseif req.priceMode == "FREE" then
+        unitCharged = 0
+    else
+        unitCharged = livePrice
     end
 
     local now = time()
@@ -22,7 +26,7 @@ function Ledger:RecordFulfillment(req, officerName)
         itemLink = req.itemLink,
         itemName = req.itemName,
         count = req.count,
-        unitPriceAtTime = ahPrice,
+        unitPriceAtTime = livePrice,
         chargedUnitPrice = unitCharged,
         timestamp = now,
         updatedAt = now,
@@ -216,9 +220,9 @@ function Ledger:GetTransactionValue(tx, useHistorical, priceMode)
     local mode = priceMode or (VM.db and VM.db.uiPrefs and VM.db.uiPrefs.rankingPriceMode) or "live"
     local unitVal = 0
     if mode == "locked" or useHistorical then
-        unitVal = (tx.unitPriceAtTime and tx.unitPriceAtTime > 0) and tx.unitPriceAtTime or (VM:GetItemAHPrice(tx.itemID, tx.itemLink) or 0)
+        unitVal = (tx.unitPriceAtTime and tx.unitPriceAtTime > 0) and tx.unitPriceAtTime or (VM:GetEffectiveLivePrice(tx.itemID, tx.itemLink, tx.unitPriceAtTime) or 0)
     else -- "live"
-        local livePrice = VM:GetItemAHPrice(tx.itemID, tx.itemLink) or 0
+        local livePrice = VM:GetEffectiveLivePrice(tx.itemID, tx.itemLink, tx.unitPriceAtTime) or 0
         unitVal = (livePrice > 0) and livePrice or (tx.unitPriceAtTime or 0)
     end
     return unitVal * (tx.count or 0)

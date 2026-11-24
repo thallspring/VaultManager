@@ -11,6 +11,7 @@
 - **Slash Command Independence:** Register `SLASH_VAULTMANAGER1 = "/vm"` at the top level of `Core.lua` before `UI:Init()` so UI errors never break `/vm`.
 
 ## Release & Git Workflow
-- **Versioning:** Keep `## Version` in `VaultManager.toc` in sync with `CHANGELOG.md` and the header badge (`VAULT MANAGER vX.Y.Z`). Keep `## X-Curse-Project-ID: 1823514` intact.
-- **Local Commits Only:** Verify zero Lua syntax errors before committing. Always commit changes locally to `main`, and **never** run `git push` or `git tag` unless explicitly instructed.
+- **Versioning:** Do NOT bump ## Version in VaultManager.toc or edit CHANGELOG.md unless explicitly requested. Keep `## X-Curse-Project-ID: 1823514` intact.
+- **Local Commits Only:** Do NOT search the filesystem for lua.exe, luac.exe, python, or luaparse. Perform manual Lua 5.1 syntax review only. Always commit changes locally to `main`, and **never** run `git push` or `git tag` unless explicitly instructed.
 - **Token Hygiene:** Only read files explicitly referenced with `@filename` or directly required for the requested edit; avoid scanning the entire codebase unnecessarily.
+

@@ -1802,6 +1802,14 @@ function UI:UpdateScanStatusButton()
     mainFrame.scanStatusBtn:SetBackdropColor(color[1], color[2], color[3], color[4] or 1)
 end
 
+function UI:RefreshAllTabs()
+    self:RefreshInventory()
+    self:RefreshRequests()
+    self:RefreshLedger()
+    self:RefreshRanking()
+    self:RefreshSettings()
+end
+
 function UI:RefreshAll()
     if not mainFrame or not mainFrame:IsShown() then return end
     if not mainFrame.navButtons or not mainFrame.panels or not mainFrame.scanInfo then return end
@@ -1811,6 +1819,11 @@ function UI:RefreshAll()
         if mainFrame.scanStatusBtn then
             mainFrame.scanStatusBtn:SetText("No Guild")
             mainFrame.scanStatusBtn:SetBackdropColor(0.4, 0.4, 0.4, 1)
+        end
+        for i = 1, 5 do
+            if mainFrame.panels and mainFrame.panels[i] then
+                mainFrame.panels[i]:Hide()
+            end
         end
         return
     end

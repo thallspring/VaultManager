@@ -457,28 +457,294 @@ function VM:GetReservedCount(itemID, tabIndex)
     return reserved
 end
 
-function VM:GetActiveGuildKey()
-    local guildName = GetGuildInfo("player")
-    local realm = GetRealmName() or "Unknown"
-    local charKey = self:GetPlayerName() .. "-" .. realm
-    VaultManagerDB = VaultManagerDB or {}
-    VaultManagerDB.charGuilds = VaultManagerDB.charGuilds or {}
+function VM:GetRealmName()
+    local realm = ""
+    if GetNormalizedRealmName then
+        local ok, r = pcall(GetNormalizedRealmName)
+        if ok and type(r) == "string" and r ~= "" then
+            realm = r
+        end
+    end
+    if realm == "" and GetRealmName then
+        local ok, r = pcall(GetRealmName)
+        if ok and type(r) == "string" and r ~= "" then
+            realm = r
+        end
+    end
+    return realm
+end
 
-    if guildName and guildName ~= "" then
-        return string.format("%s-%s", realm, guildName)
+function VM:GetCharKey()
+    local pName = self:GetPlayerName()
+    if pName == "" then return "" end
+    local realm = self:GetRealmName()
+    return (realm ~= "") and (pName .. "-" .. realm) or (pName .. "-")
+end
+
+function VM:GetStoredGuildKeyForPlayer()
+    if not VaultManagerDB or not VaultManagerDB.charGuilds then return nil end
+    local pName = self:GetPlayerName()
+    if pName == "" then return nil end
+    local realm = self:GetRealmName()
+
+    -- 1. Try exact charKey if realm is known
+    if realm ~= "" then
+        local exact = pName .. "-" .. realm
+        if VaultManagerDB.charGuilds[exact] and VaultManagerDB.charGuilds[exact] ~= "" then
+            return VaultManagerDB.charGuilds[exact]
+        end
     end
 
-    if IsInGuild() then
-        local storedKey = VaultManagerDB.charGuilds[charKey]
-        if storedKey and storedKey ~= "" then
-            return storedKey
+    -- 2. Fall back to matching by character name prefix UnitName("player") .. "-"
+    local prefix = pName .. "-"
+    for cKey, gKey in pairs(VaultManagerDB.charGuilds) do
+        if cKey:sub(1, #prefix) == prefix and gKey and gKey ~= "" then
+            -- If realm is now known and cKey had empty realm, migrate cKey
+            if realm ~= "" and cKey ~= (pName .. "-" .. realm) then
+                VaultManagerDB.charGuilds[pName .. "-" .. realm] = gKey
+                VaultManagerDB.charGuilds[cKey] = nil
+            end
+            return gKey
         end
+    end
+    return nil
+end
+
+function VM:NormalizeGuildKey(guildName)
+    if not guildName or guildName == "" then return nil end
+    local realm = self:GetRealmName()
+    local suffix = "-" .. guildName
+
+    if realm ~= "" then
+        return realm .. suffix
+    end
+
+    -- If realm is empty, check if any existing key in VaultManagerDB.guilds ends with "-" .. guildName
+    if VaultManagerDB and VaultManagerDB.guilds then
+        if VaultManagerDB.guilds[suffix] then
+            return suffix
+        end
+        for k in pairs(VaultManagerDB.guilds) do
+            if k == suffix or (k:len() >= #suffix and k:sub(-#suffix) == suffix) then
+                return k
+            end
+        end
+    end
+
+    return suffix
+end
+
+function VM:MergeGuildData(target, source)
+    if not target or not source or target == source then return target end
+
+    -- 1. inventory (and vault / scanMetadata)
+    local tScan = (target.inventory and target.inventory.lastScan) or 0
+    local sScan = (source.inventory and source.inventory.lastScan) or 0
+    local tHasTabs = target.inventory and target.inventory.tabs and next(target.inventory.tabs)
+    local sHasTabs = source.inventory and source.inventory.tabs and next(source.inventory.tabs)
+
+    if sScan > tScan or (not tHasTabs and sHasTabs) then
+        target.inventory = source.inventory
+    elseif tHasTabs and sHasTabs then
+        target.inventory = target.inventory or { lastScan = 0, scannedBy = "", tabs = {} }
+        target.inventory.tabs = target.inventory.tabs or {}
+        for tabIdx, tabData in pairs(source.inventory.tabs) do
+            if not target.inventory.tabs[tabIdx] then
+                target.inventory.tabs[tabIdx] = tabData
+            end
+        end
+    end
+    target.vault = target.inventory
+    target.scanMetadata = target.inventory
+
+    -- 2. ledger & processedBankLogs
+    target.ledger = target.ledger or {}
+    if source.ledger then
+        for id, tx in pairs(source.ledger) do
+            if not target.ledger[id] then
+                target.ledger[id] = tx
+            end
+        end
+    end
+
+    target.processedBankLogs = target.processedBankLogs or {}
+    if source.processedBankLogs then
+        for sig, val in pairs(source.processedBankLogs) do
+            if not target.processedBankLogs[sig] then
+                target.processedBankLogs[sig] = val
+            end
+        end
+    end
+
+    -- 3. mains & roster
+    target.mains = target.mains or {}
+    if source.mains then
+        for char, entry in pairs(source.mains) do
+            if not target.mains[char] then
+                target.mains[char] = entry
+            else
+                local tUp = (type(target.mains[char]) == "table" and target.mains[char].updatedAt) or 0
+                local sUp = (type(entry) == "table" and entry.updatedAt) or 0
+                if sUp > tUp then
+                    target.mains[char] = entry
+                end
+            end
+        end
+    end
+    target.roster = target.mains
+
+    -- 4. archivedMembers
+    target.archivedMembers = target.archivedMembers or {}
+    if source.archivedMembers then
+        for char, isArchived in pairs(source.archivedMembers) do
+            if target.archivedMembers[char] == nil then
+                target.archivedMembers[char] = isArchived
+            end
+        end
+    end
+
+    -- 5. requests & fulfillments
+    target.requests = target.requests or {}
+    if source.requests then
+        for id, req in pairs(source.requests) do
+            if not target.requests[id] then
+                target.requests[id] = req
+            end
+        end
+    end
+    target.fulfillments = target.requests
+
+    -- 6. tabRules
+    target.tabRules = target.tabRules or {}
+    if source.tabRules then
+        for i, rule in pairs(source.tabRules) do
+            if not target.tabRules[i] then
+                target.tabRules[i] = rule
+            else
+                local tUp = (target.tabRules[i] and target.tabRules[i].updatedAt) or 0
+                local sUp = (rule and rule.updatedAt) or 0
+                if sUp > tUp then
+                    target.tabRules[i] = rule
+                end
+            end
+        end
+    end
+
+    -- 7. uiPrefs
+    target.uiPrefs = target.uiPrefs or {}
+    if source.uiPrefs then
+        for k, v in pairs(source.uiPrefs) do
+            if target.uiPrefs[k] == nil then
+                target.uiPrefs[k] = v
+            end
+        end
+    end
+
+    -- 8. dbEpoch
+    target.dbEpoch = math.max(target.dbEpoch or 1, (source and source.dbEpoch) or 1)
+
+    InitGuildSubTables(target)
+    return target
+end
+
+function VM:MergeSplitBucketsForGuild(guildName)
+    if not guildName or guildName == "" or not VaultManagerDB or not VaultManagerDB.guilds then
+        return
+    end
+    local realm = self:GetRealmName()
+    if realm == "" then return end
+
+    local canonicalKey = realm .. "-" .. guildName
+    local suffix = "-" .. guildName
+
+    local canonicalBucket = VaultManagerDB.guilds[canonicalKey]
+
+    local keysToMerge = {}
+    for k in pairs(VaultManagerDB.guilds) do
+        if k ~= canonicalKey then
+            if k == suffix or (k:len() >= #suffix and k:sub(-#suffix) == suffix) then
+                table.insert(keysToMerge, k)
+            end
+        end
+    end
+
+    for _, oldKey in ipairs(keysToMerge) do
+        local oldBucket = VaultManagerDB.guilds[oldKey]
+        if oldBucket then
+            if not canonicalBucket then
+                VaultManagerDB.guilds[canonicalKey] = oldBucket
+                canonicalBucket = VaultManagerDB.guilds[canonicalKey]
+            else
+                self:MergeGuildData(canonicalBucket, oldBucket)
+            end
+            VaultManagerDB.guilds[oldKey] = nil
+
+            if VaultManagerDB.charGuilds then
+                for c, g in pairs(VaultManagerDB.charGuilds) do
+                    if g == oldKey then
+                        VaultManagerDB.charGuilds[c] = canonicalKey
+                    end
+                end
+            end
+        end
+    end
+
+    if canonicalBucket then
+        InitGuildSubTables(canonicalBucket)
+    end
+end
+
+function VM:MergeAllSplitBuckets()
+    if not VaultManagerDB or not VaultManagerDB.guilds then return end
+    local realm = self:GetRealmName()
+    if realm == "" then return end
+
+    local guildsToProcess = {}
+    for k in pairs(VaultManagerDB.guilds) do
+        if k:sub(1, 1) == "-" then
+            local gName = k:sub(2)
+            if gName ~= "" then
+                guildsToProcess[gName] = true
+            end
+        else
+            local gName = k:match("^.-%-(.+)$")
+            if gName and gName ~= "" then
+                local canon = realm .. "-" .. gName
+                if k ~= canon then
+                    guildsToProcess[gName] = true
+                end
+            end
+        end
+    end
+
+    for gName in pairs(guildsToProcess) do
+        self:MergeSplitBucketsForGuild(gName)
+    end
+end
+
+function VM:GetActiveGuildKey()
+    VaultManagerDB = VaultManagerDB or {}
+    VaultManagerDB.charGuilds = VaultManagerDB.charGuilds or {}
+    VaultManagerDB.guilds = VaultManagerDB.guilds or {}
+
+    local liveGuildName = GetGuildInfo("player")
+    if liveGuildName and liveGuildName ~= "" then
+        return self:NormalizeGuildKey(liveGuildName)
+    end
+
+    local storedKey = self:GetStoredGuildKeyForPlayer()
+    if storedKey and storedKey ~= "" then
+        local gName = storedKey:match("^.-%-(.+)$") or storedKey:match("^%-(.+)$")
+        if gName and gName ~= "" then
+            return self:NormalizeGuildKey(gName)
+        end
+        return storedKey
     end
 
     return nil
 end
 
-function VM:SwitchGuildContext()
+function VM:SwitchGuildContext(triggerEvent)
     VaultManagerDB = VaultManagerDB or {}
     VaultManagerDB.guilds = VaultManagerDB.guilds or {}
     VaultManagerDB.charGuilds = VaultManagerDB.charGuilds or {}
@@ -489,13 +755,59 @@ function VM:SwitchGuildContext()
         end
     end
 
-    local realm = GetRealmName() or "Unknown"
-    local charKey = self:GetPlayerName() .. "-" .. realm
-    local prevGuildKey = VaultManagerDB.charGuilds[charKey]
-    local liveGuildName = GetGuildInfo("player")
+    local realm = self:GetRealmName()
+    local pName = self:GetPlayerName()
+    local charKey = (realm ~= "") and (pName .. "-" .. realm) or (pName .. "-")
 
-    if not IsInGuild() then
-        VaultManagerDB.charGuilds[charKey] = nil
+    -- Clean up and normalize split character keys (e.g. "Thall-" vs "Thall-Realm")
+    if realm ~= "" and pName ~= "" then
+        local emptyRealmCharKey = pName .. "-"
+        if VaultManagerDB.charGuilds[emptyRealmCharKey] then
+            if not VaultManagerDB.charGuilds[charKey] or VaultManagerDB.charGuilds[charKey] == "" then
+                VaultManagerDB.charGuilds[charKey] = VaultManagerDB.charGuilds[emptyRealmCharKey]
+            end
+            VaultManagerDB.charGuilds[emptyRealmCharKey] = nil
+        end
+    end
+
+    -- Automatically merge split guild buckets across VaultManagerDB.guilds
+    if realm ~= "" then
+        self:MergeAllSplitBuckets()
+    end
+
+    local liveGuildName = GetGuildInfo("player")
+    local guildKey = nil
+
+    if liveGuildName and liveGuildName ~= "" then
+        if realm ~= "" then
+            self:MergeSplitBucketsForGuild(liveGuildName)
+        end
+        guildKey = self:NormalizeGuildKey(liveGuildName)
+    else
+        -- Fall back to stored guild key for this character from VaultManagerDB.charGuilds
+        local storedKey = self:GetStoredGuildKeyForPlayer()
+        if storedKey and storedKey ~= "" then
+            local gName = storedKey:match("^.-%-(.+)$") or storedKey:match("^%-(.+)$")
+            if gName and gName ~= "" then
+                if realm ~= "" then
+                    self:MergeSplitBucketsForGuild(gName)
+                end
+                guildKey = self:NormalizeGuildKey(gName)
+            else
+                guildKey = storedKey
+            end
+        end
+    end
+
+    if not guildKey or guildKey == "" then
+        -- Never treat GetGuildInfo("player") == nil during login (ADDON_LOADED, PLAYER_LOGIN, PLAYER_ENTERING_WORLD) as leaving a guild
+        local isLoginEvent = (triggerEvent == "ADDON_LOADED" or triggerEvent == "PLAYER_LOGIN" or triggerEvent == "PLAYER_ENTERING_WORLD")
+        if not isLoginEvent and triggerEvent == "PLAYER_GUILD_UPDATE" and not IsInGuild() then
+            if charKey ~= "" then
+                VaultManagerDB.charGuilds[charKey] = nil
+            end
+        end
+
         VM.isUnguilded = true
         VM.db = {
             inventory = { lastScan = 0, scannedBy = "", tabs = {} },
@@ -514,39 +826,16 @@ function VM:SwitchGuildContext()
             scanMetadata = { lastScan = 0, scannedBy = "", tabs = {} },
         }
         InitGuildSubTables(VM.db)
-        if prevGuildKey and prevGuildKey ~= "" then
-            local stillUsed = false
-            for c, g in pairs(VaultManagerDB.charGuilds) do
-                if g == prevGuildKey then stillUsed = true; break end
-            end
-            if not stillUsed then
-                VaultManagerDB.guilds[prevGuildKey] = nil
-            end
-        end
         if self.UI then self.UI:RefreshAll() end
         return
     end
 
-    local guildKey = nil
-    if liveGuildName and liveGuildName ~= "" then
-        guildKey = string.format("%s-%s", realm, liveGuildName)
-    elseif prevGuildKey and prevGuildKey ~= "" then
-        guildKey = prevGuildKey
-    else
-        return
-    end
-
     VM.isUnguilded = false
-    VaultManagerDB.charGuilds[charKey] = guildKey
-
-    if liveGuildName and liveGuildName ~= "" and prevGuildKey and prevGuildKey ~= guildKey then
-        local stillUsed = false
-        for c, g in pairs(VaultManagerDB.charGuilds) do
-            if g == prevGuildKey then stillUsed = true; break end
-        end
-        if not stillUsed then
-            VaultManagerDB.guilds[prevGuildKey] = nil
-        end
+    if charKey ~= "" then
+        VaultManagerDB.charGuilds[charKey] = guildKey
+    end
+    if realm ~= "" and pName ~= "" then
+        VaultManagerDB.charGuilds[pName .. "-" .. realm] = guildKey
     end
 
     if not VaultManagerDB.guilds[guildKey] then
@@ -663,11 +952,22 @@ guildEventFrame:RegisterEvent("PLAYER_GUILD_UPDATE")
 guildEventFrame:RegisterEvent("GUILD_ROSTER_UPDATE")
 guildEventFrame:SetScript("OnEvent", function(_, event)
     if event == "PLAYER_ENTERING_WORLD" or event == "PLAYER_GUILD_UPDATE" or event == "GUILD_ROSTER_UPDATE" then
-        C_Timer.After(0.5, function()
+        if event == "PLAYER_GUILD_UPDATE" then
             if VM.SwitchGuildContext then
-                VM:SwitchGuildContext()
+                VM:SwitchGuildContext(event)
             end
-        end)
+        end
+        if C_Timer and C_Timer.After then
+            C_Timer.After(0.5, function()
+                if VM.SwitchGuildContext then
+                    VM:SwitchGuildContext(event)
+                end
+            end)
+        else
+            if VM.SwitchGuildContext then
+                VM:SwitchGuildContext(event)
+            end
+        end
     end
 end)
 
@@ -683,7 +983,7 @@ initFrame:SetScript("OnEvent", function(_, event, arg1)
         for _, gTable in pairs(VaultManagerDB.guilds) do
             InitGuildSubTables(gTable)
         end
-        VM:SwitchGuildContext()
+        VM:SwitchGuildContext("ADDON_LOADED")
         VM:MigrateMainsFormat()
 
         -- Purge any old 0g or invalid unattributed gold ledger entries
@@ -752,6 +1052,8 @@ initFrame:SetScript("OnEvent", function(_, event, arg1)
         elseif RegisterAddonMessagePrefix then
             RegisterAddonMessagePrefix(VM.PREFIX)
         end
+
+        VM:SwitchGuildContext("PLAYER_LOGIN")
 
         if IsInGuild() then
             if C_GuildInfo and C_GuildInfo.GuildRoster then

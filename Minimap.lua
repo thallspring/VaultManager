@@ -40,6 +40,14 @@ function MM:UpdateBadge()
     end
 end
 
+function MM:SetHidden(hide)
+    VM.db.minimap = VM.db.minimap or { angle = 220, hide = false }
+    VM.db.minimap.hide = hide
+    if minimapBtn then
+        if hide then minimapBtn:Hide() else minimapBtn:Show() end
+    end
+end
+
 function MM:Create()
     if minimapBtn then return end
 
@@ -52,6 +60,12 @@ function MM:Create()
     minimapBtn:EnableMouse(true)
     minimapBtn:RegisterForClicks("LeftButtonUp", "RightButtonUp")
     minimapBtn:RegisterForDrag("LeftButton")
+
+    if VM.db.minimap.hide then
+        minimapBtn:Hide()
+    else
+        minimapBtn:Show()
+    end
 
     -- Standard circular minimap border
     local overlay = minimapBtn:CreateTexture(nil, "OVERLAY")

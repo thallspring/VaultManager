@@ -175,13 +175,20 @@ function Comms:OnMessageReceived(msg, sender)
     elseif cmd == "INV_META" then
         local scanTime = tonumber(parts[2]) or 0
         local scannedBy = UnescapeStr(parts[3])
-        if VM.db.inventory.lastScan == 0 then return end
+        if scanTime == 0 then return end
+
+        local nowServer = (GetServerTime and GetServerTime()) or time()
+        if scanTime > nowServer + 60 then
+            scanTime = nowServer
+        end
+
         if scanTime > (VM.db.inventory.lastScan or 0) then
-            VM.db.inventory = {
-                lastScan = scanTime,
-                scannedBy = scannedBy,
-                tabs = {}
-            }
+            VM.db.inventory.lastScan = scanTime
+            VM.db.inventory.lastScanBy = scannedBy
+            VM.db.inventory.lastSyncedFrom = sender
+            VM.db.inventory.tabs = {}
+        elseif scanTime == (VM.db.inventory.lastScan or 0) then
+            VM.db.inventory.lastSyncedFrom = sender
         end
 
     elseif cmd == "INV_TAB" then
@@ -295,6 +302,9 @@ function Comms:OnMessageReceived(msg, sender)
             isManual = (UnescapeStr(parts[11]) == "MANUAL_GOLD" or UnescapeStr(parts[11]) == "MANUAL")
         }
         local existing = VM.db.ledger[tx.id]
+        if existing and existing.unitPriceAtTime and existing.unitPriceAtTime > 0 then
+            tx.unitPriceAtTime = existing.unitPriceAtTime
+        end
         if not fromOfficer and (existing or (tx.source ~= "BANK_LOG" and tx.source ~= "BANK_MONEY_LOG")) then return end
         if tx.id ~= "" and (not existing or tx.updatedAt > (existing.updatedAt or existing.timestamp or 0)) then
             VM.db.ledger[tx.id] = tx
@@ -306,7 +316,8 @@ end
 function Comms:BroadcastInventory()
     local inv = VM.db.inventory
     if not inv or not inv.lastScan or inv.lastScan == 0 then return end
-    self:SendRaw(string.format("INV_META|%d|%s", inv.lastScan, EscapeStr(inv.scannedBy)))
+    local scanBy = inv.lastScanBy or inv.scannedBy or UnitName("player")
+    self:SendRaw(string.format("INV_META|%d|%s", inv.lastScan, EscapeStr(scanBy)))
     for tabIdx, tabData in pairs(inv.tabs) do
         self:SendRaw(string.format("INV_TAB|%d|%d|%s|%s",
             inv.lastScan, tabIdx, EscapeStr(tabData.name), EscapeStr(tabData.icon)))

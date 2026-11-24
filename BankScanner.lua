@@ -200,55 +200,60 @@ function Scanner:ScanBank()
     local newTabs = {}
     local totalItemsScanned = 0
     local uniqueItemsCount = 0
+    local oldTabs = VM.db.inventory and VM.db.inventory.tabs or {}
 
     for tab = 1, numTabs do
         if SetCurrentGuildBankTab then SetCurrentGuildBankTab(tab) end
         if QueryGuildBankTab then QueryGuildBankTab(tab) end
 
-        local name, icon = GB_API.GetTabInfo(tab)
-        newTabs[tab] = {
-            name = name or ("Tab " .. tab),
-            icon = icon or "Interface\\Icons\\INV_Misc_Bag_08",
-            items = {}
-        }
+        local name, icon, isViewable = GB_API.GetTabInfo(tab)
+        if isViewable == false and oldTabs[tab] then
+            newTabs[tab] = oldTabs[tab]
+        else
+            newTabs[tab] = {
+                name = name or ("Tab " .. tab),
+                icon = icon or "Interface\\Icons\\INV_Misc_Bag_08",
+                items = {}
+            }
 
-        for slot = 1, MAX_SLOTS_PER_TAB do
-            local texture, count = GB_API.GetItemInfo(tab, slot)
-            local link = GB_API.GetItemLink(tab, slot)
+            for slot = 1, MAX_SLOTS_PER_TAB do
+                local texture, count = GB_API.GetItemInfo(tab, slot)
+                local link = GB_API.GetItemLink(tab, slot)
 
-            count = tonumber(count) or 1
-            if link and link ~= "" and count > 0 then
-                local itemID = tonumber(link:match("item:(%d+)"))
-                local itemName = link:match("%[(.-)%]") or link
-                itemName = itemName:gsub("^%[", ""):gsub("%]$", "")
+                count = tonumber(count) or 1
+                if link and link ~= "" and count > 0 then
+                    local itemID = tonumber(link:match("item:(%d+)"))
+                    local itemName = link:match("%[(.-)%]") or link
+                    itemName = itemName:gsub("^%[", ""):gsub("%]$", "")
 
-                if not itemID and GetItemInfo then
-                    local _, foundLink, _, _, _, _, _, _, _, _, _, foundItemID = GetItemInfo(itemName)
-                    if foundItemID then itemID = foundItemID
-                    elseif foundLink then itemID = tonumber(foundLink:match("item:(%d+)")) end
+                    if not itemID and GetItemInfo then
+                        local _, foundLink, _, _, _, _, _, _, _, _, _, foundItemID = GetItemInfo(itemName)
+                        if foundItemID then itemID = foundItemID
+                        elseif foundLink then itemID = tonumber(foundLink:match("item:(%d+)")) end
+                    end
+
+                    itemID = itemID or 0
+                    local key = (itemID ~= 0) and itemID or itemName
+
+                    texture = texture or "Interface\\Icons\\INV_Misc_QuestionMark"
+                    local ahVal = VM:GetItemAHPrice(itemID, link) or 0
+                    if not newTabs[tab].items[key] then
+                        newTabs[tab].items[key] = {
+                            itemID = itemID,
+                            link = link,
+                            itemLink = link,
+                            name = itemName,
+                            icon = texture,
+                            ahPrice = ahVal,
+                            count = 0
+                        }
+                        uniqueItemsCount = uniqueItemsCount + 1
+                    else
+                        if ahVal > 0 then newTabs[tab].items[key].ahPrice = ahVal end
+                    end
+                    newTabs[tab].items[key].count = newTabs[tab].items[key].count + count
+                    totalItemsScanned = totalItemsScanned + count
                 end
-
-                itemID = itemID or 0
-                local key = (itemID ~= 0) and itemID or itemName
-
-                texture = texture or "Interface\\Icons\\INV_Misc_QuestionMark"
-                local ahVal = VM:GetItemAHPrice(itemID, link) or 0
-                if not newTabs[tab].items[key] then
-                    newTabs[tab].items[key] = {
-                        itemID = itemID,
-                        link = link,
-                        itemLink = link,
-                        name = itemName,
-                        icon = texture,
-                        ahPrice = ahVal,
-                        count = 0
-                    }
-                    uniqueItemsCount = uniqueItemsCount + 1
-                else
-                    if ahVal > 0 then newTabs[tab].items[key].ahPrice = ahVal end
-                end
-                newTabs[tab].items[key].count = newTabs[tab].items[key].count + count
-                totalItemsScanned = totalItemsScanned + count
             end
         end
     end
@@ -268,8 +273,10 @@ function Scanner:ScanBank()
         end
     end
 
+    local serverTime = (GetServerTime and GetServerTime()) or time()
     VM.db.inventory = {
-        lastScan = time(),
+        lastScan = serverTime,
+        lastScanBy = UnitName("player") or VM:GetPlayerName(),
         scannedBy = VM:GetPlayerName(),
         tabs = newTabs
     }
@@ -287,6 +294,7 @@ function Scanner:ScanLogs()
     for tab = 1, numTabs do
         if QueryGuildBankLog then QueryGuildBankLog(tab) end
         local numTx = GB_API.GetNumTransactions(tab)
+        local occurrenceCounts = {}
         for i = 1, numTx do
             local txType, name, itemLink, count = GB_API.GetTransaction(tab, i)
             if name and name:find("%[") and not (itemLink and itemLink:find("%[")) then
@@ -302,19 +310,32 @@ function Scanner:ScanLogs()
                 local normName = (name and name ~= "") and VM:NormalizeName(name) or "UNATTRIBUTED"
                 count = tonumber(count) or 1
 
-                local sig = string.format("t%d_i%d_%s_%s_%d", tab, i, normName, cleanLink, count)
+                local approxTime = time() - ((numTx - i) * 1800)
+                local dayKey = date("%Y-%m-%d", approxTime)
+                local itemKey = (itemID > 0) and tostring(itemID) or cleanLink
+
+                local occKey = string.format("t%d_%s_%s_%s_%d_%s", tab, normName, itemKey, tostring(count), 1, dayKey)
+                occurrenceCounts[occKey] = (occurrenceCounts[occKey] or 0) + 1
+                local occIdx = occurrenceCounts[occKey]
+
+                local sig = string.format("v5_t%d_%s_%s_%s_%d_%s_%d", tab, normName, itemKey, tostring(count), 1, dayKey, occIdx)
                 if not VM.db.processedBankLogs[sig] then
                     VM.db.processedBankLogs[sig] = true
                     local exists = false
                     for _, existingTx in pairs(VM.db.ledger) do
-                        if not existingTx.deleted and existingTx.player == normName and existingTx.count == count and (existingTx.itemLink == cleanLink or existingTx.itemName == cleanLink) then
+                        if not existingTx.deleted and existingTx.player == normName and existingTx.count == count and (existingTx.itemLink == cleanLink or existingTx.itemName == cleanLink) and math.abs((existingTx.timestamp or 0) - approxTime) < 86400 then
                             exists = true
                             break
                         end
                     end
 
                     if not exists then
-                        VM.Ledger:RecordDeposit(normName, itemID, cleanLink, count, "BANK_LOG")
+                        local activeRet = VM.db.activeReturn
+                        if activeRet and (itemID == activeRet.itemID or (itemID == 0 and cleanLink == activeRet.itemLink)) then
+                            VM.Ledger:RecordReturnDeposit(normName, itemID, cleanLink, count, activeRet.fulfillmentId)
+                        else
+                            VM.Ledger:RecordDeposit(normName, itemID, cleanLink, count, "BANK_LOG")
+                        end
                         addedCount = addedCount + 1
                     end
                 end

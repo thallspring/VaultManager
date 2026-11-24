@@ -45,7 +45,7 @@ local function ApplyModernBackdrop(frame, bgColor, borderColor)
     frame:SetBackdropBorderColor(bd[1], bd[2], bd[3], bd[4])
 end
 
-local function ShowItemTooltip(selfFrame, itemLink, itemID, itemName)
+local function ShowItemTooltip(selfFrame, itemLink, itemID, itemName, tx)
     GameTooltip:SetOwner(selfFrame, "ANCHOR_RIGHT")
     local link = itemLink
     if link and (link:find("item:") or link:find("enchant:") or link:find("spell:")) then
@@ -57,6 +57,14 @@ local function ShowItemTooltip(selfFrame, itemLink, itemID, itemName)
     else
         GameTooltip:SetText("Item")
     end
+
+    if tx and tx.unitPriceAtTime and tx.unitPriceAtTime > 0 then
+        GameTooltip:AddLine(" ")
+        GameTooltip:AddLine(string.format("Locked Value (at time): %s", VM:FormatMoney(tx.unitPriceAtTime * (tx.count or 1))), 0.9, 0.8, 0.2)
+        local curPrice = (tx.itemID and tx.itemID > 0) and (VM:GetItemAHPrice(tx.itemID, tx.itemLink) or 0) or tx.unitPriceAtTime
+        GameTooltip:AddLine(string.format("Current AH Value: %s", VM:FormatMoney(curPrice * (tx.count or 1))), 0.2, 0.8, 0.9)
+    end
+
     GameTooltip:Show()
 end
 
@@ -1013,7 +1021,7 @@ function UI:RefreshLedger()
                     sub:EnableMouse(true)
                     sub:SetScript("OnEnter", function(selfSub)
                         selfSub:SetBackdropColor(THEME.rowHover[1], THEME.rowHover[2], THEME.rowHover[3], 1)
-                        ShowItemTooltip(selfSub, tx.itemLink, tx.itemID, tx.itemName)
+                        ShowItemTooltip(selfSub, tx.itemLink, tx.itemID, tx.itemName, tx)
                     end)
                     sub:SetScript("OnLeave", function(selfSub)
                         selfSub:SetBackdropColor(THEME.rowOdd[1], THEME.rowOdd[2], THEME.rowOdd[3], THEME.rowOdd[4])
@@ -1310,7 +1318,7 @@ function UI:RefreshRanking()
                     sub:EnableMouse(true)
                     sub:SetScript("OnEnter", function(selfSub)
                         selfSub:SetBackdropColor(THEME.rowHover[1], THEME.rowHover[2], THEME.rowHover[3], 1)
-                        ShowItemTooltip(selfSub, tx.itemLink, tx.itemID, tx.itemName)
+                        ShowItemTooltip(selfSub, tx.itemLink, tx.itemID, tx.itemName, tx)
                     end)
                     sub:SetScript("OnLeave", function(selfSub)
                         selfSub:SetBackdropColor(THEME.rowOdd[1], THEME.rowOdd[2], THEME.rowOdd[3], THEME.rowOdd[4])
@@ -1690,11 +1698,23 @@ function UI:RefreshAll()
         mainFrame.scanInfo:SetText("|cffffcc33Update available|r")
     else
         local inv = VM.db and VM.db.inventory
-        if inv and inv.lastScan and inv.lastScan > 0 then
-            mainFrame.scanInfo:SetText(string.format("Last scanned: %s by %s",
-                date("%d/%m %H:%M", inv.lastScan), inv.scannedBy or "?"))
+        local lastScan = inv and inv.lastScan or 0
+        if lastScan > 0 then
+            local diff = time() - lastScan
+            local hours = math.floor(diff / 3600)
+            local mins = math.floor((diff % 3600) / 60)
+            local timeAgo = hours > 0 and string.format("%dh %dm", hours, mins) or string.format("%dm", mins)
+            local scanBy = inv.lastScanBy or inv.scannedBy or "?"
+            local syncedFrom = inv.lastSyncedFrom
+            local syncNote = (syncedFrom and syncedFrom ~= "" and syncedFrom ~= VM:GetPlayerName() and syncedFrom ~= scanBy) and string.format(" (synced via %s)", syncedFrom) or ""
+
+            local colorTag = "|cff44dd77" -- green < 6h
+            if diff > 86400 then colorTag = "|cffff5555" -- red > 24h
+            elseif diff > 21600 then colorTag = "|cffffcc33" end -- yellow 6-24h
+
+            mainFrame.scanInfo:SetText(string.format("Vault scanned %s ago by %s%s", colorTag .. timeAgo .. "|r", scanBy, syncNote))
         else
-            mainFrame.scanInfo:SetText("Not scanned yet (Open Guild Bank)")
+            mainFrame.scanInfo:SetText("Vault not yet scanned")
         end
     end
 

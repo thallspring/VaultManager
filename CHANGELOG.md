@@ -2,6 +2,16 @@
 
 All notable changes to **Vault Manager** will be documented in this file.
 
+## [1.3.0] - 2026-11-24
+
+### Major Update (Protocol v5)
+- **Log Deduplication & Time Bucketing:** Built stable, scan-time-independent deduplication keys using time bucketing and occurrence indexing to eliminate duplicate guild bank log entries. Added automatic v1.3.0 migration cleanup.
+- **Strict Price Locking:** Snapshot and strictly protect `priceAtTime` against overwrites during scans and P2P syncs, displaying clear `Locked` vs `Now` valuation breakdowns in Ranking and item tooltips.
+- **P2P Clock-Skew Protection:** Track original scanner metadata (`lastScanBy`, `lastScanTime`) with automatic timestamp clamping (`GetServerTime() + 60`) and sync provenance tracking (`lastSyncedFrom`).
+- **Fulfillment Confirmation & Value-Neutral Returns:** Added `pending_confirmation` lifecycle state on officer withdrawals with a bank-open confirmation modal dialog (`VaultManagerReturnDialog`) supporting item acceptance or value-neutral bank returns (`[RETURNED]`, `netValue = 0`).
+- **Edge-Case Hardening:** Restricted tab viewability checks (`isViewable`), FIFO queue for trade-to-bank gold matching (15-min expiry), inventory rollover audit detection (`[INVENTORY DELTA]`), and roster merge/archiving utilities.
+- **UI & UX Enhancements:** Vault live search and tab filters (`All Tabs`, `Tab 1`..`Tab N`), item tooltip valuation breakdowns, color-coded freshness status header, "Unattributed Only" Ledger toggle, and main/alt ranking grouping with alt count badges.
+
 ## [1.2.2] - 2026-11-24
 
 ### Added & Enhanced

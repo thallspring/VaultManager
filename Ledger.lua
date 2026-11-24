@@ -28,12 +28,55 @@ function Ledger:RecordFulfillment(req, officerName)
         updatedAt = now,
         officer = VM:NormalizeName(officerName),
         source = "REQUEST",
+        status = "pending_confirmation",
+        fulfillmentId = req.id,
+        withdrawnBy = VM:NormalizeName(officerName),
+        recipient = VM:NormalizeName(req.requester),
         isManual = false,
         deleted = false
     }
 
     VM.db.ledger[tx.id] = tx
     VM.Comms:BroadcastTransaction(tx)
+    return tx
+end
+
+function Ledger:RecordReturnDeposit(playerName, itemID, itemLink, count, fulfillmentId)
+    local ahPrice = VM:GetItemAHPrice(itemID, itemLink) or 0
+    local cleanLink = itemLink or "item:0"
+    local itemName = cleanLink:gsub("^%[", ""):gsub("%]$", "")
+    local now = time()
+    local tx = {
+        id = GenerateTxID("IN"),
+        type = "IN",
+        player = VM:NormalizeName(playerName),
+        itemID = itemID or 0,
+        itemLink = cleanLink,
+        itemName = itemName,
+        count = count or 1,
+        unitPriceAtTime = ahPrice,
+        chargedUnitPrice = 0,
+        timestamp = now,
+        updatedAt = now,
+        officer = VM:GetPlayerName(),
+        source = "RETURN",
+        tag = "[RETURNED]",
+        netValue = 0,
+        deleted = false
+    }
+
+    for _, otx in pairs(VM.db.ledger) do
+        if otx.fulfillmentId == fulfillmentId and not otx.deleted then
+            otx.voided = true
+            otx.netValue = 0
+            otx.updatedAt = now
+        end
+    end
+
+    VM.db.ledger[tx.id] = tx
+    VM.db.activeReturn = nil
+    VM.Comms:BroadcastTransaction(tx)
+    if VM.UI then VM.UI:RefreshAll() end
     return tx
 end
 
@@ -163,6 +206,9 @@ function Ledger:DeleteTransaction(txID)
 end
 
 function Ledger:GetTransactionValue(tx, useHistorical)
+    if tx.voided or tx.netValue == 0 or tx.tag == "[RETURNED]" then
+        return 0
+    end
     if tx.itemID == 0 or tx.itemLink == "GOLD" then
         return (tx.unitPriceAtTime or 0) * (tx.count or 1)
     end

@@ -2,7 +2,7 @@ local ADDON_NAME, VM = ...
 _G.VaultManager = VM
 
 VM.PREFIX = "VMGR_V1"
-VM.VERSION = 4
+VM.VERSION = 5
 VM.OFFICER_MAX_RANK_INDEX = 1
 VM.debugLog = {}
 VM.pendingTradePayments = {}
@@ -28,6 +28,7 @@ local DEFAULT_DB = {
     processedBankLogs = {},
     mains = {},
     rosterCache = {},
+    archivedMembers = {},
     uiPrefs = {
         useHistoricalPrices = false,
         hideOfficers = false,
@@ -196,6 +197,58 @@ function VM:UnlinkCharacter(charName)
 
     if self.Comms then self.Comms:BroadcastMains() end
     if self.UI then self.UI:RefreshAll() end
+end
+
+function VM:MergeCharacter(oldName, newName)
+    local oldNorm = self:NormalizeName(oldName)
+    local newNorm = self:NormalizeName(newName)
+    if oldNorm == "" or newNorm == "" or oldNorm == oldNorm then return end
+
+    if self.db.ledger then
+        for _, tx in pairs(self.db.ledger) do
+            if tx.player and self:NormalizeName(tx.player) == oldNorm then
+                tx.player = newNorm
+            end
+            if tx.rawSender and self:NormalizeName(tx.rawSender) == oldNorm then
+                tx.rawSender = newNorm
+            end
+        end
+    end
+
+    if self.db.mains[oldNorm] then
+        self.db.mains[newNorm] = self.db.mains[oldNorm]
+        self.db.mains[oldNorm] = nil
+    end
+    for char, entry in pairs(self.db.mains) do
+        local m = type(entry) == "table" and entry.main or entry
+        if m == oldNorm then
+            if type(entry) == "table" then
+                entry.main = newNorm
+            else
+                self.db.mains[char] = { main = newNorm, updatedAt = time() }
+            end
+        end
+    end
+
+    if self.Comms then
+        self.Comms:BroadcastMains()
+        self.Comms:BroadcastLedgerSync()
+    end
+    if self.UI then self.UI:RefreshAll() end
+end
+
+function VM:ToggleArchiveMember(charName)
+    local norm = self:NormalizeName(charName)
+    if norm == "" then return end
+    if not self.db.archivedMembers then self.db.archivedMembers = {} end
+    self.db.archivedMembers[norm] = not self.db.archivedMembers[norm]
+    if self.UI then self.UI:RefreshAll() end
+end
+
+function VM:IsArchivedMember(charName)
+    local norm = self:NormalizeName(charName)
+    if norm == "" then return false end
+    return self.db.archivedMembers and self.db.archivedMembers[norm] == true
 end
 
 function VM:GetGuildRosterNames(includeLegacy)
@@ -391,6 +444,23 @@ initFrame:SetScript("OnEvent", function(_, event, arg1)
             for id, tx in pairs(VM.db.ledger) do
                 if tx and (tx.itemLink == "GOLD" or tx.itemID == 0) and (not tx.unitPriceAtTime or tx.unitPriceAtTime <= 0 or tx.count == 0) then
                     VM.db.ledger[id] = nil
+                end
+            end
+        end
+
+        -- v1.3.0 Migration: Purge duplicate Guild Bank log entries sharing same tab, type, player, item/gold, count, and calendar day
+        if VM.db.ledger then
+            local seenLogs = {}
+            for id, tx in pairs(VM.db.ledger) do
+                if tx and tx.timestamp then
+                    local dayKey = date("%Y-%m-%d", tx.timestamp)
+                    local itemKey = (tx.itemID and tx.itemID > 0) and tostring(tx.itemID) or tostring(tx.itemLink or "GOLD")
+                    local sig = string.format("%s:%s:%s:%s:%s:%s", tostring(tx.tab or 1), tostring(tx.type or "IN"), tostring(tx.player or ""), itemKey, tostring(tx.count or 1), dayKey)
+                    if seenLogs[sig] then
+                        VM.db.ledger[id] = nil
+                    else
+                        seenLogs[sig] = id
+                    end
                 end
             end
         end

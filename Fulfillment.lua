@@ -180,6 +180,9 @@ function Fulfillment:OnGuildBankOpened()
     if #approved > 0 and VM.UI then
         VM.UI:ShowOfficerBankPopup(approved)
     end
+    if VM.UI and VM.UI.CheckPendingFulfillmentReturns then
+        VM.UI:CheckPendingFulfillmentReturns()
+    end
 end
 
 -- Finds items in player's bags and places them in Send Mail

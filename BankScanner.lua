@@ -294,7 +294,9 @@ function Scanner:ScanLogs()
     for tab = 1, numTabs do
         if QueryGuildBankLog then QueryGuildBankLog(tab) end
         local numTx = GB_API.GetNumTransactions(tab)
-        local occurrenceCounts = {}
+        
+        local snapshotCounts = {}
+        local txDataList = {}
         for i = 1, numTx do
             local txType, name, itemLink, count = GB_API.GetTransaction(tab, i)
             if name and name:find("%[") and not (itemLink and itemLink:find("%[")) then
@@ -302,42 +304,56 @@ function Scanner:ScanLogs()
                 name = itemLink
                 itemLink = temp
             end
-
             local typeStr = tostring(txType or ""):lower()
             if typeStr:find("deposit") or typeStr == "1" then
                 local cleanLink = itemLink or "[Unknown Item]"
                 local itemID = tonumber(cleanLink and cleanLink:match("item:(%d+)")) or 0
                 local normName = (name and name ~= "") and VM:NormalizeName(name) or "UNATTRIBUTED"
                 count = tonumber(count) or 1
-
-                local approxTime = time() - ((numTx - i) * 1800)
-                local dayKey = date("%Y-%m-%d", approxTime)
+                local computedTimestamp = time() - ((numTx - i) * 1800)
                 local itemKey = (itemID > 0) and tostring(itemID) or cleanLink
+                local tupleKey = string.format("t%d:IN:%s:%s:%d", tab, normName, itemKey, count)
+                
+                snapshotCounts[tupleKey] = (snapshotCounts[tupleKey] or 0) + 1
+                table.insert(txDataList, {
+                    tab = tab,
+                    normName = normName,
+                    itemID = itemID,
+                    cleanLink = cleanLink,
+                    count = count,
+                    computedTimestamp = computedTimestamp,
+                    tupleKey = tupleKey
+                })
+            end
+        end
 
-                local occKey = string.format("t%d_%s_%s_%s_%d_%s", tab, normName, itemKey, tostring(count), 1, dayKey)
-                occurrenceCounts[occKey] = (occurrenceCounts[occKey] or 0) + 1
-                local occIdx = occurrenceCounts[occKey]
+        for _, data in ipairs(txDataList) do
+            local existingCount = 0
+            for _, existingTx in pairs(VM.db.ledger) do
+                if not existingTx.deleted and existingTx.type == "IN" and (existingTx.tab or 1) == data.tab and existingTx.player == data.normName and existingTx.count == data.count then
+                    local exItemKey = (existingTx.itemID and existingTx.itemID > 0) and tostring(existingTx.itemID) or tostring(existingTx.itemLink or existingTx.itemName or "")
+                    local dataItemKey = (data.itemID > 0) and tostring(data.itemID) or data.cleanLink
+                    if exItemKey == dataItemKey then
+                        if math.abs((existingTx.timestamp or 0) - data.computedTimestamp) <= 172800 then
+                            existingCount = existingCount + 1
+                        end
+                    end
+                end
+            end
 
-                local sig = string.format("v5_t%d_%s_%s_%s_%d_%s_%d", tab, normName, itemKey, tostring(count), 1, dayKey, occIdx)
-                if not VM.db.processedBankLogs[sig] then
+            local sig = string.format("v131_t%d:%s:%s:%d:%d", data.tab, data.normName, (data.itemID > 0) and tostring(data.itemID) or data.cleanLink, data.count, math.floor(data.computedTimestamp / 172800))
+            if not VM.db.processedBankLogs[sig] then
+                local totalAllowed = snapshotCounts[data.tupleKey] or 1
+                if existingCount < totalAllowed then
                     VM.db.processedBankLogs[sig] = true
-                    local exists = false
-                    for _, existingTx in pairs(VM.db.ledger) do
-                        if not existingTx.deleted and existingTx.player == normName and existingTx.count == count and (existingTx.itemLink == cleanLink or existingTx.itemName == cleanLink) and math.abs((existingTx.timestamp or 0) - approxTime) < 86400 then
-                            exists = true
-                            break
-                        end
+                    local activeRet = VM.db.activeReturn
+                    if activeRet and (data.itemID == activeRet.itemID or (data.itemID == 0 and data.cleanLink == activeRet.itemLink)) then
+                        VM.Ledger:RecordReturnDeposit(data.normName, data.itemID, data.cleanLink, data.count, activeRet.fulfillmentId)
+                    else
+                        VM.Ledger:RecordDeposit(data.normName, data.itemID, data.cleanLink, data.count, "BANK_LOG")
                     end
-
-                    if not exists then
-                        local activeRet = VM.db.activeReturn
-                        if activeRet and (itemID == activeRet.itemID or (itemID == 0 and cleanLink == activeRet.itemLink)) then
-                            VM.Ledger:RecordReturnDeposit(normName, itemID, cleanLink, count, activeRet.fulfillmentId)
-                        else
-                            VM.Ledger:RecordDeposit(normName, itemID, cleanLink, count, "BANK_LOG")
-                        end
-                        addedCount = addedCount + 1
-                    end
+                    addedCount = addedCount + 1
+                    existingCount = existingCount + 1
                 end
             end
         end

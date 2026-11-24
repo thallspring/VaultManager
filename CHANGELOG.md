@@ -2,6 +2,14 @@
 
 All notable changes to **Vault Manager** will be documented in this file.
 
+## [1.3.1] - 2026-11-24
+
+### Fixed & Enhanced
+- **Bulletproof Guild Bank Log Deduplication & Migration Purge:** Implemented a 48-hour rolling window occurrence comparison check in `BankScanner.lua` preventing bank log duplicates caused by shifting relative API timestamps. Added automatic v131 migration purging existing duplicate ledger entries and keeping the earliest entry.
+- **Default Live AH Valuation & Price Mode Toggle:** Added a ranking price mode dropdown (`Prices: Live AH` / `Prices: Locked (At Time)`) defaulting to live AH valuation with locked valuation as secondary.
+- **Clarified Locked vs. Current Price Labels:** Updated expanded Ranking item rows from `Price: X | Now: Y` to `Locked: X | Now: Y` with color-coded comparison highlighting for `Now:` (green if higher, red if lower, gray if identical), and displaying only `Amount: X` for pure gold entries.
+- **Header Version Display:** Rendered the dynamic addon version (`v1.3.1`) next to the header title in the top-left corner (`VAULT MANAGER v1.3.1`).
+
 ## [1.3.0] - 2026-11-24
 
 ### Major Update (Protocol v5)

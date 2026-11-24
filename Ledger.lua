@@ -205,7 +205,7 @@ function Ledger:DeleteTransaction(txID)
     if VM.UI then VM.UI:RefreshAll() end
 end
 
-function Ledger:GetTransactionValue(tx, useHistorical)
+function Ledger:GetTransactionValue(tx, useHistorical, priceMode)
     if tx.voided or tx.netValue == 0 or tx.tag == "[RETURNED]" then
         return 0
     end
@@ -213,11 +213,13 @@ function Ledger:GetTransactionValue(tx, useHistorical)
         return (tx.unitPriceAtTime or 0) * (tx.count or 1)
     end
 
+    local mode = priceMode or (VM.db and VM.db.uiPrefs and VM.db.uiPrefs.rankingPriceMode) or "live"
     local unitVal = 0
-    if useHistorical then
-        unitVal = tx.unitPriceAtTime or 0
-    else
-        unitVal = VM:GetItemAHPrice(tx.itemID, tx.itemLink) or tx.unitPriceAtTime or 0
+    if mode == "locked" or useHistorical then
+        unitVal = (tx.unitPriceAtTime and tx.unitPriceAtTime > 0) and tx.unitPriceAtTime or (VM:GetItemAHPrice(tx.itemID, tx.itemLink) or 0)
+    else -- "live"
+        local livePrice = VM:GetItemAHPrice(tx.itemID, tx.itemLink) or 0
+        unitVal = (livePrice > 0) and livePrice or (tx.unitPriceAtTime or 0)
     end
     return unitVal * (tx.count or 0)
 end
@@ -240,7 +242,7 @@ local function MatchesPeriod(txTimestamp, period)
     return true
 end
 
-function Ledger:GetAggregatedByMain(useHistorical, periodFilter)
+function Ledger:GetAggregatedByMain(useHistorical, periodFilter, priceMode)
     local groups = {}
 
     for _, tx in pairs(VM.db.ledger) do
@@ -260,7 +262,7 @@ function Ledger:GetAggregatedByMain(useHistorical, periodFilter)
                 }
             end
 
-            local val = self:GetTransactionValue(tx, useHistorical)
+            local val = self:GetTransactionValue(tx, useHistorical, priceMode)
             if tx.type == "SUMMARY" then
                 groups[key].totalInValue = groups[key].totalInValue + (tx.contributed or 0)
                 groups[key].totalOutValue = groups[key].totalOutValue + (tx.received or 0)
@@ -308,8 +310,8 @@ function Ledger:GetAggregatedByMain(useHistorical, periodFilter)
 end
 
 -- Donation leaderboard (sortMode: "TOTAL" | "GOLD" | "ITEMS", periodFilter, hideOfficers)
-function Ledger:GetDonationRanking(sortMode, useHistorical, periodFilter, hideOfficers)
-    local allGroups = self:GetAggregatedByMain(useHistorical, periodFilter)
+function Ledger:GetDonationRanking(sortMode, useHistorical, periodFilter, hideOfficers, priceMode)
+    local allGroups = self:GetAggregatedByMain(useHistorical, periodFilter, priceMode)
     local ranked = {}
 
     for _, grp in ipairs(allGroups) do

@@ -31,6 +31,7 @@ local DEFAULT_DB = {
     archivedMembers = {},
     uiPrefs = {
         useHistoricalPrices = false,
+        rankingPriceMode = "live",
         hideOfficers = false,
         rankingPeriod = "ALL",
     }
@@ -463,6 +464,41 @@ initFrame:SetScript("OnEvent", function(_, event, arg1)
                     end
                 end
             end
+        end
+
+        -- v1.3.1 Migration (v131): Purge duplicate Guild Bank entries within 48-hour rolling window, keeping earliest entry
+        if not VM.db.migrationVersion or VM.db.migrationVersion < 131 then
+            if VM.db.ledger then
+                local groups = {}
+                for id, tx in pairs(VM.db.ledger) do
+                    if tx and tx.type == "IN" and tx.timestamp then
+                        local itemKey = (tx.itemID and tx.itemID > 0) and tostring(tx.itemID) or tostring(tx.itemLink or tx.itemName or "GOLD")
+                        local groupKey = string.format("%s:%s:%s:%s:%d", tostring(tx.tab or 1), tostring(tx.type), tostring(tx.player or ""), itemKey, tonumber(tx.count or 1))
+                        groups[groupKey] = groups[groupKey] or {}
+                        table.insert(groups[groupKey], { id = id, tx = tx })
+                    end
+                end
+
+                for _, entries in pairs(groups) do
+                    table.sort(entries, function(a, b) return (a.tx.timestamp or 0) < (b.tx.timestamp or 0) end)
+                    local kept = {}
+                    for _, entry in ipairs(entries) do
+                        local isDuplicate = false
+                        for _, keptTx in ipairs(kept) do
+                            if math.abs((entry.tx.timestamp or 0) - (keptTx.timestamp or 0)) <= 172800 then
+                                isDuplicate = true
+                                break
+                            end
+                        end
+                        if isDuplicate then
+                            VM.db.ledger[entry.id] = nil
+                        else
+                            table.insert(kept, entry.tx)
+                        end
+                    end
+                end
+            end
+            VM.db.migrationVersion = 131
         end
     elseif event == "PLAYER_LOGIN" then
         if C_ChatInfo and C_ChatInfo.RegisterAddonMessagePrefix then

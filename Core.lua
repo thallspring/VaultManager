@@ -440,6 +440,10 @@ end
 function VM:GetTabRule(tabIndex)
     if not self.db.tabRules[tabIndex] then
         self.db.tabRules[tabIndex] = { mode = "FREE", percent = 50, updatedAt = 0 }
+    else
+        if not self.db.tabRules[tabIndex].percent or self.db.tabRules[tabIndex].percent <= 0 then
+            self.db.tabRules[tabIndex].percent = 50
+        end
     end
     return self.db.tabRules[tabIndex]
 end
@@ -447,9 +451,14 @@ end
 function VM:SetTabRule(tabIndex, mode, percent)
     if not self:IsOfficer() then return end
     local pName = self:GetPlayerName()
+    local pct = tonumber(percent) or 50
+    local m = mode or "FREE"
+    if m == "PERCENT" and (not pct or pct <= 0) then
+        pct = 50
+    end
     self.db.tabRules[tabIndex] = {
-        mode = mode or "FREE",
-        percent = tonumber(percent) or 50,
+        mode = m,
+        percent = pct,
         updatedAt = time(),
         updatedBy = pName ~= "" and pName or UnitName("player") or "Officer"
     }
@@ -463,22 +472,31 @@ function VM:ValidateTabRules()
 
     local infoText = (GetGuildInfoText and GetGuildInfoText()) or ""
     if infoText ~= "" then
-        local rulesTag = infoText:match("%[VM%-RULES:(%b[])%]") or infoText:match("%[VM%-RULES:([^%]]+)%]")
+        local rulesTag = infoText:match("%[VM%-RULES:([^%]]+)%]") or infoText:match("%[VM%-RULES:(%b[])%]")
         if rulesTag then
-            for pair in rulesTag:gmatch("([^;%s]+)") do
-                local tIdx, tMode, tPct = pair:match("(%d+)=(%a+)(%d*)")
-                tIdx = tonumber(tIdx)
-                if tIdx and tIdx >= 1 and tIdx <= 6 then
-                    local m = tMode:upper()
-                    local modeVal = (m == "AH" or m == "PERCENT") and "PERCENT" or m
-                    if modeVal == "FREE" or modeVal == "LOCKED" or modeVal == "PERCENT" then
-                        local pctVal = tonumber(tPct) or (modeVal == "PERCENT" and 50 or 0)
-                        self.db.tabRules[tIdx] = {
-                            mode = modeVal,
-                            percent = pctVal,
-                            updatedAt = time(),
-                            updatedBy = "GuildInfo"
-                        }
+            for token in rulesTag:gmatch("[^;]+") do
+                local cleanToken = strtrim(token)
+                if cleanToken ~= "" then
+                    local tIdx, tMode, tPct = cleanToken:match("(%d+)=([A-Za-z]+)(%d*)")
+                    tIdx = tonumber(tIdx)
+                    if tIdx and tIdx >= 1 and tIdx <= 6 and tMode then
+                        local m = tMode:upper()
+                        local modeVal = (m == "AH" or m == "PERCENT") and "PERCENT" or m
+                        if modeVal == "FREE" or modeVal == "LOCKED" or modeVal == "PERCENT" then
+                            local pctNum = tonumber(tPct)
+                            local pctVal = 50
+                            if modeVal == "PERCENT" then
+                                pctVal = (pctNum and pctNum > 0) and pctNum or 50
+                            else
+                                pctVal = (pctNum and pctNum > 0) and pctNum or 0
+                            end
+                            self.db.tabRules[tIdx] = {
+                                mode = modeVal,
+                                percent = pctVal,
+                                updatedAt = time(),
+                                updatedBy = "GuildInfo"
+                            }
+                        end
                     end
                 end
             end

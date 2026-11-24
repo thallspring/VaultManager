@@ -278,12 +278,14 @@ end
 
 function UI:OpenExportModal()
     if not exportModalFrame then self:CreateExportModal() end
+    if exportModalFrame.csvToggle then exportModalFrame.csvToggle:Show() end
     exportModalFrame:Show()
     self:RefreshExportContent()
 end
 
 function UI:OpenExportModalText(text, customTitle)
     if not exportModalFrame then self:CreateExportModal() end
+    if exportModalFrame.csvToggle then exportModalFrame.csvToggle:Hide() end
     exportModalFrame:Show()
     if exportModalFrame.editBox then
         exportModalFrame.editBox:SetText(text)
@@ -294,7 +296,7 @@ end
 
 function UI:RefreshExportContent()
     if not exportModalFrame or not exportModalFrame:IsShown() then return end
-    local isCSV = exportModalFrame.csvToggle:GetChecked()
+    local isCSV = (exportModalFrame.csvToggle and exportModalFrame.csvToggle:IsShown() and exportModalFrame.csvToggle:GetChecked()) or false
     if not VM.db then VM.db = {} end
     VM.db.uiPrefs = VM.db.uiPrefs or {}
     local uiPrefs = GetUIPrefs()
@@ -1674,12 +1676,20 @@ function UI:RefreshSettings()
                 r.freeBtn:SetScript("OnClick", function() VM:SetTabRule(i, "FREE", 0) end)
                 r.pctBtn:SetScript("OnClick", function()
                     local p = tonumber(r.pctBox:GetText()) or 50
+                    if not p or p <= 0 then
+                        p = 50
+                        r.pctBox:SetText("50")
+                    end
                     VM:SetTabRule(i, "PERCENT", p)
                 end)
                 r.lockBtn:SetScript("OnClick", function() VM:SetTabRule(i, "LOCKED", 0) end)
                 r.pctBox:SetScript("OnEnterPressed", function(selfBox)
                     selfBox:ClearFocus()
                     local p = tonumber(selfBox:GetText()) or 50
+                    if not p or p <= 0 then
+                        p = 50
+                        selfBox:SetText("50")
+                    end
                     VM:SetTabRule(i, "PERCENT", p)
                 end)
             else

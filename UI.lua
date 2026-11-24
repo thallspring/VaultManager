@@ -45,17 +45,58 @@ local function ApplyModernBackdrop(frame, bgColor, borderColor)
     frame:SetBackdropBorderColor(bd[1], bd[2], bd[3], bd[4])
 end
 
+local function GetUIPrefs()
+    if not VM.db then VM.db = {} end
+    VM.db.uiPrefs = VM.db.uiPrefs or {}
+    local defaults = {
+        useHistoricalPrices = false,
+        showLockedPrices = false,
+        rankingPriceMode = "live",
+        hideOfficers = false,
+        showLegacyRanking = true,
+        rankingPeriod = "ALL",
+        rankingSortBy = "net",
+        rankingSortDir = "desc",
+    }
+    for k, v in pairs(defaults) do
+        if VM.db.uiPrefs[k] == nil then
+            VM.db.uiPrefs[k] = v
+        end
+    end
+    return VM.db.uiPrefs
+end
+
 local function ShowItemTooltip(selfFrame, itemLink, itemID, itemName, tx)
     GameTooltip:SetOwner(selfFrame, "ANCHOR_RIGHT")
-    local link = itemLink
-    if link and (link:find("item:") or link:find("enchant:") or link:find("spell:")) then
-        GameTooltip:SetHyperlink(link)
-    elseif itemID and itemID > 0 then
-        GameTooltip:SetHyperlink("item:" .. tostring(itemID))
-    elseif itemName and itemName ~= "" and not itemName:find("^Gold") then
-        GameTooltip:SetText(itemName)
-    else
-        GameTooltip:SetText("Item")
+    local handled = false
+
+    local numID = tonumber(itemID)
+    if numID and numID > 0 then
+        local _, realLink = GetItemInfo(numID)
+        if realLink then
+            GameTooltip:SetHyperlink(realLink)
+            handled = true
+        else
+            pcall(function() GameTooltip:SetHyperlink("item:" .. numID) end)
+            handled = true
+        end
+    end
+
+    if not handled and itemLink then
+        local linkStr = tostring(itemLink)
+        if linkStr:find("|Hitem:") or linkStr:find("^item:%d+") then
+            GameTooltip:SetHyperlink(linkStr)
+            handled = true
+        end
+    end
+
+    if not handled then
+        local fallbackText = itemName or itemLink
+        if fallbackText and fallbackText ~= "" and not tostring(fallbackText):find("^Gold") then
+            GameTooltip:SetText(tostring(fallbackText))
+        else
+            GameTooltip:SetText("Item")
+        end
     end
 
     if tx and tx.unitPriceAtTime and tx.unitPriceAtTime > 0 then
@@ -80,27 +121,6 @@ end
 
 local function HideItemTooltip()
     GameTooltip:Hide()
-end
-
-local function GetUIPrefs()
-    if not VM.db then VM.db = {} end
-    VM.db.uiPrefs = VM.db.uiPrefs or {}
-    local defaults = {
-        useHistoricalPrices = false,
-        showLockedPrices = false,
-        rankingPriceMode = "live",
-        hideOfficers = false,
-        showLegacyRanking = true,
-        rankingPeriod = "ALL",
-        rankingSortBy = "net",
-        rankingSortDir = "desc",
-    }
-    for k, v in pairs(defaults) do
-        if VM.db.uiPrefs[k] == nil then
-            VM.db.uiPrefs[k] = v
-        end
-    end
-    return VM.db.uiPrefs
 end
 
 local function CreateModernButton(parent, width, height, text, accentColor)

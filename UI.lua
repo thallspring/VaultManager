@@ -282,6 +282,16 @@ function UI:OpenExportModal()
     self:RefreshExportContent()
 end
 
+function UI:OpenExportModalText(text, customTitle)
+    if not exportModalFrame then self:CreateExportModal() end
+    exportModalFrame:Show()
+    if exportModalFrame.editBox then
+        exportModalFrame.editBox:SetText(text)
+        exportModalFrame.editBox:HighlightText()
+        exportModalFrame.editBox:SetFocus()
+    end
+end
+
 function UI:RefreshExportContent()
     if not exportModalFrame or not exportModalFrame:IsShown() then return end
     local isCSV = exportModalFrame.csvToggle:GetChecked()
@@ -1493,46 +1503,68 @@ function UI:BuildSettingsPanel(panel)
     if not VM.db then VM.db = {} end
     VM.db.uiPrefs = VM.db.uiPrefs or {}
     local uiPrefs = GetUIPrefs()
+    local isOff = VM:IsOfficer()
+
     local ruleTitle = panel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     ruleTitle:SetPoint("TOPLEFT", 14, -12)
-    ruleTitle:SetText("|cff26a6f2GUILD BANK TAB RULES|r  |cff888888(Officers / GM Only)|r")
+    if isOff then
+        ruleTitle:SetText("|cff26a6f2GUILD BANK TAB RULES|r  |cff44dd77(Officer Authorized)|r")
+        local copyTagBtn = CreateModernButton(panel, 130, 20, "Copy Guild Info Tag", THEME.accent)
+        copyTagBtn:SetPoint("LEFT", ruleTitle, "RIGHT", 12, 0)
+        copyTagBtn:SetScript("OnClick", function()
+            local tagParts = {}
+            for i = 1, 6 do
+                local r = VM:GetTabRule(i)
+                local m = r.mode == "PERCENT" and "AH" or r.mode
+                local p = r.mode == "PERCENT" and (r.percent or 50) or ""
+                table.insert(tagParts, string.format("%d=%s%s", i, m, p))
+            end
+            local tagStr = "[VM-RULES:" .. table.concat(tagParts, ";") .. "]"
+            UI:OpenExportModalText(tagStr, "Guild Info Tag for Tab Rules")
+        end)
+    else
+        ruleTitle:SetText("|cff26a6f2GUILD BANK TAB RULES|r  |cffff5555[Read-Only (Officer Rank Required)]|r")
+    end
 
     panel.tabRuleRows = {}
     for i = 1, 6 do
         local r = CreateFrame("Frame", nil, panel, "BackdropTemplate")
-        r:SetSize(744, 26)
-        r:SetPoint("TOPLEFT", 14, -32 - (i - 1) * 28)
+        r:SetSize(744, 28)
+        r:SetPoint("TOPLEFT", 14, -36 - (i - 1) * 30)
         ApplyModernBackdrop(r, (i % 2 == 0) and THEME.rowEven or THEME.rowOdd, { 0, 0, 0, 0 })
 
         r.label = r:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
         r.label:SetPoint("LEFT", 10, 0)
-        r.label:SetWidth(175)
+        r.label:SetWidth(95)
         r.label:SetJustifyH("LEFT")
 
-        r.freeBtn = CreateModernButton(r, 100, 20, "Free-for-All")
-        r.freeBtn:SetPoint("LEFT", 195, 0)
+        r.freeBtn = CreateModernButton(r, 85, 22, "Free-for-All")
+        r.freeBtn:SetPoint("LEFT", 110, 0)
 
-        r.pctBtn = CreateModernButton(r, 100, 20, "% of AH")
-        r.pctBtn:SetPoint("LEFT", 300, 0)
+        r.pctBtn = CreateModernButton(r, 85, 22, "% of AH")
+        r.pctBtn:SetPoint("LEFT", 199, 0)
 
-        r.pctBox = CreateModernEditBox(r, 40, 20, true)
-        r.pctBox:SetPoint("LEFT", 405, 0)
+        r.pctBox = CreateModernEditBox(r, 38, 22, true)
+        r.pctBox:SetPoint("LEFT", 288, 0)
+        r.pctBox:SetText("50")
 
-        r.lockBtn = CreateModernButton(r, 90, 20, "Locked")
-        r.lockBtn:SetPoint("LEFT", 450, 0)
+        r.lockBtn = CreateModernButton(r, 75, 22, "Locked")
+        r.lockBtn:SetPoint("LEFT", 330, 0)
 
         r.status = r:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-        r.status:SetPoint("LEFT", 550, 0)
+        r.status:SetPoint("LEFT", 412, 0)
+        r.status:SetWidth(320)
+        r.status:SetJustifyH("LEFT")
 
         panel.tabRuleRows[i] = r
     end
 
     local rosterTitle = panel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    rosterTitle:SetPoint("TOPLEFT", 14, -208)
+    rosterTitle:SetPoint("TOPLEFT", 14, -220)
     rosterTitle:SetText("|cff26a6f2GUILD ROSTER & MAIN/ALT HIERARCHY TREE|r")
 
     local searchBox = CreateModernEditBox(panel, 180, 22, false)
-    searchBox:SetPoint("TOPLEFT", 14, -230)
+    searchBox:SetPoint("TOPLEFT", 14, -242)
     searchBox.placeholder = searchBox:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
     searchBox.placeholder:SetPoint("LEFT", 8, 0)
     searchBox.placeholder:SetText("Filter character...")
@@ -1546,7 +1578,7 @@ function UI:BuildSettingsPanel(panel)
 
     if VM:IsOfficer() then
         local autoSuggestBtn = CreateModernButton(panel, 130, 22, "Auto-Suggest Alts", THEME.accent)
-        autoSuggestBtn:SetPoint("TOPLEFT", 200, -230)
+        autoSuggestBtn:SetPoint("TOPLEFT", 200, -242)
         autoSuggestBtn:SetScript("OnClick", function()
             local names = VM:GetGuildRosterNames(false)
             local count = 0
@@ -1568,7 +1600,7 @@ function UI:BuildSettingsPanel(panel)
         end)
     end
 
-    panel.treeScroll = CreateScrollArea(panel, -258, 8)
+    panel.treeScroll = CreateScrollArea(panel, -270, 8)
 end
 
 function UI:RefreshSettings()
@@ -1591,28 +1623,70 @@ function UI:RefreshSettings()
             r.label:SetText(string.format("Tab %d: %s", i, tabData.name or ""))
             r.pctBox:SetText(tostring(rule.percent or 50))
 
-            if rule.mode == "LOCKED" then
-                r.status:SetText("|cffff5555Locked|r")
-            elseif rule.mode == "PERCENT" then
-                r.status:SetText("|cffffcc33" .. (rule.percent or 50) .. "% AH|r")
+            local mode = rule.mode or "FREE"
+            local byStr = (rule.updatedBy and rule.updatedBy ~= "") and (" (set by " .. rule.updatedBy .. ")") or ""
+
+            if mode == "LOCKED" then
+                r.status:SetText(string.format("|cffff5555ACTIVE: Locked%s|r", byStr))
+            elseif mode == "PERCENT" then
+                r.status:SetText(string.format("|cffffcc33ACTIVE: %d%% of AH%s|r", rule.percent or 50, byStr))
             else
-                r.status:SetText("|cff44dd77Free-for-All|r")
+                r.status:SetText(string.format("|cff44dd77ACTIVE: Free-for-All%s|r", byStr))
+            end
+
+            local function StyleButton(btn, isActive, activeBg, activeBorder, activeText)
+                if not isOff then
+                    btn:Disable()
+                    btn:SetBackdropColor(THEME.btnDisabled[1], THEME.btnDisabled[2], THEME.btnDisabled[3], 0.4)
+                    btn:SetBackdropBorderColor(THEME.border[1], THEME.border[2], THEME.border[3], 0.4)
+                    btn.label:SetTextColor(0.4, 0.4, 0.4)
+                elseif isActive then
+                    btn:Enable()
+                    btn:SetBackdropColor(activeBg[1], activeBg[2], activeBg[3], 1)
+                    btn:SetBackdropBorderColor(activeBorder[1], activeBorder[2], activeBorder[3], 1)
+                    btn.label:SetTextColor(activeText[1], activeText[2], activeText[3])
+                else
+                    btn:Enable()
+                    btn:SetBackdropColor(THEME.btnBg[1], THEME.btnBg[2], THEME.btnBg[3], 1)
+                    btn:SetBackdropBorderColor(THEME.border[1], THEME.border[2], THEME.border[3], 0.8)
+                    btn.label:SetTextColor(0.6, 0.6, 0.6)
+                end
+            end
+
+            StyleButton(r.freeBtn, mode == "FREE", {0.10, 0.28, 0.18, 1}, {0.20, 0.80, 0.40, 1}, {0.3, 0.9, 0.5})
+            StyleButton(r.pctBtn, mode == "PERCENT", {0.32, 0.26, 0.10, 1}, {0.90, 0.70, 0.20, 1}, {1, 0.85, 0.2})
+            StyleButton(r.lockBtn, mode == "LOCKED", {0.32, 0.12, 0.12, 1}, {0.90, 0.30, 0.30, 1}, {1, 0.4, 0.4})
+
+            if isOff and mode == "PERCENT" then
+                r.pctBox:Enable()
+                r.pctBox:SetBackdropColor(0.05, 0.06, 0.08, 1)
+                r.pctBox:SetBackdropBorderColor(THEME.accent[1], THEME.accent[2], THEME.accent[3], 1)
+                r.pctBox:SetAlpha(1.0)
+            else
+                r.pctBox:ClearFocus()
+                r.pctBox:Disable()
+                r.pctBox:SetBackdropColor(0.05, 0.06, 0.08, 0.4)
+                r.pctBox:SetBackdropBorderColor(THEME.border[1], THEME.border[2], THEME.border[3], 0.3)
+                r.pctBox:SetAlpha(0.4)
             end
 
             if isOff then
-                r.freeBtn:SetModernEnabled(true)
-                r.pctBtn:SetModernEnabled(true)
-                r.lockBtn:SetModernEnabled(true)
                 r.freeBtn:SetScript("OnClick", function() VM:SetTabRule(i, "FREE", 0) end)
                 r.pctBtn:SetScript("OnClick", function()
                     local p = tonumber(r.pctBox:GetText()) or 50
                     VM:SetTabRule(i, "PERCENT", p)
                 end)
                 r.lockBtn:SetScript("OnClick", function() VM:SetTabRule(i, "LOCKED", 0) end)
+                r.pctBox:SetScript("OnEnterPressed", function(selfBox)
+                    selfBox:ClearFocus()
+                    local p = tonumber(selfBox:GetText()) or 50
+                    VM:SetTabRule(i, "PERCENT", p)
+                end)
             else
-                r.freeBtn:SetModernEnabled(false)
-                r.pctBtn:SetModernEnabled(false)
-                r.lockBtn:SetModernEnabled(false)
+                r.freeBtn:SetScript("OnClick", nil)
+                r.pctBtn:SetScript("OnClick", nil)
+                r.lockBtn:SetScript("OnClick", nil)
+                r.pctBox:SetScript("OnEnterPressed", nil)
             end
         else
             r:Hide()

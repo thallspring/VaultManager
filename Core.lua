@@ -90,7 +90,16 @@ end
 function VM:IsOfficer()
     if not IsInGuild() then return false end
     local _, _, rankIndex = GetGuildInfo("player")
-    return rankIndex ~= nil and rankIndex <= VM.OFFICER_MAX_RANK_INDEX
+    if rankIndex ~= nil and rankIndex <= VM.OFFICER_MAX_RANK_INDEX then
+        return true
+    end
+    if IsGuildLeader and IsGuildLeader() then
+        return true
+    end
+    if CanEditOfficerNote and CanEditOfficerNote() then
+        return true
+    end
+    return false
 end
 
 function VM:IsOfficerName(name)
@@ -436,13 +445,62 @@ function VM:GetTabRule(tabIndex)
 end
 
 function VM:SetTabRule(tabIndex, mode, percent)
+    if not self:IsOfficer() then return end
+    local pName = self:GetPlayerName()
     self.db.tabRules[tabIndex] = {
         mode = mode or "FREE",
         percent = tonumber(percent) or 50,
-        updatedAt = time()
+        updatedAt = time(),
+        updatedBy = pName ~= "" and pName or UnitName("player") or "Officer"
     }
     if self.Comms then self.Comms:BroadcastTabRules() end
     if self.UI then self.UI:RefreshAll() end
+end
+
+function VM:ValidateTabRules()
+    if not self.db or not self.db.tabRules then return end
+    self:UpdateRosterCache()
+
+    local infoText = (GetGuildInfoText and GetGuildInfoText()) or ""
+    if infoText ~= "" then
+        local rulesTag = infoText:match("%[VM%-RULES:(%b[])%]") or infoText:match("%[VM%-RULES:([^%]]+)%]")
+        if rulesTag then
+            for pair in rulesTag:gmatch("([^;%s]+)") do
+                local tIdx, tMode, tPct = pair:match("(%d+)=(%a+)(%d*)")
+                tIdx = tonumber(tIdx)
+                if tIdx and tIdx >= 1 and tIdx <= 6 then
+                    local m = tMode:upper()
+                    local modeVal = (m == "AH" or m == "PERCENT") and "PERCENT" or m
+                    if modeVal == "FREE" or modeVal == "LOCKED" or modeVal == "PERCENT" then
+                        local pctVal = tonumber(tPct) or (modeVal == "PERCENT" and 50 or 0)
+                        self.db.tabRules[tIdx] = {
+                            mode = modeVal,
+                            percent = pctVal,
+                            updatedAt = time(),
+                            updatedBy = "GuildInfo"
+                        }
+                    end
+                end
+            end
+        end
+    end
+
+    for i, rule in pairs(self.db.tabRules) do
+        if rule and rule.updatedBy and rule.updatedBy ~= "GuildInfo" and rule.updatedBy ~= "System(TamperReset)" and rule.updatedBy ~= "" then
+            local normBy = self:NormalizeName(rule.updatedBy)
+            if self.db.rosterCache and next(self.db.rosterCache) then
+                local rankIndex = self.db.rosterCache[normBy]
+                if rankIndex ~= nil and rankIndex > VM.OFFICER_MAX_RANK_INDEX then
+                    self.db.tabRules[i] = {
+                        mode = "LOCKED",
+                        percent = 50,
+                        updatedAt = time(),
+                        updatedBy = "System(TamperReset)"
+                    }
+                end
+            end
+        end
+    end
 end
 
 function VM:GetReservedCount(itemID, tabIndex)
@@ -898,6 +956,7 @@ function VM:SwitchGuildContext(triggerEvent)
 
     VM.db = VaultManagerDB.guilds[guildKey]
     InitGuildSubTables(VM.db)
+    self:ValidateTabRules()
     if self.UI then self.UI:RefreshAll() end
 end
 
@@ -1082,6 +1141,7 @@ initFrame:SetScript("OnEvent", function(_, event, arg1)
         print("|cff00ccff[Vault Manager]|r Loaded. Type |cffffff00/vm|r to open.")
     elseif event == "GUILD_ROSTER_UPDATE" then
         VM:UpdateRosterCache()
+        VM:ValidateTabRules()
         if VM.UI then VM.UI:RefreshAll() end
     end
 end)

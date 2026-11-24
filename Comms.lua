@@ -276,14 +276,25 @@ function Comms:OnMessageReceived(msg, sender)
         end
 
     elseif cmd == "RULE" then
-        if not fromOfficer then return end
+        if not fromOfficer and not VM:IsOfficerName(sender) then return end
         local tabIdx = tonumber(parts[2])
         local mode = UnescapeStr(parts[3])
         local pct = tonumber(parts[4]) or 50
         local updatedAt = tonumber(parts[5]) or 0
+        local updatedBy = (#parts >= 6) and UnescapeStr(parts[6]) or sender
+
+        VM:UpdateRosterCache()
+        local normBy = VM:NormalizeName(updatedBy)
+        if VM.db.rosterCache and next(VM.db.rosterCache) then
+            local rankIdx = VM.db.rosterCache[normBy]
+            if rankIdx ~= nil and rankIdx > VM.OFFICER_MAX_RANK_INDEX then
+                return
+            end
+        end
+
         local existing = VM.db.tabRules[tabIdx]
         if tabIdx and (not existing or updatedAt > (existing.updatedAt or 0)) then
-            VM.db.tabRules[tabIdx] = { mode = mode, percent = pct, updatedAt = updatedAt }
+            VM.db.tabRules[tabIdx] = { mode = mode, percent = pct, updatedAt = updatedAt, updatedBy = updatedBy }
             if VM.UI then VM.UI:RefreshAll() end
         end
 
@@ -361,8 +372,9 @@ end
 function Comms:BroadcastTabRules()
     if not VM.db.inventory or VM.db.inventory.lastScan == 0 then return end
     for tabIdx, rule in pairs(VM.db.tabRules) do
-        self:SendRaw(string.format("RULE|%d|%s|%d|%d",
-            tabIdx, EscapeStr(rule.mode), rule.percent or 50, rule.updatedAt or 0))
+        local uBy = rule.updatedBy or VM:GetPlayerName()
+        self:SendRaw(string.format("RULE|%d|%s|%d|%d|%s",
+            tabIdx, EscapeStr(rule.mode), rule.percent or 50, rule.updatedAt or 0, EscapeStr(uBy)))
     end
 end
 

@@ -45,6 +45,25 @@ local function ApplyModernBackdrop(frame, bgColor, borderColor)
     frame:SetBackdropBorderColor(bd[1], bd[2], bd[3], bd[4])
 end
 
+local function ShowItemTooltip(selfFrame, itemLink, itemID, itemName)
+    GameTooltip:SetOwner(selfFrame, "ANCHOR_RIGHT")
+    local link = itemLink
+    if link and (link:find("item:") or link:find("enchant:") or link:find("spell:")) then
+        GameTooltip:SetHyperlink(link)
+    elseif itemID and itemID > 0 then
+        GameTooltip:SetHyperlink("item:" .. tostring(itemID))
+    elseif itemName and itemName ~= "" and not itemName:find("^Gold") then
+        GameTooltip:SetText(itemName)
+    else
+        GameTooltip:SetText("Item")
+    end
+    GameTooltip:Show()
+end
+
+local function HideItemTooltip()
+    GameTooltip:Hide()
+end
+
 local function CreateModernButton(parent, width, height, text, accentColor)
     local btn = CreateFrame("Button", nil, parent, "BackdropTemplate")
     btn:SetSize(width, height)
@@ -609,6 +628,10 @@ function UI:RefreshInventory()
             row.icon:SetPoint("LEFT", 8, 0)
             row.icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
 
+            row.iconBtn = CreateFrame("Button", nil, row)
+            row.iconBtn:SetSize(22, 22)
+            row.iconBtn:SetPoint("TOPLEFT", row.icon, "TOPLEFT", 0, 0)
+
             row.nameBtn = CreateFrame("Button", nil, row)
             row.nameBtn:SetSize(265, 26)
             row.nameBtn:SetPoint("LEFT", 36, 0)
@@ -640,9 +663,20 @@ function UI:RefreshInventory()
         ApplyModernBackdrop(row, baseBg, { 0, 0, 0, 0 })
         row:SetScript("OnEnter", function(selfRow)
             selfRow:SetBackdropColor(THEME.rowHover[1], THEME.rowHover[2], THEME.rowHover[3], THEME.rowHover[4])
+            ShowItemTooltip(selfRow, item.itemLink or item.link, item.itemID, item.name)
         end)
         row:SetScript("OnLeave", function(selfRow)
             selfRow:SetBackdropColor(baseBg[1], baseBg[2], baseBg[3], baseBg[4])
+            HideItemTooltip()
+        end)
+
+        row.iconBtn:SetScript("OnEnter", function(selfBtn)
+            row:SetBackdropColor(THEME.rowHover[1], THEME.rowHover[2], THEME.rowHover[3], THEME.rowHover[4])
+            ShowItemTooltip(selfBtn, item.itemLink or item.link, item.itemID, item.name)
+        end)
+        row.iconBtn:SetScript("OnLeave", function()
+            row:SetBackdropColor(baseBg[1], baseBg[2], baseBg[3], baseBg[4])
+            HideItemTooltip()
         end)
 
         row:SetPoint("TOPLEFT", 4, -y)
@@ -654,15 +688,13 @@ function UI:RefreshInventory()
         row.icon:SetTexture(item.icon or "Interface\\Icons\\INV_Misc_QuestionMark")
         row.nameText:SetText(item.link or item.name)
         row.nameBtn:SetScript("OnEnter", function(selfBtn)
-            GameTooltip:SetOwner(selfBtn, "ANCHOR_RIGHT")
-            if item.link and item.link:find("item:") then
-                GameTooltip:SetHyperlink(item.link)
-            else
-                GameTooltip:SetText(item.name or "Item")
-            end
-            GameTooltip:Show()
+            row:SetBackdropColor(THEME.rowHover[1], THEME.rowHover[2], THEME.rowHover[3], THEME.rowHover[4])
+            ShowItemTooltip(selfBtn, item.itemLink or item.link, item.itemID, item.name)
         end)
-        row.nameBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
+        row.nameBtn:SetScript("OnLeave", function()
+            row:SetBackdropColor(baseBg[1], baseBg[2], baseBg[3], baseBg[4])
+            HideItemTooltip()
+        end)
 
         if reserved > 0 then
             row.stockText:SetText(string.format("Available: |cff44dd77%d|r |cff888888(Res: %d)|r", available, reserved))
@@ -976,6 +1008,22 @@ function UI:RefreshLedger()
                 sub.deleteBtn:Hide()
 
                 local isGold = (tx.itemID == 0 or tx.itemLink == "GOLD")
+                local isItemTx = not isGold and (tx.itemLink ~= "SUMMARY")
+                if isItemTx then
+                    sub:EnableMouse(true)
+                    sub:SetScript("OnEnter", function(selfSub)
+                        selfSub:SetBackdropColor(THEME.rowHover[1], THEME.rowHover[2], THEME.rowHover[3], 1)
+                        ShowItemTooltip(selfSub, tx.itemLink, tx.itemID, tx.itemName)
+                    end)
+                    sub:SetScript("OnLeave", function(selfSub)
+                        selfSub:SetBackdropColor(THEME.rowOdd[1], THEME.rowOdd[2], THEME.rowOdd[3], THEME.rowOdd[4])
+                        HideItemTooltip()
+                    end)
+                else
+                    sub:EnableMouse(false)
+                    sub:SetScript("OnEnter", nil)
+                    sub:SetScript("OnLeave", nil)
+                end
                 local dir = (tx.type == "OUT") and (isGold and "|cffff6666GOLD OUT|r" or "|cffff6666OUT|r") or (isGold and "|cffffd700GOLD IN|r" or "|cff44dd77IN|r")
                 local val = VM.Ledger:GetTransactionValue(tx, useHist)
                 local dateStr = date("%d/%m %H:%M", tx.timestamp or 0)
@@ -1257,6 +1305,23 @@ function UI:RefreshRanking()
                 sub.detailText:Show()
 
                 local isGold = (tx.itemID == 0 or tx.itemLink == "GOLD")
+                local isItemTx = not isGold and (tx.itemLink ~= "SUMMARY")
+                if isItemTx then
+                    sub:EnableMouse(true)
+                    sub:SetScript("OnEnter", function(selfSub)
+                        selfSub:SetBackdropColor(THEME.rowHover[1], THEME.rowHover[2], THEME.rowHover[3], 1)
+                        ShowItemTooltip(selfSub, tx.itemLink, tx.itemID, tx.itemName)
+                    end)
+                    sub:SetScript("OnLeave", function(selfSub)
+                        selfSub:SetBackdropColor(THEME.rowOdd[1], THEME.rowOdd[2], THEME.rowOdd[3], THEME.rowOdd[4])
+                        HideItemTooltip()
+                    end)
+                else
+                    sub:EnableMouse(false)
+                    sub:SetScript("OnEnter", nil)
+                    sub:SetScript("OnLeave", nil)
+                end
+
                 local dir = (tx.type == "OUT") and (isGold and "|cffff6666[GOLD OUT]|r" or "|cffff6666[OUT]|r")
                     or (isGold and "|cffffd700[GOLD IN]|r" or "|cff44dd77[IN]|r")
                 local dateStr = date("%d/%m %H:%M", tx.timestamp or 0)

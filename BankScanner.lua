@@ -237,6 +237,7 @@ function Scanner:ScanBank()
                     newTabs[tab].items[key] = {
                         itemID = itemID,
                         link = link,
+                        itemLink = link,
                         name = itemName,
                         icon = texture,
                         ahPrice = ahVal,

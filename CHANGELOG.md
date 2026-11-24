@@ -2,6 +2,12 @@
 
 All notable changes to **Vault Manager** will be documented in this file.
 
+## [1.2.2] - 2026-11-24
+
+### Added & Enhanced
+- **Full GameTooltip Hover Support:** Added interactive `GameTooltip` hover tooltips across Vault, Ledger, and Ranking tabs in `UI.lua`. Vault item rows and icons, Ledger transaction rows, and Ranking expanded nested transaction rows now fully display WoW item tooltips on mouseover (`OnEnter`/`OnLeave`) using cached `itemLink` and `itemID` references.
+- **Persistent Item Linking:** Ensured `BankScanner.lua` robustly persists `itemLink` on all scanned vault items and transaction records.
+
 ## [1.2.1] - 2026-11-24
 
 ### Fixed & Enhanced

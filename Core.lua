@@ -448,6 +448,24 @@ function VM:GetTabRule(tabIndex)
     return self.db.tabRules[tabIndex]
 end
 
+function VM:ComputeRuleSignature(guildName, tabIdx, rule)
+    if not rule then return "" end
+    local gName = guildName or GetGuildInfo("player") or self:GetActiveGuildKey() or ""
+    local str = string.format("%s:%d:%s:%d:%s:%d",
+        tostring(gName),
+        tonumber(tabIdx) or 0,
+        tostring(rule.mode or "FREE"),
+        tonumber(rule.percent) or 50,
+        tostring(rule.updatedBy or ""),
+        tonumber(rule.updatedAt) or 0
+    )
+    local hash = 5381
+    for i = 1, #str do
+        hash = (hash * 33 + str:byte(i)) % 2147483647
+    end
+    return string.format("%x", hash)
+end
+
 function VM:SetTabRule(tabIndex, mode, percent)
     if not self:IsOfficer() then return end
     local pName = self:GetPlayerName()
@@ -456,12 +474,16 @@ function VM:SetTabRule(tabIndex, mode, percent)
     if m == "PERCENT" and (not pct or pct <= 0) then
         pct = 50
     end
-    self.db.tabRules[tabIndex] = {
+    local guildName = GetGuildInfo("player") or self:GetActiveGuildKey() or ""
+    local rule = {
         mode = m,
         percent = pct,
         updatedAt = time(),
-        updatedBy = pName ~= "" and pName or UnitName("player") or "Officer"
+        updatedBy = pName ~= "" and pName or UnitName("player") or "Officer",
+        tampered = false
     }
+    rule.sig = self:ComputeRuleSignature(guildName, tabIndex, rule)
+    self.db.tabRules[tabIndex] = rule
     if self.Comms then self.Comms:BroadcastTabRules() end
     if self.UI then self.UI:RefreshAll() end
 end
@@ -469,53 +491,32 @@ end
 function VM:ValidateTabRules()
     if not self.db or not self.db.tabRules then return end
     self:UpdateRosterCache()
-
-    local infoText = (GetGuildInfoText and GetGuildInfoText()) or ""
-    if infoText ~= "" then
-        local rulesTag = infoText:match("%[VM%-RULES:([^%]]+)%]") or infoText:match("%[VM%-RULES:(%b[])%]")
-        if rulesTag then
-            for token in rulesTag:gmatch("[^;]+") do
-                local cleanToken = strtrim(token)
-                if cleanToken ~= "" then
-                    local tIdx, tMode, tPct = cleanToken:match("(%d+)=([A-Za-z]+)(%d*)")
-                    tIdx = tonumber(tIdx)
-                    if tIdx and tIdx >= 1 and tIdx <= 6 and tMode then
-                        local m = tMode:upper()
-                        local modeVal = (m == "AH" or m == "PERCENT") and "PERCENT" or m
-                        if modeVal == "FREE" or modeVal == "LOCKED" or modeVal == "PERCENT" then
-                            local pctNum = tonumber(tPct)
-                            local pctVal = 50
-                            if modeVal == "PERCENT" then
-                                pctVal = (pctNum and pctNum > 0) and pctNum or 50
-                            else
-                                pctVal = (pctNum and pctNum > 0) and pctNum or 0
-                            end
-                            self.db.tabRules[tIdx] = {
-                                mode = modeVal,
-                                percent = pctVal,
-                                updatedAt = time(),
-                                updatedBy = "GuildInfo"
-                            }
-                        end
-                    end
-                end
-            end
-        end
-    end
+    local guildName = GetGuildInfo("player") or self:GetActiveGuildKey() or ""
 
     for i, rule in pairs(self.db.tabRules) do
-        if rule and rule.updatedBy and rule.updatedBy ~= "GuildInfo" and rule.updatedBy ~= "System(TamperReset)" and rule.updatedBy ~= "" then
-            local normBy = self:NormalizeName(rule.updatedBy)
-            if self.db.rosterCache and next(self.db.rosterCache) then
-                local rankIndex = self.db.rosterCache[normBy]
-                if rankIndex ~= nil and rankIndex > VM.OFFICER_MAX_RANK_INDEX then
-                    self.db.tabRules[i] = {
-                        mode = "LOCKED",
-                        percent = 50,
-                        updatedAt = time(),
-                        updatedBy = "System(TamperReset)"
-                    }
+        if rule then
+            local isTampered = false
+            if rule.updatedBy and rule.updatedBy ~= "" and rule.updatedBy ~= "System(TamperReset)" then
+                local expectedSig = self:ComputeRuleSignature(guildName, i, rule)
+                if not rule.sig or rule.sig ~= expectedSig then
+                    isTampered = true
+                elseif next(self.db.rosterCache) ~= nil and not self:IsOfficerName(rule.updatedBy) then
+                    isTampered = true
                 end
+            end
+
+            if isTampered then
+                local resetRule = {
+                    mode = "LOCKED",
+                    percent = 50,
+                    updatedAt = time(),
+                    updatedBy = "System(TamperReset)",
+                    tampered = true
+                }
+                resetRule.sig = self:ComputeRuleSignature(guildName, i, resetRule)
+                self.db.tabRules[i] = resetRule
+            else
+                rule.tampered = (rule.updatedBy == "System(TamperReset)")
             end
         end
     end

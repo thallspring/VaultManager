@@ -23,6 +23,17 @@ function Comms:GetMaxTimestamp(tbl, field)
     return maxTs
 end
 
+function Comms:GetRulesMaxTimestamp(tbl)
+    local maxTs = 0
+    for _, v in pairs(tbl or {}) do
+        if type(v) == "table" and not v.tampered then
+            local ts = v.updatedAt or 0
+            if ts > maxTs then maxTs = ts end
+        end
+    end
+    return maxTs
+end
+
 function Comms:Init()
     local f = CreateFrame("Frame")
     f:RegisterEvent("CHAT_MSG_ADDON")
@@ -78,7 +89,7 @@ function Comms:SendHello()
     local invTs = VM.db.inventory.lastScan or 0
     local reqTs = self:GetMaxTimestamp(VM.db.requests, "updatedAt")
     local mainTs = self:GetMaxTimestamp(VM.db.mains, "updatedAt")
-    local ruleTs = self:GetMaxTimestamp(VM.db.tabRules, "updatedAt")
+    local ruleTs = self:GetRulesMaxTimestamp(VM.db.tabRules)
     local txTs = self:GetMaxTimestamp(VM.db.ledger, "updatedAt")
     self:SendRaw(string.format("HELLO|%d|%d|%d|%d|%d|%d|%d", VM.VERSION, epoch, invTs, reqTs, mainTs, ruleTs, txTs))
 end
@@ -178,7 +189,7 @@ function Comms:OnMessageReceived(msg, sender)
             self:BroadcastMains()
         end
 
-        if self:GetMaxTimestamp(VM.db.tabRules, "updatedAt") > peerRuleTs then
+        if self:GetRulesMaxTimestamp(VM.db.tabRules) > peerRuleTs then
             self:BroadcastTabRules()
         end
 
@@ -282,6 +293,7 @@ function Comms:OnMessageReceived(msg, sender)
         local pct = tonumber(parts[4]) or 50
         local updatedAt = tonumber(parts[5]) or 0
         local updatedBy = (#parts >= 6) and UnescapeStr(parts[6]) or sender
+        local sig = (#parts >= 7) and UnescapeStr(parts[7]) or ""
 
         VM:UpdateRosterCache()
         local normBy = VM:NormalizeName(updatedBy)
@@ -292,9 +304,23 @@ function Comms:OnMessageReceived(msg, sender)
             end
         end
 
+        local ruleData = {
+            mode = mode,
+            percent = pct,
+            updatedAt = updatedAt,
+            updatedBy = updatedBy
+        }
+        local guildName = incomingGuild or GetGuildInfo("player") or ""
+        local expectedSig = VM:ComputeRuleSignature(guildName, tabIdx, ruleData)
+        if sig == "" or sig ~= expectedSig then
+            return
+        end
+        ruleData.sig = sig
+        ruleData.tampered = false
+
         local existing = VM.db.tabRules[tabIdx]
-        if tabIdx and (not existing or updatedAt > (existing.updatedAt or 0)) then
-            VM.db.tabRules[tabIdx] = { mode = mode, percent = pct, updatedAt = updatedAt, updatedBy = updatedBy }
+        if tabIdx and (not existing or updatedAt >= (existing.updatedAt or 0)) then
+            VM.db.tabRules[tabIdx] = ruleData
             if VM.UI then VM.UI:RefreshAll() end
         end
 
@@ -371,10 +397,15 @@ end
 
 function Comms:BroadcastTabRules()
     if not VM.db.inventory or VM.db.inventory.lastScan == 0 then return end
+    local guildName = GetGuildInfo("player") or VM:GetActiveGuildKey() or ""
     for tabIdx, rule in pairs(VM.db.tabRules) do
-        local uBy = rule.updatedBy or VM:GetPlayerName()
-        self:SendRaw(string.format("RULE|%d|%s|%d|%d|%s",
-            tabIdx, EscapeStr(rule.mode), rule.percent or 50, rule.updatedAt or 0, EscapeStr(uBy)))
+        if rule and not rule.tampered then
+            local uBy = rule.updatedBy or VM:GetPlayerName()
+            local sig = rule.sig or VM:ComputeRuleSignature(guildName, tabIdx, rule)
+            rule.sig = sig
+            self:SendRaw(string.format("RULE|%d|%s|%d|%d|%s|%s",
+                tabIdx, EscapeStr(rule.mode), rule.percent or 50, rule.updatedAt or 0, EscapeStr(uBy), EscapeStr(sig)))
+        end
     end
 end
 

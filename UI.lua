@@ -1511,19 +1511,6 @@ function UI:BuildSettingsPanel(panel)
     ruleTitle:SetPoint("TOPLEFT", 14, -12)
     if isOff then
         ruleTitle:SetText("|cff26a6f2GUILD BANK TAB RULES|r  |cff44dd77(Officer Authorized)|r")
-        local copyTagBtn = CreateModernButton(panel, 130, 20, "Copy Guild Info Tag", THEME.accent)
-        copyTagBtn:SetPoint("LEFT", ruleTitle, "RIGHT", 12, 0)
-        copyTagBtn:SetScript("OnClick", function()
-            local tagParts = {}
-            for i = 1, 6 do
-                local r = VM:GetTabRule(i)
-                local m = r.mode == "PERCENT" and "AH" or r.mode
-                local p = r.mode == "PERCENT" and (r.percent or 50) or ""
-                table.insert(tagParts, string.format("%d=%s%s", i, m, p))
-            end
-            local tagStr = "[VM-RULES:" .. table.concat(tagParts, ";") .. "]"
-            UI:OpenExportModalText(tagStr, "Guild Info Tag for Tab Rules")
-        end)
     else
         ruleTitle:SetText("|cff26a6f2GUILD BANK TAB RULES|r  |cffff5555[Read-Only (Officer Rank Required)]|r")
     end

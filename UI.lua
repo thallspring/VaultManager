@@ -1961,63 +1961,207 @@ function UI:BuildSettingsPanel(panel)
         panel.tabRuleRows[i] = r
     end
 
-    -- General & Sync Section below Tab Rules
-    local syncSectionTitle = panel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    syncSectionTitle:SetPoint("TOPLEFT", 10, -215)
-    syncSectionTitle:SetText("|cff26a6f2GENERAL & SYNC|r")
+    -- UI Personalization Section below Tab Rules
+    local uiPersTitle = panel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    uiPersTitle:SetPoint("TOPLEFT", 10, -212)
+    uiPersTitle:SetText("|cff26a6f2UI PERSONALIZATION|r")
 
+    -- Window Scale Slider
+    local scaleLabel = panel:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    scaleLabel:SetPoint("TOPLEFT", 10, -236)
+    scaleLabel:SetText("Window Scale:")
+
+    local scaleSlider = CreateFrame("Slider", "VaultManagerScaleSlider", panel, "OptionsSliderTemplate")
+    scaleSlider:SetSize(160, 16)
+    scaleSlider:SetPoint("LEFT", scaleLabel, "RIGHT", 12, 0)
+    scaleSlider:SetMinMaxValues(0.85, 1.15)
+    scaleSlider:SetValueStep(0.05)
+    scaleSlider:SetObeyStepOnDrag(true)
+    _G[scaleSlider:GetName() .. "Low"]:SetText("0.85")
+    _G[scaleSlider:GetName() .. "High"]:SetText("1.15")
+    scaleSlider.text = _G[scaleSlider:GetName() .. "Text"]
+
+    scaleSlider:SetScript("OnValueChanged", function(selfVal, value)
+        local rounded = math.floor(value * 100 + 0.5) / 100
+        if selfVal.text then
+            selfVal.text:SetText(string.format("Scale: %d%%", math.floor(rounded * 100 + 0.5)))
+        end
+        if not VM.db then VM.db = {} end
+        VM.db.uiPrefs = VM.db.uiPrefs or {}
+        VM.db.uiPrefs.uiScale = rounded
+        if mainFrame then
+            mainFrame:SetScale(rounded)
+        end
+    end)
+    panel.scaleSlider = scaleSlider
+
+    local scaleResetBtn = CreateModernButton(panel, 55, 20, "Reset")
+    scaleResetBtn:SetPoint("LEFT", scaleSlider, "RIGHT", 12, 0)
+    scaleResetBtn:SetScript("OnClick", function()
+        scaleSlider:SetValue(1.0)
+        if not VM.db then VM.db = {} end
+        VM.db.uiPrefs = VM.db.uiPrefs or {}
+        VM.db.uiPrefs.uiScale = 1.0
+        if mainFrame then mainFrame:SetScale(1.0) end
+    end)
+
+    -- Show Minimap Button checkbox
     local minimapCb = CreateFrame("CheckButton", nil, panel, "UICheckButtonTemplate")
     minimapCb:SetSize(22, 22)
-    minimapCb:SetPoint("TOPLEFT", 10, -238)
+    minimapCb:SetPoint("TOPLEFT", 380, -234)
     minimapCb.label = minimapCb:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     minimapCb.label:SetPoint("LEFT", minimapCb, "RIGHT", 4, 0)
     minimapCb.label:SetText("Show Minimap Button")
-    minimapCb:SetChecked(not (VM.db.minimap and VM.db.minimap.hide))
     minimapCb:SetScript("OnClick", function(cb)
         if VM.Minimap and VM.Minimap.SetHidden then
             VM.Minimap.SetHidden(not cb:GetChecked())
         end
+        if not VM.db then VM.db = {} end
+        VM.db.uiPrefs = VM.db.uiPrefs or {}
+        VM.db.uiPrefs.showMinimap = cb:GetChecked()
     end)
     panel.minimapCb = minimapCb
 
-    local syncNowBtn = CreateModernButton(panel, 95, 22, "Sync Now", THEME.accent)
-    syncNowBtn:SetPoint("LEFT", minimapCb.label, "RIGHT", 24, 0)
-    syncNowBtn:SetPoint("TOP", minimapCb, "TOP", 0, 0)
-    syncNowBtn:SetScript("OnClick", function()
+    -- Default Ranking Price Basis Selector (Deposit values vs Current values)
+    local basisLabel = panel:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    basisLabel:SetPoint("TOPLEFT", 10, -270)
+    basisLabel:SetText("Default Ranking Price Basis:")
+
+    local basisDepositBtn = CreateModernButton(panel, 110, 22, "Deposit values")
+    basisDepositBtn:SetPoint("LEFT", basisLabel, "RIGHT", 10, 0)
+    basisDepositBtn:SetScript("OnClick", function()
+        local prefs = GetUIPrefs()
+        prefs.rankingPriceMode = "locked"
+        if panel.UpdateBasisButtons then panel.UpdateBasisButtons() end
+        UI:RefreshRanking()
+    end)
+    panel.basisDepositBtn = basisDepositBtn
+
+    local basisCurrentBtn = CreateModernButton(panel, 110, 22, "Current values")
+    basisCurrentBtn:SetPoint("LEFT", basisDepositBtn, "RIGHT", 4, 0)
+    basisCurrentBtn:SetScript("OnClick", function()
+        local prefs = GetUIPrefs()
+        prefs.rankingPriceMode = "live"
+        if panel.UpdateBasisButtons then panel.UpdateBasisButtons() end
+        UI:RefreshRanking()
+    end)
+    panel.basisCurrentBtn = basisCurrentBtn
+
+    local function UpdateBasisButtons()
+        local mode = GetUIPrefs().rankingPriceMode or "live"
+        if mode == "locked" then
+            basisDepositBtn:SetBackdropColor(0.15, 0.28, 0.42, 1)
+            basisDepositBtn:SetBackdropBorderColor(THEME.accent[1], THEME.accent[2], THEME.accent[3], 1)
+            basisDepositBtn.label:SetTextColor(1, 0.82, 0)
+            basisCurrentBtn:SetBackdropColor(THEME.btnBg[1], THEME.btnBg[2], THEME.btnBg[3], 1)
+            basisCurrentBtn:SetBackdropBorderColor(THEME.border[1], THEME.border[2], THEME.border[3], 1)
+            basisCurrentBtn.label:SetTextColor(0.6, 0.6, 0.6)
+        else
+            basisCurrentBtn:SetBackdropColor(0.15, 0.28, 0.42, 1)
+            basisCurrentBtn:SetBackdropBorderColor(THEME.accent[1], THEME.accent[2], THEME.accent[3], 1)
+            basisCurrentBtn.label:SetTextColor(1, 0.82, 0)
+            basisDepositBtn:SetBackdropColor(THEME.btnBg[1], THEME.btnBg[2], THEME.btnBg[3], 1)
+            basisDepositBtn:SetBackdropBorderColor(THEME.border[1], THEME.border[2], THEME.border[3], 1)
+            basisDepositBtn.label:SetTextColor(0.6, 0.6, 0.6)
+        end
+    end
+    panel.UpdateBasisButtons = UpdateBasisButtons
+
+    -- Default Ranking Filters Checkboxes
+    local legacyFilterCb = CreateFrame("CheckButton", nil, panel, "UICheckButtonTemplate")
+    legacyFilterCb:SetSize(22, 22)
+    legacyFilterCb:SetPoint("TOPLEFT", 10, -302)
+    legacyFilterCb.label = legacyFilterCb:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    legacyFilterCb.label:SetPoint("LEFT", legacyFilterCb, "RIGHT", 4, 0)
+    legacyFilterCb.label:SetText("Include Legacy Members")
+    legacyFilterCb:SetScript("OnClick", function(cb)
+        local prefs = GetUIPrefs()
+        prefs.showLegacyRanking = cb:GetChecked()
+        UI:RefreshRanking()
+    end)
+    panel.legacyFilterCb = legacyFilterCb
+
+    local hideOfficersFilterCb = CreateFrame("CheckButton", nil, panel, "UICheckButtonTemplate")
+    hideOfficersFilterCb:SetSize(22, 22)
+    hideOfficersFilterCb:SetPoint("TOPLEFT", 220, -302)
+    hideOfficersFilterCb.label = hideOfficersFilterCb:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    hideOfficersFilterCb.label:SetPoint("LEFT", hideOfficersFilterCb, "RIGHT", 4, 0)
+    hideOfficersFilterCb.label:SetText("Hide Officers")
+    hideOfficersFilterCb:SetScript("OnClick", function(cb)
+        local prefs = GetUIPrefs()
+        prefs.hideOfficers = cb:GetChecked()
+        UI:RefreshRanking()
+    end)
+    panel.hideOfficersFilterCb = hideOfficersFilterCb
+
+    -- Sync & Diagnostics Footer Section
+    local diagTitle = panel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    diagTitle:SetPoint("TOPLEFT", 10, -345)
+    diagTitle:SetText("|cff26a6f2SYNC & DIAGNOSTICS|r")
+
+    local diagInfo = panel:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    diagInfo:SetPoint("TOPLEFT", 10, -368)
+    diagInfo:SetWidth(580)
+    diagInfo:SetJustifyH("LEFT")
+    panel.diagInfo = diagInfo
+
+    local forceSyncBtn = CreateModernButton(panel, 120, 24, "Force P2P Sync", THEME.accent)
+    forceSyncBtn:SetPoint("TOPRIGHT", -10, -365)
+    forceSyncBtn:SetScript("OnClick", function()
         if VM.Comms and VM.Comms.SendHello then
             VM.Comms:SendHello()
+        end
+        if VM.Comms and VM.Comms.BroadcastLedgerSync then
+            VM.Comms:BroadcastLedgerSync()
         end
         if VM.BankScanner and VM.BankScanner.ForceScan then
             VM.BankScanner:ForceScan()
         end
-        print("|cff00ccff[Vault Manager]|r Manual sync broadcast & scan triggered.")
+        print("|cff00ccff[Vault Manager]|r Forced P2P sync broadcast & guild bank scan triggered.")
     end)
-
-    local syncStatusReadout = panel:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    syncStatusReadout:SetPoint("LEFT", syncNowBtn, "RIGHT", 16, 0)
-    syncStatusReadout:SetPoint("TOP", minimapCb, "TOP", 0, -3)
-    syncStatusReadout:SetWidth(320)
-    syncStatusReadout:SetJustifyH("LEFT")
-    panel.syncStatusReadout = syncStatusReadout
+    panel.forceSyncBtn = forceSyncBtn
 end
 
 function UI:RefreshSettings()
     if not VM.db then VM.db = {} end
     VM.db.uiPrefs = VM.db.uiPrefs or {}
+    local uiPrefs = GetUIPrefs()
     if not mainFrame or not mainFrame.panels or not mainFrame.panels[6] then return end
     local panel = mainFrame.panels[6]
     if not panel or not panel.tabRuleRows then return end
     local isOff = VM:IsOfficer()
 
-    if panel.minimapCb then
-        panel.minimapCb:SetChecked(not (VM.db.minimap and VM.db.minimap.hide))
+    if panel.scaleSlider then
+        local scale = uiPrefs.uiScale or 1.0
+        panel.scaleSlider:SetValue(scale)
+        if panel.scaleSlider.text then
+            panel.scaleSlider.text:SetText(string.format("Scale: %d%%", math.floor(scale * 100 + 0.5)))
+        end
     end
-    if panel.syncStatusReadout then
+    if panel.minimapCb then
+        local showMM = (VM.db.minimap and VM.db.minimap.hide == true) and false or true
+        if uiPrefs.showMinimap ~= nil then showMM = uiPrefs.showMinimap end
+        panel.minimapCb:SetChecked(showMM)
+    end
+    if panel.UpdateBasisButtons then
+        panel.UpdateBasisButtons()
+    end
+    if panel.legacyFilterCb then
+        panel.legacyFilterCb:SetChecked(uiPrefs.showLegacyRanking ~= false)
+    end
+    if panel.hideOfficersFilterCb then
+        panel.hideOfficersFilterCb:SetChecked(uiPrefs.hideOfficers == true)
+    end
+
+    if panel.diagInfo then
         local gKey = VM:GetActiveGuildKey() or "None"
+        local protoVer = VM.VERSION or 6
         local inv = VM.db and VM.db.inventory
         local lastScan = inv and inv.lastScan or 0
         local scanTimeStr = lastScan > 0 and date("%d/%m %H:%M", lastScan) or "Never"
-        panel.syncStatusReadout:SetText(string.format("Active Guild: |cffffffff%s|r |cff888888(Last scan: %s)|r", gKey, scanTimeStr))
+        local scanBy = (inv and (inv.lastScanBy or inv.scannedBy)) or "None"
+        panel.diagInfo:SetText(string.format("Active Guild Bucket: |cffffffff%s|r  |  Protocol: |cff26a6f2v%d|r\nLast Sync Source: |cffffffff%s|r  |  Timestamp: |cffffffff%s|r",
+            gKey, protoVer, scanBy, scanTimeStr))
     end
 
     for i = 1, 6 do

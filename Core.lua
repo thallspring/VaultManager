@@ -20,7 +20,10 @@ local DEFAULT_UI_PREFS = {
     showLockedPrices = false,
     rankingPriceMode = "live",
     hideOfficers = false,
+    showLegacyRanking = true,
     rankingPeriod = "ALL",
+    rankingSortBy = "net",
+    rankingSortDir = "desc",
 }
 
 local function InitGuildSubTables(db)
@@ -455,11 +458,24 @@ function VM:GetReservedCount(itemID, tabIndex)
 end
 
 function VM:GetActiveGuildKey()
-    if not IsInGuild() then return nil end
     local guildName = GetGuildInfo("player")
     local realm = GetRealmName() or "Unknown"
-    if not guildName or guildName == "" then return nil end
-    return string.format("%s-%s", realm, guildName)
+    local charKey = self:GetPlayerName() .. "-" .. realm
+    VaultManagerDB = VaultManagerDB or {}
+    VaultManagerDB.charGuilds = VaultManagerDB.charGuilds or {}
+
+    if guildName and guildName ~= "" then
+        return string.format("%s-%s", realm, guildName)
+    end
+
+    if IsInGuild() then
+        local storedKey = VaultManagerDB.charGuilds[charKey]
+        if storedKey and storedKey ~= "" then
+            return storedKey
+        end
+    end
+
+    return nil
 end
 
 function VM:SwitchGuildContext()
@@ -473,11 +489,12 @@ function VM:SwitchGuildContext()
         end
     end
 
-    local guildKey = self:GetActiveGuildKey()
-    local charKey = self:GetPlayerName() .. "-" .. (GetRealmName() or "")
+    local realm = GetRealmName() or "Unknown"
+    local charKey = self:GetPlayerName() .. "-" .. realm
     local prevGuildKey = VaultManagerDB.charGuilds[charKey]
+    local liveGuildName = GetGuildInfo("player")
 
-    if not guildKey then
+    if not IsInGuild() then
         VaultManagerDB.charGuilds[charKey] = nil
         VM.isUnguilded = true
         VM.db = {
@@ -510,10 +527,19 @@ function VM:SwitchGuildContext()
         return
     end
 
+    local guildKey = nil
+    if liveGuildName and liveGuildName ~= "" then
+        guildKey = string.format("%s-%s", realm, liveGuildName)
+    elseif prevGuildKey and prevGuildKey ~= "" then
+        guildKey = prevGuildKey
+    else
+        return
+    end
+
     VM.isUnguilded = false
     VaultManagerDB.charGuilds[charKey] = guildKey
 
-    if prevGuildKey and prevGuildKey ~= guildKey then
+    if liveGuildName and liveGuildName ~= "" and prevGuildKey and prevGuildKey ~= guildKey then
         local stillUsed = false
         for c, g in pairs(VaultManagerDB.charGuilds) do
             if g == prevGuildKey then stillUsed = true; break end

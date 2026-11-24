@@ -2,7 +2,7 @@
 ## Title: Vault Manager
 ## Notes: Guild Bank inventory sharing, request queue, P2P sync, and main/alt value ledger.
 ## Author: Thallspring
-## Version: 1.3.3
+## Version: 1.3.5
 ## OptionalDeps: Auctionator
 ## SavedVariables: VaultManagerDB
 ## X-Curse-Project-ID: 1823514
@@ -12,5 +12,6 @@ BankScanner.lua
 Comms.lua
 Ledger.lua
 Fulfillment.lua
+Ranking.lua
 Minimap.lua
 UI.lua

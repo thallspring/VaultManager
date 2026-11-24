@@ -60,9 +60,19 @@ local function ShowItemTooltip(selfFrame, itemLink, itemID, itemName, tx)
 
     if tx and tx.unitPriceAtTime and tx.unitPriceAtTime > 0 then
         GameTooltip:AddLine(" ")
-        GameTooltip:AddLine(string.format("Locked Value (at time): %s", VM:FormatMoney(tx.unitPriceAtTime * (tx.count or 1))), 0.9, 0.8, 0.2)
+        local uiPrefs = GetUIPrefs()
+        local isLocked = (uiPrefs.rankingPriceMode == "locked")
+        local lockedTotal = tx.unitPriceAtTime * (tx.count or 1)
         local curPrice = (tx.itemID and tx.itemID > 0) and (VM:GetItemAHPrice(tx.itemID, tx.itemLink) or 0) or tx.unitPriceAtTime
-        GameTooltip:AddLine(string.format("Current AH Value: %s", VM:FormatMoney(curPrice * (tx.count or 1))), 0.2, 0.8, 0.9)
+        local curTotal = curPrice * (tx.count or 1)
+
+        if isLocked then
+            GameTooltip:AddLine(string.format("Locked Value (at time): %s (Active)", VM:FormatMoney(lockedTotal)), 0.9, 0.8, 0.2)
+            GameTooltip:AddLine(string.format("Current AH Value: %s", VM:FormatMoney(curTotal)), 0.6, 0.6, 0.6)
+        else
+            GameTooltip:AddLine(string.format("Locked Value (at time): %s", VM:FormatMoney(lockedTotal)), 0.6, 0.6, 0.6)
+            GameTooltip:AddLine(string.format("Current AH Value: %s (Active)", VM:FormatMoney(curTotal)), 0.2, 0.8, 0.9)
+        end
     end
 
     GameTooltip:Show()
@@ -80,7 +90,10 @@ local function GetUIPrefs()
         showLockedPrices = false,
         rankingPriceMode = "live",
         hideOfficers = false,
+        showLegacyRanking = true,
         rankingPeriod = "ALL",
+        rankingSortBy = "net",
+        rankingSortDir = "desc",
     }
     for k, v in pairs(defaults) do
         if VM.db.uiPrefs[k] == nil then
@@ -272,37 +285,40 @@ function UI:RefreshExportContent()
     if not VM.db then VM.db = {} end
     VM.db.uiPrefs = VM.db.uiPrefs or {}
     local uiPrefs = GetUIPrefs()
-    local useHist = uiPrefs.useHistoricalPrices
+    local priceMode = uiPrefs.rankingPriceMode or "live"
+    local sortBy = uiPrefs.rankingSortBy or "net"
+    local sortDir = uiPrefs.rankingSortDir or "desc"
     local period = uiPrefs.rankingPeriod or "ALL"
     local hideOff = uiPrefs.hideOfficers or false
-    local priceMode = uiPrefs.rankingPriceMode or "live"
-    local ranked = VM.Ledger:GetDonationRanking("TOTAL", useHist, period, hideOff, priceMode)
+    local showLeg = uiPrefs.showLegacyRanking ~= false
+    local ranked = VM.Ranking:GetRankingData(sortBy, sortDir, priceMode, period, hideOff, showLeg)
 
     local function StripColor(str)
         return tostring(str or ""):gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", "")
     end
 
+    local basisDesc = (priceMode == "locked") and "Historical / Locked at Time" or "Live AH"
     local lines = {}
     if isCSV then
+        table.insert(lines, string.format("# Valuation Basis: %s | Sort: %s (%s)", basisDesc, sortBy, sortDir))
         table.insert(lines, "Rank,Player,Contributed,Received,NetBalance")
         for idx, grp in ipairs(ranked) do
             local rankBadge = grp.isLegacy and "-" or ("#" .. idx)
-            local net = grp.netTotal or (grp.totalInValue - grp.totalOutValue)
             table.insert(lines, string.format("%s,%s,%d,%d,%d",
-                rankBadge, grp.mainName, grp.totalInValue, grp.totalOutValue, net))
+                rankBadge, grp.mainName, grp.totalContributed, grp.totalWithdrawn, grp.netBalance))
         end
     else
+        table.insert(lines, string.format("### Vault Manager Export — Valuation: **%s** | Sort: **%s** (%s)", basisDesc, sortBy, sortDir))
         table.insert(lines, "| Rank | Player | Contributed | Received | Net Balance |")
         table.insert(lines, "| :--- | :--- | :--- | :--- | :--- |")
         for idx, grp in ipairs(ranked) do
             local rankBadge = grp.isLegacy and "-" or ("#" .. idx)
-            local net = grp.netTotal or (grp.totalInValue - grp.totalOutValue)
             table.insert(lines, string.format("| %s | %s | %s | %s | %s |",
                 rankBadge,
                 grp.mainName,
-                StripColor(VM:FormatMoney(grp.totalInValue)),
-                StripColor(VM:FormatMoney(grp.totalOutValue)),
-                StripColor(VM:FormatMoney(net))))
+                StripColor(VM:FormatMoney(grp.totalContributed)),
+                StripColor(VM:FormatMoney(grp.totalWithdrawn)),
+                StripColor(VM:FormatMoney(grp.netBalance))))
         end
     end
 
@@ -1125,51 +1141,57 @@ local expandedRankingMains = {}
 function UI:BuildRankingPanel(panel)
     if not VM.db then VM.db = {} end
     VM.db.uiPrefs = VM.db.uiPrefs or {}
+    local uiPrefs = GetUIPrefs()
     local topBar = CreateFrame("Frame", nil, panel)
     topBar:SetHeight(32)
     topBar:SetPoint("TOPLEFT", 10, -8)
     topBar:SetPoint("TOPRIGHT", -10, -8)
 
-    local filterLabel = topBar:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    filterLabel:SetPoint("LEFT", 2, 0)
-    filterLabel:SetText("Rank:")
+    local basisBtn = CreateModernButton(topBar, 130, 24, (uiPrefs.rankingPriceMode == "locked") and "Basis: Locked" or "Basis: Live AH")
+    basisBtn:SetPoint("LEFT", 0, 0)
+    basisBtn:SetScript("OnClick", function(btn)
+        local prefs = GetUIPrefs()
+        if prefs.rankingPriceMode == "locked" then
+            prefs.rankingPriceMode = "live"
+            btn:SetText("Basis: Live AH")
+        else
+            prefs.rankingPriceMode = "locked"
+            btn:SetText("Basis: Locked")
+        end
+        UI:RefreshRanking()
+    end)
+    panel.basisBtn = basisBtn
 
-    panel.sortButtons = {}
-    local modes = {
-        { key = "TOTAL", label = "Net Balance" },
-        { key = "GOLD", label = "Pure Gold" },
-        { key = "ITEMS", label = "Mats + Gear" },
-    }
+    local showLegacyCb = CreateFrame("CheckButton", nil, topBar, "UICheckButtonTemplate")
+    showLegacyCb:SetSize(20, 20)
+    showLegacyCb:SetPoint("LEFT", 136, 0)
+    showLegacyCb.label = showLegacyCb:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    showLegacyCb.label:SetPoint("LEFT", showLegacyCb, "RIGHT", 4, 0)
+    showLegacyCb.label:SetText("Show Legacy")
+    showLegacyCb:SetChecked(uiPrefs.showLegacyRanking ~= false)
+    showLegacyCb:SetScript("OnClick", function(cb)
+        local prefs = GetUIPrefs()
+        prefs.showLegacyRanking = cb:GetChecked()
+        UI:RefreshRanking()
+    end)
+    panel.showLegacyCb = showLegacyCb
 
-    for i, m in ipairs(modes) do
-        local btn = CreateModernButton(topBar, 92, 24, m.label)
-        btn:SetPoint("LEFT", 40 + (i - 1) * 96, 0)
-        btn:SetScript("OnClick", function()
-            rankingSortMode = m.key
-            UI:RefreshRanking()
-        end)
-        panel.sortButtons[m.key] = btn
-    end
-
-    local uiPrefs = GetUIPrefs()
     local hideOfficersCb = CreateFrame("CheckButton", nil, topBar, "UICheckButtonTemplate")
     hideOfficersCb:SetSize(20, 20)
-    hideOfficersCb:SetPoint("LEFT", 336, 0)
+    hideOfficersCb:SetPoint("LEFT", 240, 0)
     hideOfficersCb.label = hideOfficersCb:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     hideOfficersCb.label:SetPoint("LEFT", hideOfficersCb, "RIGHT", 4, 0)
     hideOfficersCb.label:SetText("Hide Officers")
     hideOfficersCb:SetChecked(uiPrefs.hideOfficers or false)
     hideOfficersCb:SetScript("OnClick", function(cb)
-        if not VM.db then VM.db = {} end
-        VM.db.uiPrefs = VM.db.uiPrefs or {}
         local prefs = GetUIPrefs()
         prefs.hideOfficers = cb:GetChecked()
         UI:RefreshRanking()
     end)
     panel.hideOfficersCb = hideOfficersCb
 
-    local periodBtn = CreateModernDropdown(topBar, 120, 24, "All-Time")
-    periodBtn:SetPoint("LEFT", 450, 0)
+    local periodBtn = CreateModernDropdown(topBar, 110, 24, "All-Time")
+    periodBtn:SetPoint("LEFT", 350, 0)
     periodBtn:SetScript("OnClick", function(btn)
         if rankingPeriodDropdownFrame and rankingPeriodDropdownFrame:IsShown() then
             rankingPeriodDropdownFrame:Hide()
@@ -1185,7 +1207,7 @@ function UI:BuildRankingPanel(panel)
         UI:OpenExportModal()
     end)
 
-    -- Column headers
+    -- Column headers with multi-column sorting
     local colHeader = CreateFrame("Frame", nil, panel, "BackdropTemplate")
     colHeader:SetSize(744, 24)
     colHeader:SetPoint("TOPLEFT", 10, -44)
@@ -1195,21 +1217,38 @@ function UI:BuildRankingPanel(panel)
     cRank:SetPoint("LEFT", 10, 0)
     cRank:SetText("#")
 
-    local cName = colHeader:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    cName:SetPoint("LEFT", 60, 0)
-    cName:SetText("Player (Main)")
+    panel.sortHeaders = {}
 
-    local cContributed = colHeader:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    cContributed:SetPoint("LEFT", 290, 0)
-    cContributed:SetText("Contributed")
+    local function CreateSortHeader(name, key, x, width)
+        local btn = CreateFrame("Button", nil, colHeader)
+        btn:SetSize(width, 24)
+        btn:SetPoint("LEFT", x, 0)
+        btn.label = btn:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        btn.label:SetPoint("LEFT", 0, 0)
+        btn.label:SetText(name)
 
-    local cReceived = colHeader:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    cReceived:SetPoint("LEFT", 440, 0)
-    cReceived:SetText("Received")
+        btn:SetScript("OnClick", function()
+            local prefs = GetUIPrefs()
+            if prefs.rankingSortBy == key then
+                prefs.rankingSortDir = (prefs.rankingSortDir == "asc") and "desc" or "asc"
+            else
+                prefs.rankingSortBy = key
+                if key == "name" then
+                    prefs.rankingSortDir = "asc"
+                else
+                    prefs.rankingSortDir = "desc"
+                end
+            end
+            UI:RefreshRanking()
+        end)
+        panel.sortHeaders[key] = btn
+        return btn
+    end
 
-    local cTotal = colHeader:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    cTotal:SetPoint("LEFT", 590, 0)
-    cTotal:SetText("Net Balance")
+    CreateSortHeader("Player (Main)", "name", 60, 220)
+    CreateSortHeader("Contributed", "contributed", 290, 140)
+    CreateSortHeader("Received", "withdrawn", 440, 140)
+    CreateSortHeader("Net Balance", "net", 590, 140)
 
     panel.scroll = CreateScrollArea(panel, -72, 8)
 end
@@ -1217,13 +1256,20 @@ end
 function UI:RefreshRanking()
     if not mainFrame or not mainFrame.panels or not mainFrame.panels[4] then return end
     local panel = mainFrame.panels[4]
-    if not panel or not panel.scroll or not panel.sortButtons then return end
+    if not panel or not panel.scroll or not panel.sortHeaders then return end
     local content = panel.scroll.content
     if not content then return end
 
     if not VM.db then VM.db = {} end
     VM.db.uiPrefs = VM.db.uiPrefs or {}
     local uiPrefs = GetUIPrefs()
+
+    if panel.basisBtn then
+        panel.basisBtn:SetText((uiPrefs.rankingPriceMode == "locked") and "Basis: Locked" or "Basis: Live AH")
+    end
+    if panel.showLegacyCb then
+        panel.showLegacyCb:SetChecked(uiPrefs.showLegacyRanking ~= false)
+    end
     if panel.hideOfficersCb then
         panel.hideOfficersCb:SetChecked(uiPrefs.hideOfficers or false)
     end
@@ -1232,23 +1278,29 @@ function UI:RefreshRanking()
         panel.periodBtn:SetText((p == "ALL") and "All-Time" or ((p == "CURRENT") and "Current Month" or "Previous Month"))
     end
 
-    for key, btn in pairs(panel.sortButtons) do
-        if key == rankingSortMode then
-            btn:SetBackdropColor(0.15, 0.28, 0.42, 1)
-            btn:SetBackdropBorderColor(THEME.accent[1], THEME.accent[2], THEME.accent[3], 1)
+    local sortBy = uiPrefs.rankingSortBy or "net"
+    local sortDir = uiPrefs.rankingSortDir or "desc"
+
+    for key, btn in pairs(panel.sortHeaders) do
+        local indicator = ""
+        if key == sortBy then
+            indicator = (sortDir == "asc") and " ▲" or " ▼"
+            btn.label:SetTextColor(THEME.accent[1], THEME.accent[2], THEME.accent[3], 1)
         else
-            btn:SetBackdropColor(THEME.btnBg[1], THEME.btnBg[2], THEME.btnBg[3], 1)
-            btn:SetBackdropBorderColor(THEME.border[1], THEME.border[2], THEME.border[3], 1)
+            btn.label:SetTextColor(0.9, 0.9, 0.9, 1)
         end
+        local baseNames = { name = "Player (Main)", contributed = "Contributed", withdrawn = "Received", net = "Net Balance" }
+        btn.label:SetText((baseNames[key] or key) .. indicator)
     end
 
     for _, r in ipairs(panel.scroll.rows) do r:Hide() end
 
-    local useHist = uiPrefs.useHistoricalPrices
+    local priceMode = uiPrefs.rankingPriceMode or "live"
     local period = uiPrefs.rankingPeriod or "ALL"
     local hideOff = uiPrefs.hideOfficers or false
-    local priceMode = uiPrefs.rankingPriceMode or "live"
-    local ranked = VM.Ledger:GetDonationRanking(rankingSortMode, useHist, period, hideOff, priceMode)
+    local showLeg = uiPrefs.showLegacyRanking ~= false
+
+    local ranked = VM.Ranking:GetRankingData(sortBy, sortDir, priceMode, period, hideOff, showLeg)
 
     local rowIdx = 0
     local function GetRankingRow()
@@ -1319,9 +1371,9 @@ function UI:RefreshRanking()
         row.itemsText:Show()
         row.totalText:Show()
 
-        local dispContributed = grp.totalInValue
-        local dispReceived = grp.totalOutValue
-        local dispNet = grp.netTotal or (dispContributed - dispReceived)
+        local dispContributed = grp.totalContributed
+        local dispReceived = grp.totalWithdrawn
+        local dispNet = grp.netBalance
 
         if grp.isLegacy then
             row.rankText:SetText("|cff808080-|r")
@@ -1381,12 +1433,21 @@ function UI:RefreshRanking()
                     or (isGold and "|cffffd700[GOLD IN]|r" or "|cff44dd77[IN]|r")
                 local dateStr = date("%d/%m %H:%M", tx.timestamp or 0)
                 local itemDisplay = isGold and "Gold" or (tx.itemLink or tx.itemName)
-                local transVal = VM.Ledger:GetTransactionValue(tx, true)
-                local currVal = VM.Ledger:GetTransactionValue(tx, false)
+                local lockedVal = VM.Ranking:GetTransactionValuation(tx, "locked")
+                local liveVal = VM.Ranking:GetTransactionValuation(tx, "live")
                 local charTag = (tx.player ~= grp.mainName and tx.player ~= "UNATTRIBUTED") and (" (" .. tx.player .. ")") or ""
 
-                sub.detailText:SetText(string.format("|cff888888%s|r %s %s%s  —  Price: %s  |  Now: %s",
-                    dateStr, dir, itemDisplay, charTag, VM:FormatMoney(transVal), VM:FormatMoney(currVal)))
+                local lockedDisplay, liveDisplay
+                if priceMode == "locked" then
+                    lockedDisplay = string.format("|cffffcc33Locked: %s (Active)|r", VM:FormatMoney(lockedVal))
+                    liveDisplay = string.format("|cff888888Now: %s|r", VM:FormatMoney(liveVal))
+                else
+                    lockedDisplay = string.format("|cff888888Locked: %s|r", VM:FormatMoney(lockedVal))
+                    liveDisplay = string.format("|cff26a6f2Now: %s (Active)|r", VM:FormatMoney(liveVal))
+                end
+
+                sub.detailText:SetText(string.format("|cff888888%s|r %s %s%s  —  %s  |  %s",
+                    dateStr, dir, itemDisplay, charTag, lockedDisplay, liveDisplay))
 
                 y = y + 22
             end

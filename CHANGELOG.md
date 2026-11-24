@@ -2,6 +2,18 @@
 
 All notable changes to **Vault Manager** will be documented in this file.
 
+## [1.3.5] - 2026-11-24
+
+### Fixed
+- **Login Guild-Load Race Condition Fix (`Core.lua`):** Resolved logout/login database wiping bug caused by `GetGuildInfo("player")` returning `nil` during early `ADDON_LOADED` and `PLAYER_ENTERING_WORLD` events on WoW 1.60.1. Added robust fallback to stored `charGuilds` cache during login initialization, preventing premature guild database purging and ensuring instant database loading on login and robust rebinding on `PLAYER_GUILD_UPDATE`.
+
+## [1.3.4] - 2026-11-24
+
+### Added & Enhanced
+- **Global Valuation Mode Toggle & Historical Fallback (`Ranking.lua`, `UI.lua`):** Added a top-bar price basis control (`Basis: Live AH` vs `Basis: Locked`) persisted in `VM.db.uiPrefs.rankingPriceMode` (`"live"` default) switching all player rows, summary totals, and exports simultaneously. Implemented historical price fallbacks using `entry.priceAtTime` with graceful fallback to current AH prices for legacy entries.
+- **Full Multi-Column Sorting & Indicators (`Ranking.lua`, `UI.lua`):** Enabled sorting by Net Balance, Contributed, Received, and Player (Main) with ascending/descending toggles (`▲` / `▼`), persistent `rankingSortBy` and `rankingSortDir`, and deterministic tie-breakers.
+- **Legacy Member Filter & Context-Aware Exports (`Ranking.lua`, `UI.lua`):** Added `Show Legacy` toggle (`VM.db.uiPrefs.showLegacyRanking`) maintaining clean rank numbering (`#1`, `#2`, ...), and updated Markdown/CSV exports to include active valuation basis and sort order.
+
 ## [1.3.3] - 2026-11-24
 
 ### Fixed & Restored

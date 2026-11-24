@@ -8,6 +8,7 @@ local rosterPickerFrame
 local exportModalFrame
 local currentTab = 1
 local selectedBankTab = 1
+local vaultCategoryExpanded = {}
 local searchQuery = ""
 local expandedMains = {}
 local expandedTreeMains = {}
@@ -224,6 +225,7 @@ function UI:Init()
     self:CreateOfficerPopupFrame()
     self:CreateRosterPickerFrame()
     self:CreateExportModal()
+    self:CreateAssignModal()
     self:CreateRankingPeriodPickerFrame()
     self:CreateBankValDropdown()
 end
@@ -234,6 +236,7 @@ function UI:Toggle()
         mainFrame:Hide()
         if rosterPickerFrame then rosterPickerFrame:Hide() end
         if exportModalFrame then exportModalFrame:Hide() end
+        if assignModalFrame then assignModalFrame:Hide() end
         if rankingPeriodDropdownFrame then rankingPeriodDropdownFrame:Hide() end
         if bankValDropdownFrame then bankValDropdownFrame:Hide() end
     else
@@ -247,6 +250,175 @@ function UI:Toggle()
         mainFrame:Show()
         self:RefreshAll()
     end
+end
+
+--------------------------------------------------------------------------------
+-- ASSIGN MODAL
+--------------------------------------------------------------------------------
+local assignModalFrame
+local selectedAssignRecipient = ""
+local selectedAssignItem = nil
+local selectedAssignTab = 1
+
+function UI:CreateAssignModal()
+    assignModalFrame = CreateFrame("Frame", "VaultManagerAssignModal", UIParent, "BackdropTemplate")
+    assignModalFrame:SetSize(360, 280)
+    assignModalFrame:SetPoint("CENTER")
+    assignModalFrame:SetFrameStrata("FULLSCREEN_DIALOG")
+    assignModalFrame:SetMovable(true)
+    assignModalFrame:EnableMouse(true)
+    assignModalFrame:RegisterForDrag("LeftButton")
+    assignModalFrame:SetScript("OnDragStart", assignModalFrame.StartMoving)
+    assignModalFrame:SetScript("OnDragStop", assignModalFrame.StopMovingOrSizing)
+    ApplyModernBackdrop(assignModalFrame, THEME.bg, THEME.accent)
+    assignModalFrame:Hide()
+    table.insert(UISpecialFrames, "VaultManagerAssignModal")
+
+    local title = assignModalFrame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    title:SetPoint("TOPLEFT", 12, -12)
+    title:SetText("|cff26a6f2Manual Item Assignment|r")
+    assignModalFrame.title = title
+
+    local closeBtn = CreateModernButton(assignModalFrame, 22, 22, "X", { 0.85, 0.25, 0.25, 1 })
+    closeBtn:SetPoint("TOPRIGHT", -10, -10)
+    closeBtn:SetScript("OnClick", function() assignModalFrame:Hide() end)
+
+    local itemLbl = assignModalFrame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    itemLbl:SetPoint("TOPLEFT", 12, -42)
+    assignModalFrame.itemLbl = itemLbl
+
+    local recLbl = assignModalFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    recLbl:SetPoint("TOPLEFT", 12, -72)
+    recLbl:SetText("Recipient:")
+
+    local recBtn = CreateModernDropdown(assignModalFrame, 200, 24, "Select Member...")
+    recBtn:SetPoint("TOPLEFT", 80, -68)
+    recBtn:SetScript("OnClick", function(btn)
+        UI:OpenRosterPicker(btn, true, function(chosen)
+            selectedAssignRecipient = chosen
+            recBtn:SetText(chosen)
+        end)
+    end)
+    assignModalFrame.recBtn = recBtn
+
+    local qtyLbl = assignModalFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    qtyLbl:SetPoint("TOPLEFT", 12, -106)
+    qtyLbl:SetText("Quantity:")
+
+    local qtyBox = CreateModernEditBox(assignModalFrame, 60, 24, true)
+    qtyBox:SetPoint("TOPLEFT", 80, -102)
+    qtyBox:SetText("1")
+    assignModalFrame.qtyBox = qtyBox
+
+    local priceLbl = assignModalFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    priceLbl:SetPoint("TOPLEFT", 12, -140)
+    priceLbl:SetText("Price (Unit):")
+
+    local priceBox = CreateModernEditBox(assignModalFrame, 100, 24, true)
+    priceBox:SetPoint("TOPLEFT", 80, -136)
+    assignModalFrame.priceBox = priceBox
+
+    local totalLbl = assignModalFrame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    totalLbl:SetPoint("LEFT", priceBox, "RIGHT", 10, 0)
+    assignModalFrame.totalLbl = totalLbl
+
+    local payCb = CreateFrame("CheckButton", nil, assignModalFrame, "UICheckButtonTemplate")
+    payCb:SetSize(20, 20)
+    payCb:SetPoint("TOPLEFT", 12, -176)
+    payCb.label = payCb:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    payCb.label:SetPoint("LEFT", payCb, "RIGHT", 4, 0)
+    payCb.label:SetText("Payment received ([GOLD IN])")
+    assignModalFrame.payCb = payCb
+
+    qtyBox:SetScript("OnTextChanged", function()
+        local qty = tonumber(qtyBox:GetText()) or 1
+        local uPrice = tonumber(priceBox:GetText()) or 0
+        totalLbl:SetText("Total: " .. VM:FormatMoney(uPrice * qty))
+    end)
+    priceBox:SetScript("OnTextChanged", function()
+        local qty = tonumber(qtyBox:GetText()) or 1
+        local uPrice = tonumber(priceBox:GetText()) or 0
+        totalLbl:SetText("Total: " .. VM:FormatMoney(uPrice * qty))
+    end)
+
+    local confirmBtn = CreateModernButton(assignModalFrame, 130, 26, "Assign & Record", THEME.accent)
+    confirmBtn:SetPoint("BOTTOMRIGHT", -12, 12)
+    confirmBtn:SetScript("OnClick", function()
+        if not selectedAssignRecipient or selectedAssignRecipient == "" then
+            VM:Print("|cffff4444Please select a recipient member first.|r")
+            return
+        end
+        local qty = tonumber(qtyBox:GetText()) or 1
+        local unitP = tonumber(priceBox:GetText()) or 0
+        local totalP = unitP * qty
+        local mainName = VM:GetMainFor(selectedAssignRecipient)
+
+        local rule = VM:GetTabRule(selectedAssignTab)
+        local tx = {
+            id = string.format("OUT_ASGN_%d_%d", time(), math.random(1000, 9999)),
+            type = "OUT",
+            player = VM:NormalizeName(mainName),
+            recipient = VM:NormalizeName(selectedAssignRecipient),
+            itemID = selectedAssignItem.itemID,
+            itemLink = selectedAssignItem.itemLink or selectedAssignItem.link,
+            itemName = selectedAssignItem.name,
+            count = qty,
+            unitPriceAtTime = VM:GetEffectiveLivePrice(selectedAssignItem.itemID, selectedAssignItem.itemLink or selectedAssignItem.link, selectedAssignItem.ahPrice),
+            chargedUnitPrice = unitP,
+            priceMode = rule.mode,
+            pricePercent = rule.percent,
+            isFFA = (rule.mode == "FREE"),
+            tab = selectedAssignTab,
+            timestamp = time(),
+            updatedAt = time(),
+            officer = VM:GetPlayerName(),
+            source = "MANUAL_ASSIGN",
+            isManual = true,
+            deleted = false
+        }
+        VM.db.ledger[tx.id] = tx
+        VM.Comms:BroadcastTransaction(tx)
+
+        if payCb:GetChecked() and totalP > 0 then
+            VM.Ledger:RecordGoldDeposit(selectedAssignRecipient, totalP, "MANUAL_ASSIGN_PAYMENT", selectedAssignRecipient, mainName)
+        end
+
+        VM:Print(string.format("Assigned %dx %s to |cffffff00%s|r (Charged: %s).", qty, selectedAssignItem.name, selectedAssignRecipient, VM:FormatMoney(totalP)))
+        assignModalFrame:Hide()
+        if VM.UI then VM.UI:RefreshAll() end
+    end)
+
+    local cancelBtn = CreateModernButton(assignModalFrame, 90, 26, "Cancel")
+    cancelBtn:SetPoint("BOTTOMRIGHT", -148, 12)
+    cancelBtn:SetScript("OnClick", function() assignModalFrame:Hide() end)
+end
+
+function UI:OpenAssignModal(item, tabIndex)
+    if not assignModalFrame then self:CreateAssignModal() end
+    selectedAssignItem = item
+    selectedAssignTab = tabIndex
+    selectedAssignRecipient = ""
+    assignModalFrame.recBtn:SetText("Select Member...")
+
+    assignModalFrame.itemLbl:SetText(string.format("Item: %s (Stock: %d)", item.link or item.name, item.count))
+    assignModalFrame.qtyBox:SetText("1")
+
+    local rule = VM:GetTabRule(tabIndex)
+    local effPrice = VM:GetEffectiveLivePrice(item.itemID, item.itemLink or item.link, item.ahPrice)
+    local unitCharged = 0
+    if rule.mode == "PERCENT" and effPrice > 0 then
+        unitCharged = math.floor(effPrice * ((rule.percent or 50) / 100))
+    elseif rule.mode == "FREE" then
+        unitCharged = 0
+    else
+        unitCharged = effPrice
+    end
+
+    assignModalFrame.priceBox:SetText(tostring(unitCharged))
+    assignModalFrame.totalLbl:SetText("Total: " .. VM:FormatMoney(unitCharged))
+    assignModalFrame.payCb:SetChecked(unitCharged > 0)
+
+    assignModalFrame:Show()
 end
 
 --------------------------------------------------------------------------------
@@ -664,7 +836,7 @@ function UI:CreateMainFrame()
     local title = headerBar:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
     title:SetPoint("LEFT", 14, 0)
     local getMeta = C_AddOns and C_AddOns.GetAddOnMetadata or GetAddOnMetadata
-    local ver = "v" .. ((getMeta and getMeta("VaultManager", "Version")) or "1.4.0")
+    local ver = "v" .. ((getMeta and getMeta("VaultManager", "Version")) or "1.4.2")
     title:SetText(string.format("|cff26a6f2VAULT|r |cffffffffMANAGER|r |cff8899aa%s|r", ver))
 
     mainFrame.scanStatusBtn = CreateModernButton(headerBar, 110, 22, "Scan Bank", { 0.25, 0.55, 0.85, 1 })
@@ -733,7 +905,10 @@ function UI:BuildInventoryPanel(panel)
         local b = CreateModernButton(panel, 82, 24, "Tab " .. i)
         b:SetPoint("TOPLEFT", 10 + (i - 1) * 86, -8)
         b:SetScript("OnClick", function()
-            selectedBankTab = i
+            if selectedBankTab ~= i then
+                selectedBankTab = i
+                vaultCategoryExpanded = {}
+            end
             self:RefreshInventory()
         end)
         panel.bankTabButtons[i] = b
@@ -818,6 +993,288 @@ function UI:BuildInventoryPanel(panel)
     panel.scroll = CreateScrollArea(panel, -68, 8)
 end
 
+if not VM_HiddenScanTooltip then
+    CreateFrame("GameTooltip", "VM_HiddenScanTooltip", UIParent, "GameTooltipTemplate")
+end
+
+local refreshTimerFrame = CreateFrame("Frame")
+local refreshTimerDelay = 0
+local refreshTimerActive = false
+
+refreshTimerFrame:Hide()
+refreshTimerFrame:SetScript("OnUpdate", function(self, elapsed)
+    refreshTimerDelay = refreshTimerDelay - elapsed
+    if refreshTimerDelay <= 0 then
+        self:Hide()
+        refreshTimerActive = false
+        if UI and UI.RefreshInventory then
+            UI:RefreshInventory()
+        end
+    end
+end)
+
+local function RequestDelayedInventoryRefresh()
+    if not refreshTimerActive then
+        refreshTimerActive = true
+        refreshTimerDelay = 0.5
+        refreshTimerFrame:Show()
+    end
+end
+
+local queriedItemIDs = {}
+
+local KNOWN_ITEM_TYPES = {
+    ["Weapon"] = true,
+    ["Armor"] = true,
+    ["Consumable"] = true,
+    ["Trade Goods"] = true,
+    ["Reagent"] = true,
+    ["Recipe"] = true,
+}
+
+local GEAR_SLOTS = {
+    ["Head"] = true,
+    ["Neck"] = true,
+    ["Shoulder"] = true,
+    ["Back"] = true,
+    ["Chest"] = true,
+    ["Shirt"] = true,
+    ["Tabard"] = true,
+    ["Wrist"] = true,
+    ["Hands"] = true,
+    ["Waist"] = true,
+    ["Legs"] = true,
+    ["Feet"] = true,
+    ["Finger"] = true,
+    ["Trinket"] = true,
+    ["One-Hand"] = true,
+    ["Two-Hand"] = true,
+    ["Main Hand"] = true,
+    ["Off Hand"] = true,
+    ["Held In Off-hand"] = true,
+    ["Ranged"] = true,
+    ["Thrown"] = true,
+    ["Relic"] = true,
+    ["Shield"] = true,
+}
+
+local function IsGearTooltipLine(txt, trimmed)
+    if not txt or txt == "" then return false end
+    if trimmed and GEAR_SLOTS[trimmed] then return true end
+    if txt:match("%d+ Armor") or trimmed == "Armor" then return true end
+    if txt:match("Speed %d") then return true end
+    if not (trimmed and trimmed:find("^Use:")) and txt:find("Damage", 1, true) then return true end
+    return false
+end
+
+local function GetItemCategory(item)
+    if not item then return "Other" end
+
+    -- Fast-path: use cached category if already set to one of the 4 specific categories
+    if item.cachedCategory == "Gear" or item.cachedCategory == "Consumables" or
+       item.cachedCategory == "Crafting Mats" or item.cachedCategory == "Recipes" then
+        return item.cachedCategory
+    end
+
+    -- 1. Check if already stored on item in VM.db
+    local itemType = (item.itemType and item.itemType ~= "") and item.itemType or nil
+    local equipSlot = (item.equipSlot and item.equipSlot ~= "") and item.equipSlot or nil
+
+    local numID = tonumber(item.itemID)
+    if not numID and item.link and type(item.link) == "string" then
+        numID = tonumber(item.link:match("item:(%d+)"))
+    end
+    if not numID and item.itemLink and type(item.itemLink) == "string" then
+        numID = tonumber(item.itemLink:match("item:(%d+)"))
+    end
+    if numID and numID <= 0 then numID = nil end
+
+    -- 2. Call GetItemInfo if itemType or equipSlot is missing
+    local r1
+    local needLookup = not item.infoChecked and (not itemType or not KNOWN_ITEM_TYPES[itemType] or (not equipSlot and itemType ~= "Consumable" and itemType ~= "Trade Goods" and itemType ~= "Reagent" and itemType ~= "Recipe"))
+    if needLookup and type(GetItemInfo) == "function" then
+        local lookup
+        local link = item.link or item.itemLink
+        if link and type(link) == "string" and link:find("|Hitem:", 1, true) then
+            lookup = link
+        elseif numID then
+            lookup = numID
+        end
+
+        if lookup then
+            local r2, r3, r4, r5, r6, r7, r8, r9, r10
+            r1, r2, r3, r4, r5, r6, r7, r8, r9, r10 = GetItemInfo(lookup)
+            if not r1 and numID and lookup ~= numID then
+                r1, r2, r3, r4, r5, r6, r7, r8, r9, r10 = GetItemInfo(numID)
+            end
+
+            if r1 then
+                item.infoChecked = true
+                local foundType, foundEquip
+                local rets = { r1, r2, r3, r4, r5, r6, r7, r8, r9, r10 }
+                for idx = 1, 10 do
+                    local val = rets[idx]
+                    if type(val) == "string" then
+                        if not foundType and KNOWN_ITEM_TYPES[val] then
+                            foundType = val
+                        end
+                        if not foundEquip and val:find("^INVTYPE_") then
+                            foundEquip = val
+                        end
+                    end
+                end
+
+                if foundType then
+                    itemType = foundType
+                    item.itemType = foundType
+                else
+                    itemType = itemType or "Other"
+                    item.itemType = itemType
+                end
+
+                if foundEquip then
+                    equipSlot = foundEquip
+                    item.equipSlot = foundEquip
+                else
+                    equipSlot = equipSlot or ""
+                    item.equipSlot = equipSlot
+                end
+            end
+        end
+    end
+
+    itemType = itemType or ""
+    equipSlot = equipSlot or ""
+
+    -- 3. Tooltip scanning via hidden GameTooltip
+    local tip = _G["VM_HiddenScanTooltip"] or CreateFrame("GameTooltip", "VM_HiddenScanTooltip", nil, "GameTooltipTemplate")
+    local numLines = 0
+    if numID then
+        pcall(function()
+            tip:SetOwner(WorldFrame, "ANCHOR_NONE")
+            tip:ClearLines()
+            tip:SetHyperlink("item:" .. tostring(numID))
+            numLines = tip:NumLines() or 0
+        end)
+    end
+
+    -- Delayed refresh if tooltip data is not yet cached from server
+    if numLines <= 1 then
+        local attempts = numID and (queriedItemIDs[numID] or 0) or 0
+        if attempts < 3 then
+            if numID then
+                queriedItemIDs[numID] = attempts + 1
+            end
+            RequestDelayedInventoryRefresh()
+        end
+    end
+
+    local hasTeaches = false
+    local hasGearText = false
+    local hasUse = false
+
+    for i = 1, numLines do
+        local leftFs = _G["VM_HiddenScanTooltipTextLeft" .. i]
+        local rightFs = _G["VM_HiddenScanTooltipTextRight" .. i]
+        local leftText = leftFs and leftFs:GetText() or nil
+        local rightText = rightFs and rightFs:GetText() or nil
+
+        if leftText and type(leftText) == "string" then
+            local cleanLeft = leftText:gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", "")
+            local trimLeft = cleanLeft:match("^%s*(.-)%s*$") or cleanLeft
+            if cleanLeft:find("Use: Teaches", 1, true) then
+                hasTeaches = true
+            end
+            if IsGearTooltipLine(cleanLeft, trimLeft) then
+                hasGearText = true
+            end
+            if trimLeft:find("^Use:") then
+                hasUse = true
+            end
+        end
+
+        if rightText and type(rightText) == "string" then
+            local cleanRight = rightText:gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", "")
+            local trimRight = cleanRight:match("^%s*(.-)%s*$") or cleanRight
+            if cleanRight:find("Use: Teaches", 1, true) then
+                hasTeaches = true
+            end
+            if IsGearTooltipLine(cleanRight, trimRight) then
+                hasGearText = true
+            end
+            if trimRight:find("^Use:") then
+                hasUse = true
+            end
+        end
+    end
+
+    -- Recipe prefix check by item name
+    local rawName = item.name or ""
+    if rawName == "" and type(r1) == "string" then
+        rawName = r1
+    end
+    if rawName == "" and item.link and type(item.link) == "string" then
+        rawName = item.link:match("%[(.-)%]") or ""
+    end
+    if rawName == "" and item.itemLink and type(item.itemLink) == "string" then
+        rawName = item.itemLink:match("%[(.-)%]") or ""
+    end
+    if rawName == "" and numLines >= 1 then
+        local left1 = _G["VM_HiddenScanTooltipTextLeft1"]
+        if left1 and left1:GetText() then
+            rawName = left1:GetText()
+        end
+    end
+
+    local cleanName = rawName:gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", "")
+    local bracketName = cleanName:match("%[(.-)%]")
+    cleanName = bracketName or cleanName
+    cleanName = cleanName:gsub("^%[", ""):gsub("%]$", "")
+    cleanName = cleanName:match("^%s*(.-)%s*$") or cleanName
+
+    local isRecipeName = cleanName:find("^Pattern:") or cleanName:find("^Recipe:") or
+                         cleanName:find("^Plans:") or cleanName:find("^Formula:") or
+                         cleanName:find("^Schematic:") or cleanName:find("^Manual:")
+
+    -- 4. Prioritized classification
+    -- Priority 1: Recipes
+    local isRecipe = isRecipeName or hasTeaches or (itemType == "Recipe")
+
+    -- Priority 2: Gear
+    local isGearInfo = (itemType == "Weapon" or itemType == "Armor" or
+        (equipSlot ~= "" and equipSlot:find("^INVTYPE_") and equipSlot ~= "INVTYPE_BAG"))
+    local isGear = hasGearText or isGearInfo
+
+    -- Priority 3: Consumables
+    local isConsumable = ((hasUse and not isGear and not isRecipe) or (itemType == "Consumable"))
+
+    -- Priority 4: Crafting Mats
+    local isCraftingMat = (itemType == "Trade Goods" or itemType == "Reagent")
+
+    local category
+    if isRecipe then
+        category = "Recipes"
+    elseif isGear then
+        category = "Gear"
+    elseif isConsumable then
+        category = "Consumables"
+    elseif isCraftingMat then
+        category = "Crafting Mats"
+    else
+        category = "Other"
+    end
+
+    -- 5. Cache result (do NOT cache "Other" permanently if item was uncached)
+    if category == "Gear" or category == "Consumables" or
+       category == "Crafting Mats" or category == "Recipes" then
+        item.cachedCategory = category
+    elseif numLines > 1 then
+        item.cachedCategory = "Other"
+    end
+
+    return category
+end
+
 function UI:RefreshInventory()
     if not mainFrame or not mainFrame.panels or not mainFrame.panels[1] then return end
     local panel = mainFrame.panels[1]
@@ -865,131 +1322,197 @@ function UI:RefreshInventory()
 
     local content = panel.scroll.content
     for _, r in ipairs(panel.scroll.rows) do r:Hide() end
+    panel.scroll.catHeaders = panel.scroll.catHeaders or {}
+    for _, h in pairs(panel.scroll.catHeaders) do h:Hide() end
 
     local tabData = inv.tabs[selectedBankTab]
     if not tabData then return end
 
-    local items = {}
+    local cats = {
+        ["Gear"] = {},
+        ["Consumables"] = {},
+        ["Crafting Mats"] = {},
+        ["Recipes"] = {},
+        ["Other"] = {}
+    }
+    local catOrder = { "Gear", "Consumables", "Crafting Mats", "Recipes", "Other" }
+
     for _, item in pairs(tabData.items) do
         if searchQuery == "" or (item.name and item.name:lower():find(searchQuery, 1, true)) then
-            table.insert(items, item)
+            local cat = GetItemCategory(item)
+            if not cats[cat] then cat = "Other" end
+            table.insert(cats[cat], item)
         end
     end
-    table.sort(items, function(a, b) return (a.name or "") < (b.name or "") end)
+    for _, catName in ipairs(catOrder) do
+        table.sort(cats[catName], function(a, b) return (a.name or "") < (b.name or "") end)
+    end
 
+    local isOff = VM:IsOfficer()
     local y = 0
-    for idx, item in ipairs(items) do
-        local row = panel.scroll.rows[idx]
-        if not row then
-            row = CreateFrame("Frame", nil, content, "BackdropTemplate")
-            row:SetSize(732, 30)
-            row:EnableMouse(true)
+    local rowIdx = 0
 
-            row.icon = row:CreateTexture(nil, "ARTWORK")
-            row.icon:SetSize(22, 22)
-            row.icon:SetPoint("LEFT", 8, 0)
-            row.icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
-
-            row.iconBtn = CreateFrame("Button", nil, row)
-            row.iconBtn:SetSize(22, 22)
-            row.iconBtn:SetPoint("TOPLEFT", row.icon, "TOPLEFT", 0, 0)
-
-            row.nameBtn = CreateFrame("Button", nil, row)
-            row.nameBtn:SetSize(265, 26)
-            row.nameBtn:SetPoint("LEFT", 36, 0)
-            row.nameText = row.nameBtn:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-            row.nameText:SetAllPoints()
-            row.nameText:SetJustifyH("LEFT")
-
-            row.stockText = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-            row.stockText:SetPoint("LEFT", 310, 0)
-            row.stockText:SetWidth(135)
-            row.stockText:SetJustifyH("LEFT")
-
-            row.priceText = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-            row.priceText:SetPoint("LEFT", 450, 0)
-            row.priceText:SetWidth(130)
-            row.priceText:SetJustifyH("LEFT")
-
-            row.qtyBox = CreateModernEditBox(row, 42, 22, true)
-            row.qtyBox:SetPoint("LEFT", 588, 0)
-            row.qtyBox:SetText("1")
-
-            row.reqBtn = CreateModernButton(row, 84, 22, "Request", THEME.accent)
-            row.reqBtn:SetPoint("LEFT", 638, 0)
-
-            panel.scroll.rows[idx] = row
-        end
-
-        local baseBg = (idx % 2 == 0) and THEME.rowEven or THEME.rowOdd
-        ApplyModernBackdrop(row, baseBg, { 0, 0, 0, 0 })
-        row:SetScript("OnEnter", function(selfRow)
-            selfRow:SetBackdropColor(THEME.rowHover[1], THEME.rowHover[2], THEME.rowHover[3], THEME.rowHover[4])
-            ShowItemTooltip(selfRow, item.itemLink or item.link, item.itemID, item.name)
-        end)
-        row:SetScript("OnLeave", function(selfRow)
-            selfRow:SetBackdropColor(baseBg[1], baseBg[2], baseBg[3], baseBg[4])
-            HideItemTooltip()
-        end)
-
-        row.iconBtn:SetScript("OnEnter", function(selfBtn)
-            row:SetBackdropColor(THEME.rowHover[1], THEME.rowHover[2], THEME.rowHover[3], THEME.rowHover[4])
-            ShowItemTooltip(selfBtn, item.itemLink or item.link, item.itemID, item.name)
-        end)
-        row.iconBtn:SetScript("OnLeave", function()
-            row:SetBackdropColor(baseBg[1], baseBg[2], baseBg[3], baseBg[4])
-            HideItemTooltip()
-        end)
-
-        row:SetPoint("TOPLEFT", 4, -y)
-        row:Show()
-
-        local reserved = VM:GetReservedCount(item.itemID, selectedBankTab)
-        local available = math.max(0, item.count - reserved)
-
-        row.icon:SetTexture(item.icon or "Interface\\Icons\\INV_Misc_QuestionMark")
-        row.nameText:SetText(item.link or item.name)
-        row.nameBtn:SetScript("OnEnter", function(selfBtn)
-            row:SetBackdropColor(THEME.rowHover[1], THEME.rowHover[2], THEME.rowHover[3], THEME.rowHover[4])
-            ShowItemTooltip(selfBtn, item.itemLink or item.link, item.itemID, item.name)
-        end)
-        row.nameBtn:SetScript("OnLeave", function()
-            row:SetBackdropColor(baseBg[1], baseBg[2], baseBg[3], baseBg[4])
-            HideItemTooltip()
-        end)
-
-        if reserved > 0 then
-            row.stockText:SetText(string.format("Available: |cff44dd77%d|r |cff888888(Res: %d)|r", available, reserved))
-        else
-            row.stockText:SetText(string.format("In Stock: |cff44dd77%d|r", available))
-        end
-
-        local effectivePrice = VM:GetEffectiveLivePrice(item.itemID, item.itemLink or item.link, item.ahPrice)
-        if effectivePrice > 0 then
-            if rule.mode == "PERCENT" then
-                local memberPrice = math.floor(effectivePrice * ((rule.percent or 50) / 100))
-                row.priceText:SetText("Price: " .. VM:FormatMoney(memberPrice))
-            else
-                row.priceText:SetText("AH: " .. VM:FormatMoney(effectivePrice))
+    for _, catName in ipairs(catOrder) do
+        local catItems = cats[catName]
+        if #catItems > 0 then
+            local isExpanded = (searchQuery ~= "") or (vaultCategoryExpanded[catName] == true)
+            local header = panel.scroll.catHeaders[catName]
+            if not header then
+                header = CreateFrame("Button", nil, content, "BackdropTemplate")
+                header:SetSize(732, 24)
+                ApplyModernBackdrop(header, { 0.12, 0.15, 0.22, 0.95 }, THEME.border)
+                header.text = header:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+                header.text:SetPoint("LEFT", 8, 0)
+                panel.scroll.catHeaders[catName] = header
             end
-        else
-            row.priceText:SetText("|cff777777AH: Unknown|r")
-        end
 
-        if rule.mode == "LOCKED" or available <= 0 then
-            row.reqBtn:SetModernEnabled(false)
-            row.qtyBox:Hide()
-        else
-            row.reqBtn:SetModernEnabled(true)
-            row.qtyBox:Show()
-            row.reqBtn:SetScript("OnClick", function()
-                local qty = tonumber(row.qtyBox:GetText()) or 1
-                local itemKey = (item.itemID and item.itemID ~= 0) and item.itemID or item.name
-                VM.Fulfillment:CreateRequest(selectedBankTab, itemKey, qty)
+            header:ClearAllPoints()
+            header:SetPoint("TOPLEFT", 4, -y)
+            header.text:SetText(string.format("%s  %s (%d)", isExpanded and "[-]" or "[+]", catName, #catItems))
+            header:SetScript("OnClick", function()
+                if searchQuery == "" then
+                    vaultCategoryExpanded[catName] = not vaultCategoryExpanded[catName]
+                    UI:RefreshInventory()
+                end
             end)
-        end
+            header:Show()
+            y = y + 26
 
-        y = y + 32
+            if isExpanded then
+                for idx, item in ipairs(catItems) do
+                    rowIdx = rowIdx + 1
+                    local row = panel.scroll.rows[rowIdx]
+                    if not row then
+                        row = CreateFrame("Frame", nil, content, "BackdropTemplate")
+                        row:SetSize(732, 30)
+                        row:EnableMouse(true)
+
+                        row.icon = row:CreateTexture(nil, "ARTWORK")
+                        row.icon:SetSize(22, 22)
+                        row.icon:SetPoint("LEFT", 8, 0)
+                        row.icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+
+                        row.iconBtn = CreateFrame("Button", nil, row)
+                        row.iconBtn:SetSize(22, 22)
+                        row.iconBtn:SetPoint("TOPLEFT", row.icon, "TOPLEFT", 0, 0)
+
+                        row.nameBtn = CreateFrame("Button", nil, row)
+                        row.nameBtn:SetSize(225, 26)
+                        row.nameBtn:SetPoint("LEFT", 36, 0)
+                        row.nameText = row.nameBtn:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+                        row.nameText:SetAllPoints()
+                        row.nameText:SetJustifyH("LEFT")
+
+                        row.stockText = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+                        row.stockText:SetPoint("LEFT", 266, 0)
+                        row.stockText:SetWidth(110)
+                        row.stockText:SetJustifyH("LEFT")
+
+                        row.priceText = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+                        row.priceText:SetPoint("LEFT", 380, 0)
+                        row.priceText:SetWidth(110)
+                        row.priceText:SetJustifyH("LEFT")
+
+                        row.qtyBox = CreateModernEditBox(row, 34, 22, true)
+                        row.qtyBox:SetPoint("LEFT", 495, 0)
+                        row.qtyBox:SetText("1")
+
+                        row.reqBtn = CreateModernButton(row, 68, 22, "Request", THEME.accent)
+                        row.reqBtn:SetPoint("LEFT", 535, 0)
+
+                        row.assignBtn = CreateModernButton(row, 68, 22, "Assign", { 0.20, 0.60, 0.80, 1 })
+                        row.assignBtn:SetPoint("LEFT", 609, 0)
+
+                        panel.scroll.rows[rowIdx] = row
+                    end
+
+                    local baseBg = (idx % 2 == 0) and THEME.rowEven or THEME.rowOdd
+                    ApplyModernBackdrop(row, baseBg, { 0, 0, 0, 0 })
+                    row:SetScript("OnEnter", function(selfRow)
+                        selfRow:SetBackdropColor(THEME.rowHover[1], THEME.rowHover[2], THEME.rowHover[3], THEME.rowHover[4])
+                        ShowItemTooltip(selfRow, item.itemLink or item.link, item.itemID, item.name)
+                    end)
+                    row:SetScript("OnLeave", function(selfRow)
+                        selfRow:SetBackdropColor(baseBg[1], baseBg[2], baseBg[3], baseBg[4])
+                        HideItemTooltip()
+                    end)
+
+                    row.iconBtn:SetScript("OnEnter", function(selfBtn)
+                        row:SetBackdropColor(THEME.rowHover[1], THEME.rowHover[2], THEME.rowHover[3], THEME.rowHover[4])
+                        ShowItemTooltip(selfBtn, item.itemLink or item.link, item.itemID, item.name)
+                    end)
+                    row.iconBtn:SetScript("OnLeave", function()
+                        row:SetBackdropColor(baseBg[1], baseBg[2], baseBg[3], baseBg[4])
+                        HideItemTooltip()
+                    end)
+
+                    row:ClearAllPoints()
+                    row:SetPoint("TOPLEFT", 4, -y)
+                    row:Show()
+
+                    local reserved = VM:GetReservedCount(item.itemID, selectedBankTab)
+                    local available = math.max(0, item.count - reserved)
+
+                    row.icon:SetTexture(item.icon or "Interface\\Icons\\INV_Misc_QuestionMark")
+                    row.nameText:SetText(item.link or item.name)
+                    row.nameBtn:SetScript("OnEnter", function(selfBtn)
+                        row:SetBackdropColor(THEME.rowHover[1], THEME.rowHover[2], THEME.rowHover[3], THEME.rowHover[4])
+                        ShowItemTooltip(selfBtn, item.itemLink or item.link, item.itemID, item.name)
+                    end)
+                    row.nameBtn:SetScript("OnLeave", function()
+                        row:SetBackdropColor(baseBg[1], baseBg[2], baseBg[3], baseBg[4])
+                        HideItemTooltip()
+                    end)
+
+                    if reserved > 0 then
+                        row.stockText:SetText(string.format("Avail: |cff44dd77%d|r |cff888888(Res:%d)|r", available, reserved))
+                    else
+                        row.stockText:SetText(string.format("Stock: |cff44dd77%d|r", available))
+                    end
+
+                    local effectivePrice = VM:GetEffectiveLivePrice(item.itemID, item.itemLink or item.link, item.ahPrice)
+                    if effectivePrice > 0 then
+                        if rule.mode == "PERCENT" then
+                            local memberPrice = math.floor(effectivePrice * ((rule.percent or 50) / 100))
+                            row.priceText:SetText("Price: " .. VM:FormatMoney(memberPrice))
+                        else
+                            row.priceText:SetText("AH: " .. VM:FormatMoney(effectivePrice))
+                        end
+                    else
+                        row.priceText:SetText("|cff777777AH: Unknown|r")
+                    end
+
+                    if rule.mode == "LOCKED" or available <= 0 then
+                        row.reqBtn:SetModernEnabled(false)
+                        row.qtyBox:Hide()
+                    else
+                        row.reqBtn:SetModernEnabled(true)
+                        row.qtyBox:Show()
+                        row.reqBtn:SetScript("OnClick", function()
+                            local qty = tonumber(row.qtyBox:GetText()) or 1
+                            local itemKey = (item.itemID and item.itemID ~= 0) and item.itemID or item.name
+                            VM.Fulfillment:CreateRequest(selectedBankTab, itemKey, qty)
+                        end)
+                    end
+
+                    if isOff then
+                        row.assignBtn:Show()
+                        if rule.mode == "LOCKED" or available <= 0 then
+                            row.assignBtn:SetModernEnabled(false)
+                        else
+                            row.assignBtn:SetModernEnabled(true)
+                            row.assignBtn:SetScript("OnClick", function()
+                                UI:OpenAssignModal(item, selectedBankTab)
+                            end)
+                        end
+                    else
+                        row.assignBtn:Hide()
+                    end
+
+                    y = y + 32
+                end
+            end
+        end
     end
     content:SetHeight(math.max(1, y))
 end
@@ -1144,6 +1667,25 @@ function UI:BuildLedgerPanel(panel)
     toggleLabel:SetPoint("LEFT", priceToggle, "RIGHT", 4, 0)
     toggleLabel:SetText("Historical price (otherwise live AH)")
 
+    local ffaToggle = CreateFrame("CheckButton", nil, topBar, "UICheckButtonTemplate")
+    ffaToggle:SetSize(22, 22)
+    ffaToggle:SetPoint("LEFT", toggleLabel, "RIGHT", 16, 0)
+    ffaToggle:SetChecked(uiPrefs.includeFFA ~= false)
+
+    local ffaLabel = topBar:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    ffaLabel:SetPoint("LEFT", ffaToggle, "RIGHT", 4, 0)
+    ffaLabel:SetText("Include Free-for-All")
+
+    ffaToggle:SetScript("OnClick", function(cb)
+        if not VM.db then VM.db = {} end
+        VM.db.uiPrefs = VM.db.uiPrefs or {}
+        local prefs = GetUIPrefs()
+        prefs.includeFFA = cb:GetChecked()
+        UI:RefreshLedger()
+        UI:RefreshRanking()
+    end)
+    panel.ffaToggle = ffaToggle
+
     priceToggle:SetScript("OnClick", function(cb)
         if not VM.db then VM.db = {} end
         VM.db.uiPrefs = VM.db.uiPrefs or {}
@@ -1208,6 +1750,9 @@ function UI:RefreshLedger()
     if not VM.db then VM.db = {} end
     VM.db.uiPrefs = VM.db.uiPrefs or {}
     local uiPrefs = GetUIPrefs()
+    if panel.ffaToggle then
+        panel.ffaToggle:SetChecked(uiPrefs.includeFFA ~= false)
+    end
     local useHist = uiPrefs.useHistoricalPrices
     local groups = VM.Ledger:GetAggregatedByMain(useHist)
 
@@ -1329,16 +1874,26 @@ function UI:RefreshLedger()
                 local dateStr = date("%d/%m %H:%M", tx.timestamp or 0)
                 local charTag = (tx.player ~= grp.mainName and tx.player ~= "UNATTRIBUTED") and (" (" .. VM:ColorizeName(tx.player, grp.isLegacy and "808080" or nil) .. ")") or ""
 
+                local ruleTag = ""
+                if tx.type == "OUT" then
+                    if tx.isFFA or tx.priceMode == "FREE" then
+                        ruleTag = " |cff44dd77(Free-for-All)|r"
+                    elseif tx.priceMode == "PERCENT" or (tx.chargedUnitPrice ~= nil and tx.unitPriceAtTime and tx.chargedUnitPrice < tx.unitPriceAtTime and tx.chargedUnitPrice > 0) then
+                        local pct = tx.pricePercent or (tx.unitPriceAtTime and tx.unitPriceAtTime > 0 and math.floor((tx.chargedUnitPrice / tx.unitPriceAtTime) * 100 + 0.5)) or 50
+                        ruleTag = string.format(" |cff26a6f2(%d%% AH)|r", pct)
+                    end
+                end
+
                 if isGold then
                     local senderTag = (tx.rawSender and tx.rawSender ~= tx.player) and string.format(" (deposited by %s)", VM:ColorizeName(tx.rawSender)) or ""
                     sub.text:SetText(string.format("|cff999999%s|r [%s]%s%s: %s",
                         dateStr, dir, charTag, senderTag, VM:FormatMoney(val)))
                 elseif grp.isLegacy then
-                    sub.text:SetText(string.format("|cff808080%s [%s]%s: %dx %s — Value: %s|r",
-                        dateStr, tx.type == "OUT" and "OUT" or "IN", charTag, tx.count, tx.itemName, VM:FormatMoney(val)))
+                    sub.text:SetText(string.format("|cff808080%s [%s]%s: %dx %s — Value: %s%s|r",
+                        dateStr, tx.type == "OUT" and "OUT" or "IN", charTag, tx.count, tx.itemName, VM:FormatMoney(val), ruleTag))
                 else
-                    sub.text:SetText(string.format("|cff999999%s|r [%s]%s: %dx %s  —  Value: %s",
-                        dateStr, dir, charTag, tx.count, tx.itemLink or tx.itemName, VM:FormatMoney(val)))
+                    sub.text:SetText(string.format("|cff999999%s|r [%s]%s: %dx %s  —  Value: %s%s",
+                        dateStr, dir, charTag, tx.count, tx.itemLink or tx.itemName, VM:FormatMoney(val), ruleTag))
                 end
 
                 if grp.mainName == "UNATTRIBUTED" and VM:IsOfficer() then
@@ -1479,6 +2034,21 @@ function UI:BuildRankingPanel(panel)
     end)
     panel.periodBtn = periodBtn
 
+    local ffaRankCb = CreateFrame("CheckButton", nil, filterStrip, "UICheckButtonTemplate")
+    ffaRankCb:SetSize(20, 20)
+    ffaRankCb:SetPoint("LEFT", 425, 0)
+    ffaRankCb.label = ffaRankCb:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    ffaRankCb.label:SetPoint("LEFT", ffaRankCb, "RIGHT", 4, 0)
+    ffaRankCb.label:SetText("Include Free-for-All")
+    ffaRankCb:SetChecked(uiPrefs.includeFFA ~= false)
+    ffaRankCb:SetScript("OnClick", function(cb)
+        local prefs = GetUIPrefs()
+        prefs.includeFFA = cb:GetChecked()
+        UI:RefreshRanking()
+        UI:RefreshLedger()
+    end)
+    panel.ffaRankCb = ffaRankCb
+
     -- Column headers with multi-column sorting
     local colHeader = CreateFrame("Frame", nil, panel, "BackdropTemplate")
     colHeader:SetSize(744, 24)
@@ -1544,6 +2114,9 @@ function UI:RefreshRanking()
     end
     if panel.hideOfficersCb then
         panel.hideOfficersCb:SetChecked(uiPrefs.hideOfficers or false)
+    end
+    if panel.ffaRankCb then
+        panel.ffaRankCb:SetChecked(uiPrefs.includeFFA ~= false)
     end
     if panel.periodBtn then
         local p = uiPrefs.rankingPeriod or "ALL"
@@ -2278,115 +2851,156 @@ function UI:RefreshSettings()
 
     for i = 1, 6 do
         local r = panel.tabRuleRows[i]
-        local tabData = VM.db.inventory and VM.db.inventory.tabs and VM.db.inventory.tabs[i]
-        local tabName = (tabData and tabData.name) or string.format("Tab %d", i)
+        local isPurchased = VM:IsTabPurchased(i)
         r:Show()
-        local rule = VM:GetTabRule(i)
-        r.label:SetText(string.format("Tab %d: %s", i, tabName))
-        if not r.userEditedPct then
-            r.pctBox:SetText(tostring(rule.percent or 50))
-        end
 
-        if not r.selectedMode then
-            r.selectedMode = rule.mode or "FREE"
-        end
+        if not isPurchased then
+            r.label:SetText(string.format("Tab %d: Not purchased", i))
+            r.status:SetText("|cff888888Not purchased|r")
 
-        local mode = rule.mode or "FREE"
-        local byStr = (rule.updatedBy and rule.updatedBy ~= "") and (" (set by " .. rule.updatedBy .. ")") or ""
-
-        if mode == "LOCKED" then
-            r.status:SetText(string.format("|cffff5555ACTIVE: Locked%s|r", byStr))
-        elseif mode == "PERCENT" then
-            r.status:SetText(string.format("|cffffcc33ACTIVE: %d%% of AH%s|r", rule.percent or 50, byStr))
-        else
-            r.status:SetText(string.format("|cff44dd77ACTIVE: Free-for-All%s|r", byStr))
-        end
-
-        local function StyleButton(btn, isActive, activeBg, activeBorder, activeText)
-            if not isOff then
-                btn:Disable()
-                btn:SetBackdropColor(THEME.btnDisabled[1], THEME.btnDisabled[2], THEME.btnDisabled[3], 0.4)
-                btn:SetBackdropBorderColor(THEME.border[1], THEME.border[2], THEME.border[3], 0.4)
-                btn.label:SetTextColor(0.4, 0.4, 0.4)
-            elseif isActive then
-                btn:Enable()
-                btn:SetBackdropColor(activeBg[1], activeBg[2], activeBg[3], 1)
-                btn:SetBackdropBorderColor(activeBorder[1], activeBorder[2], activeBorder[3], 1)
-                btn.label:SetTextColor(activeText[1], activeText[2], activeText[3])
-            else
-                btn:Enable()
-                btn:SetBackdropColor(THEME.btnBg[1], THEME.btnBg[2], THEME.btnBg[3], 1)
-                btn:SetBackdropBorderColor(THEME.border[1], THEME.border[2], THEME.border[3], 0.8)
-                btn.label:SetTextColor(0.6, 0.6, 0.6)
-            end
-        end
-
-        local selMode = r.selectedMode or mode
-        StyleButton(r.freeBtn, selMode == "FREE", {0.10, 0.28, 0.18, 1}, {0.20, 0.80, 0.40, 1}, {0.3, 0.9, 0.5})
-        StyleButton(r.pctBtn, selMode == "PERCENT", {0.32, 0.26, 0.10, 1}, {0.90, 0.70, 0.20, 1}, {1, 0.85, 0.2})
-        StyleButton(r.lockBtn, selMode == "LOCKED", {0.32, 0.12, 0.12, 1}, {0.90, 0.30, 0.30, 1}, {1, 0.4, 0.4})
-
-        if not isOff then
+            r.freeBtn:Disable()
+            r.pctBtn:Disable()
+            r.lockBtn:Disable()
             r.saveBtn:Disable()
-            r.saveBtn:SetBackdropColor(THEME.btnDisabled[1], THEME.btnDisabled[2], THEME.btnDisabled[3], 0.4)
-            r.saveBtn:SetBackdropBorderColor(THEME.border[1], THEME.border[2], THEME.border[3], 0.4)
-            r.saveBtn.label:SetTextColor(0.4, 0.4, 0.4)
-        else
-            r.saveBtn:Enable()
-            r.saveBtn:SetBackdropColor(THEME.accent[1], THEME.accent[2], THEME.accent[3], 1)
-            r.saveBtn:SetBackdropBorderColor(THEME.accent[1], THEME.accent[2], THEME.accent[3], 1)
-            r.saveBtn.label:SetTextColor(1, 1, 1)
-        end
-
-        if isOff and selMode == "PERCENT" then
-            r.pctBox:Enable()
-            r.pctBox:SetBackdropColor(0.05, 0.06, 0.08, 1)
-            r.pctBox:SetBackdropBorderColor(THEME.accent[1], THEME.accent[2], THEME.accent[3], 1)
-            r.pctBox:SetAlpha(1.0)
-        else
-            r.pctBox:ClearFocus()
             r.pctBox:Disable()
-            r.pctBox:SetBackdropColor(0.05, 0.06, 0.08, 0.4)
-            r.pctBox:SetBackdropBorderColor(THEME.border[1], THEME.border[2], THEME.border[3], 0.3)
-            r.pctBox:SetAlpha(0.4)
-        end
+            r.pctBox:ClearFocus()
 
-        if isOff then
-            r.freeBtn:SetScript("OnClick", function()
-                r.selectedMode = "FREE"
-                UI:RefreshSettings()
-            end)
-            r.pctBtn:SetScript("OnClick", function()
-                r.selectedMode = "PERCENT"
-                UI:RefreshSettings()
-            end)
-            r.lockBtn:SetScript("OnClick", function()
-                r.selectedMode = "LOCKED"
-                UI:RefreshSettings()
-            end)
-            r.saveBtn:SetScript("OnClick", function()
-                local p = tonumber(r.pctBox:GetText()) or 50
-                if p <= 0 then p = 50 r.pctBox:SetText("50") end
-                r.userEditedPct = false
-                VM:SetTabRule(i, r.selectedMode, p)
-            end)
-            r.pctBox:SetScript("OnTextChanged", function(selfBox)
-                r.userEditedPct = true
-            end)
-            r.pctBox:SetScript("OnEnterPressed", function(selfBox)
-                selfBox:ClearFocus()
-                local p = tonumber(selfBox:GetText()) or 50
-                if p <= 0 then p = 50 selfBox:SetText("50") end
-                r.userEditedPct = false
-                VM:SetTabRule(i, r.selectedMode, p)
-            end)
-        else
+            r.freeBtn:SetBackdropColor(THEME.btnDisabled[1], THEME.btnDisabled[2], THEME.btnDisabled[3], 0.25)
+            r.freeBtn:SetBackdropBorderColor(THEME.border[1], THEME.border[2], THEME.border[3], 0.2)
+            r.freeBtn.label:SetTextColor(0.35, 0.35, 0.35)
+
+            r.pctBtn:SetBackdropColor(THEME.btnDisabled[1], THEME.btnDisabled[2], THEME.btnDisabled[3], 0.25)
+            r.pctBtn:SetBackdropBorderColor(THEME.border[1], THEME.border[2], THEME.border[3], 0.2)
+            r.pctBtn.label:SetTextColor(0.35, 0.35, 0.35)
+
+            r.lockBtn:SetBackdropColor(THEME.btnDisabled[1], THEME.btnDisabled[2], THEME.btnDisabled[3], 0.25)
+            r.lockBtn:SetBackdropBorderColor(THEME.border[1], THEME.border[2], THEME.border[3], 0.2)
+            r.lockBtn.label:SetTextColor(0.35, 0.35, 0.35)
+
+            r.saveBtn:SetBackdropColor(THEME.btnDisabled[1], THEME.btnDisabled[2], THEME.btnDisabled[3], 0.25)
+            r.saveBtn:SetBackdropBorderColor(THEME.border[1], THEME.border[2], THEME.border[3], 0.2)
+            r.saveBtn.label:SetTextColor(0.35, 0.35, 0.35)
+
+            r.pctBox:SetBackdropColor(0.05, 0.06, 0.08, 0.2)
+            r.pctBox:SetBackdropBorderColor(THEME.border[1], THEME.border[2], THEME.border[3], 0.15)
+            r.pctBox:SetAlpha(0.25)
+
             r.freeBtn:SetScript("OnClick", nil)
             r.pctBtn:SetScript("OnClick", nil)
             r.lockBtn:SetScript("OnClick", nil)
             r.saveBtn:SetScript("OnClick", nil)
             r.pctBox:SetScript("OnTextChanged", nil)
             r.pctBox:SetScript("OnEnterPressed", nil)
+        else
+            local tabData = VM.db.inventory and VM.db.inventory.tabs and VM.db.inventory.tabs[i]
+            local tabName = (tabData and tabData.name) or string.format("Tab %d", i)
+            local rule = VM:GetTabRule(i)
+            r.label:SetText(string.format("Tab %d: %s", i, tabName))
+            if not r.userEditedPct then
+                r.pctBox:SetText(tostring(rule.percent or 50))
+            end
+
+            if not r.selectedMode then
+                r.selectedMode = rule.mode or "FREE"
+            end
+
+            local mode = rule.mode or "FREE"
+            local byStr = (rule.updatedBy and rule.updatedBy ~= "") and (" (set by " .. rule.updatedBy .. ")") or ""
+
+            if mode == "LOCKED" then
+                r.status:SetText(string.format("|cffff5555ACTIVE: Locked%s|r", byStr))
+            elseif mode == "PERCENT" then
+                r.status:SetText(string.format("|cffffcc33ACTIVE: %d%% of AH%s|r", rule.percent or 50, byStr))
+            else
+                r.status:SetText(string.format("|cff44dd77ACTIVE: Free-for-All%s|r", byStr))
+            end
+
+            local function StyleButton(btn, isActive, activeBg, activeBorder, activeText)
+                if not isOff then
+                    btn:Disable()
+                    btn:SetBackdropColor(THEME.btnDisabled[1], THEME.btnDisabled[2], THEME.btnDisabled[3], 0.4)
+                    btn:SetBackdropBorderColor(THEME.border[1], THEME.border[2], THEME.border[3], 0.4)
+                    btn.label:SetTextColor(0.4, 0.4, 0.4)
+                elseif isActive then
+                    btn:Enable()
+                    btn:SetBackdropColor(activeBg[1], activeBg[2], activeBg[3], 1)
+                    btn:SetBackdropBorderColor(activeBorder[1], activeBorder[2], activeBorder[3], 1)
+                    btn.label:SetTextColor(activeText[1], activeText[2], activeText[3])
+                else
+                    btn:Enable()
+                    btn:SetBackdropColor(THEME.btnBg[1], THEME.btnBg[2], THEME.btnBg[3], 1)
+                    btn:SetBackdropBorderColor(THEME.border[1], THEME.border[2], THEME.border[3], 0.8)
+                    btn.label:SetTextColor(0.6, 0.6, 0.6)
+                end
+            end
+
+            local selMode = r.selectedMode or mode
+            StyleButton(r.freeBtn, selMode == "FREE", {0.10, 0.28, 0.18, 1}, {0.20, 0.80, 0.40, 1}, {0.3, 0.9, 0.5})
+            StyleButton(r.pctBtn, selMode == "PERCENT", {0.32, 0.26, 0.10, 1}, {0.90, 0.70, 0.20, 1}, {1, 0.85, 0.2})
+            StyleButton(r.lockBtn, selMode == "LOCKED", {0.32, 0.12, 0.12, 1}, {0.90, 0.30, 0.30, 1}, {1, 0.4, 0.4})
+
+            if not isOff then
+                r.saveBtn:Disable()
+                r.saveBtn:SetBackdropColor(THEME.btnDisabled[1], THEME.btnDisabled[2], THEME.btnDisabled[3], 0.4)
+                r.saveBtn:SetBackdropBorderColor(THEME.border[1], THEME.border[2], THEME.border[3], 0.4)
+                r.saveBtn.label:SetTextColor(0.4, 0.4, 0.4)
+            else
+                r.saveBtn:Enable()
+                r.saveBtn:SetBackdropColor(THEME.accent[1], THEME.accent[2], THEME.accent[3], 1)
+                r.saveBtn:SetBackdropBorderColor(THEME.accent[1], THEME.accent[2], THEME.accent[3], 1)
+                r.saveBtn.label:SetTextColor(1, 1, 1)
+            end
+
+            if isOff and selMode == "PERCENT" then
+                r.pctBox:Enable()
+                r.pctBox:SetBackdropColor(0.05, 0.06, 0.08, 1)
+                r.pctBox:SetBackdropBorderColor(THEME.accent[1], THEME.accent[2], THEME.accent[3], 1)
+                r.pctBox:SetAlpha(1.0)
+            else
+                r.pctBox:ClearFocus()
+                r.pctBox:Disable()
+                r.pctBox:SetBackdropColor(0.05, 0.06, 0.08, 0.4)
+                r.pctBox:SetBackdropBorderColor(THEME.border[1], THEME.border[2], THEME.border[3], 0.3)
+                r.pctBox:SetAlpha(0.4)
+            end
+
+            if isOff then
+                r.freeBtn:SetScript("OnClick", function()
+                    r.selectedMode = "FREE"
+                    UI:RefreshSettings()
+                end)
+                r.pctBtn:SetScript("OnClick", function()
+                    r.selectedMode = "PERCENT"
+                    UI:RefreshSettings()
+                end)
+                r.lockBtn:SetScript("OnClick", function()
+                    r.selectedMode = "LOCKED"
+                    UI:RefreshSettings()
+                end)
+                r.saveBtn:SetScript("OnClick", function()
+                    local p = tonumber(r.pctBox:GetText()) or 50
+                    if p <= 0 then p = 50 r.pctBox:SetText("50") end
+                    r.userEditedPct = false
+                    VM:SetTabRule(i, r.selectedMode, p)
+                end)
+                r.pctBox:SetScript("OnTextChanged", function(selfBox)
+                    r.userEditedPct = true
+                end)
+                r.pctBox:SetScript("OnEnterPressed", function(selfBox)
+                    selfBox:ClearFocus()
+                    local p = tonumber(selfBox:GetText()) or 50
+                    if p <= 0 then p = 50 selfBox:SetText("50") end
+                    r.userEditedPct = false
+                    VM:SetTabRule(i, r.selectedMode, p)
+                end)
+            else
+                r.freeBtn:SetScript("OnClick", nil)
+                r.pctBtn:SetScript("OnClick", nil)
+                r.lockBtn:SetScript("OnClick", nil)
+                r.saveBtn:SetScript("OnClick", nil)
+                r.pctBox:SetScript("OnTextChanged", nil)
+                r.pctBox:SetScript("OnEnterPressed", nil)
+            end
         end
     end
 end
@@ -2496,7 +3110,11 @@ function UI:SelectTab(tabIndex)
     if rosterPickerFrame then rosterPickerFrame:Hide() end
     if bankValDropdownFrame then bankValDropdownFrame:Hide() end
     if exportModalFrame then exportModalFrame:Hide() end
+    if assignModalFrame then assignModalFrame:Hide() end
     if rankingPeriodDropdownFrame then rankingPeriodDropdownFrame:Hide() end
+    if tabIndex == 1 then
+        vaultCategoryExpanded = {}
+    end
     self:RefreshAll()
 end
 UI.ShowTab = UI.SelectTab

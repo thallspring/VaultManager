@@ -16,7 +16,10 @@ Scanner.scanState = "READY" -- "READY" | "SCANNING" | "COMPLETE" | "STALE"
 local GB_API = {
     GetNumTabs = function() 
         local n = GetNumGuildBankTabs and GetNumGuildBankTabs() or 0 
-        return (n > 0) and n or (MAX_GUILDBANK_TABS or 8)
+        if n > 0 then return n end
+        local inv = VM.db and VM.db.inventory
+        if inv and inv.numTabs and inv.numTabs > 0 then return inv.numTabs end
+        return 1
     end,
     GetTabInfo = function(tab)
         if GetGuildBankTabInfo then return GetGuildBankTabInfo(tab) end
@@ -209,62 +212,124 @@ function Scanner:ScanBank()
     local numTabs = GB_API.GetNumTabs()
     if numTabs == 0 then return 0 end
 
+    local maxTabs = math.max(numTabs, 6)
     local newTabs = {}
     local totalItemsScanned = 0
     local uniqueItemsCount = 0
     local oldTabs = VM.db.inventory and VM.db.inventory.tabs or {}
 
-    for tab = 1, numTabs do
-        if SetCurrentGuildBankTab then SetCurrentGuildBankTab(tab) end
-        if QueryGuildBankTab then QueryGuildBankTab(tab) end
-
+    for tab = 1, maxTabs do
+        local isPurchased = (tab <= numTabs)
         local name, icon, isViewable = GB_API.GetTabInfo(tab)
-        if isViewable == false and oldTabs[tab] then
-            newTabs[tab] = oldTabs[tab]
-        else
+        if not isPurchased then
             newTabs[tab] = {
-                name = name or ("Tab " .. tab),
-                icon = icon or "Interface\\Icons\\INV_Misc_Bag_08",
+                name = "Not purchased",
+                icon = "Interface\\Icons\\INV_Misc_QuestionMark",
+                isPurchased = false,
                 items = {}
             }
+        else
+            if SetCurrentGuildBankTab then SetCurrentGuildBankTab(tab) end
+            if QueryGuildBankTab then QueryGuildBankTab(tab) end
 
-            for slot = 1, MAX_SLOTS_PER_TAB do
-                local texture, count = GB_API.GetItemInfo(tab, slot)
-                local link = GB_API.GetItemLink(tab, slot)
+            if isViewable == false and oldTabs[tab] then
+                newTabs[tab] = oldTabs[tab]
+                newTabs[tab].isPurchased = true
+            else
+                newTabs[tab] = {
+                    name = name or ("Tab " .. tab),
+                    icon = icon or "Interface\\Icons\\INV_Misc_Bag_08",
+                    isPurchased = true,
+                    items = {}
+                }
 
-                count = tonumber(count) or 1
-                if link and link ~= "" and count > 0 then
-                    local itemID = tonumber(link:match("item:(%d+)"))
-                    local itemName = link:match("%[(.-)%]") or link
-                    itemName = itemName:gsub("^%[", ""):gsub("%]$", "")
+                for slot = 1, MAX_SLOTS_PER_TAB do
+                    local texture, count = GB_API.GetItemInfo(tab, slot)
+                    local link = GB_API.GetItemLink(tab, slot)
 
-                    if not itemID and GetItemInfo then
-                        local _, foundLink, _, _, _, _, _, _, _, _, _, foundItemID = GetItemInfo(itemName)
-                        if foundItemID then itemID = foundItemID
-                        elseif foundLink then itemID = tonumber(foundLink:match("item:(%d+)")) end
+                    count = tonumber(count) or 1
+                    if link and link ~= "" and count > 0 then
+                        local itemID = tonumber(link:match("item:(%d+)"))
+                        local itemName = link:match("%[(.-)%]") or link
+                        itemName = itemName:gsub("^%[", ""):gsub("%]$", "")
+
+                        if not itemID and GetItemInfo then
+                            local _, foundLink, _, _, _, _, _, _, _, _, _, foundItemID = GetItemInfo(itemName)
+                            if foundItemID then itemID = foundItemID
+                            elseif foundLink then itemID = tonumber(foundLink:match("item:(%d+)")) end
+                        end
+
+                        itemID = itemID or 0
+                        local key = (itemID ~= 0) and itemID or itemName
+
+                        local scannedType, scannedEquip
+                        local isInfoChecked = false
+                        if GetItemInfo then
+                            local numID = tonumber(itemID)
+                            if numID and numID <= 0 then numID = nil end
+
+                            local lookup
+                            if link and type(link) == "string" and link:find("|Hitem:", 1, true) then
+                                lookup = link
+                            elseif numID then
+                                lookup = numID
+                            end
+
+                            if lookup then
+                                local r1, r2, r3, r4, r5, r6, r7, r8, r9, r10 = GetItemInfo(lookup)
+                                if not r1 and numID and lookup ~= numID then
+                                    r1, r2, r3, r4, r5, r6, r7, r8, r9, r10 = GetItemInfo(numID)
+                                end
+                                if r1 then
+                                    isInfoChecked = true
+                                    local rets = { r1, r2, r3, r4, r5, r6, r7, r8, r9, r10 }
+                                    for idx = 1, 10 do
+                                        local val = rets[idx]
+                                        if type(val) == "string" then
+                                            if not scannedType and (val == "Weapon" or val == "Armor" or val == "Consumable" or
+                                                                    val == "Trade Goods" or val == "Reagent" or val == "Recipe") then
+                                                scannedType = val
+                                            end
+                                            if not scannedEquip and val:find("^INVTYPE_") then
+                                                scannedEquip = val
+                                            end
+                                        end
+                                    end
+                                end
+                            end
+                        end
+
+                        texture = texture or "Interface\\Icons\\INV_Misc_QuestionMark"
+                        local ahVal = VM:GetItemAHPrice(itemID, link) or 0
+                        if not newTabs[tab].items[key] then
+                            newTabs[tab].items[key] = {
+                                itemID = itemID,
+                                link = link,
+                                itemLink = link,
+                                name = itemName,
+                                icon = texture,
+                                ahPrice = ahVal,
+                                count = 0,
+                                itemType = scannedType,
+                                equipSlot = scannedEquip,
+                                infoChecked = isInfoChecked
+                            }
+                            uniqueItemsCount = uniqueItemsCount + 1
+                        else
+                            if ahVal > 0 then newTabs[tab].items[key].ahPrice = ahVal end
+                            if scannedType then
+                                newTabs[tab].items[key].itemType = scannedType
+                            end
+                            if scannedEquip then
+                                newTabs[tab].items[key].equipSlot = scannedEquip
+                            end
+                            if isInfoChecked then
+                                newTabs[tab].items[key].infoChecked = true
+                            end
+                        end
+                        newTabs[tab].items[key].count = newTabs[tab].items[key].count + count
+                        totalItemsScanned = totalItemsScanned + count
                     end
-
-                    itemID = itemID or 0
-                    local key = (itemID ~= 0) and itemID or itemName
-
-                    texture = texture or "Interface\\Icons\\INV_Misc_QuestionMark"
-                    local ahVal = VM:GetItemAHPrice(itemID, link) or 0
-                    if not newTabs[tab].items[key] then
-                        newTabs[tab].items[key] = {
-                            itemID = itemID,
-                            link = link,
-                            itemLink = link,
-                            name = itemName,
-                            icon = texture,
-                            ahPrice = ahVal,
-                            count = 0
-                        }
-                        uniqueItemsCount = uniqueItemsCount + 1
-                    else
-                        if ahVal > 0 then newTabs[tab].items[key].ahPrice = ahVal end
-                    end
-                    newTabs[tab].items[key].count = newTabs[tab].items[key].count + count
-                    totalItemsScanned = totalItemsScanned + count
                 end
             end
         end
@@ -303,6 +368,7 @@ function Scanner:ScanBank()
         scannedBy = VM:GetPlayerName(),
         lastSyncedFrom = nil,
         gold = bankMoney,
+        numTabs = numTabs,
         tabs = newTabs
     }
 
@@ -319,6 +385,8 @@ function Scanner:ScanLogs()
     for tab = 1, numTabs do
         if QueryGuildBankLog then QueryGuildBankLog(tab) end
         local numTx = GB_API.GetNumTransactions(tab)
+        local rule = VM:GetTabRule(tab)
+        local isFFA = (rule.mode == "FREE")
         
         local snapshotCounts = {}
         local txDataList = {}
@@ -330,24 +398,30 @@ function Scanner:ScanLogs()
                 itemLink = temp
             end
             local typeStr = tostring(txType or ""):lower()
-            if typeStr:find("deposit") or typeStr == "1" then
+            local isDeposit = (typeStr:find("deposit") or typeStr == "1")
+            local isWithdraw = (isFFA and (typeStr:find("withdraw") or typeStr == "2" or typeStr:find("take")))
+
+            if isDeposit or isWithdraw then
                 local cleanLink = itemLink or "[Unknown Item]"
                 local itemID = tonumber(cleanLink and cleanLink:match("item:(%d+)")) or 0
                 local normName = (name and name ~= "") and VM:NormalizeName(name) or "UNATTRIBUTED"
                 count = tonumber(count) or 1
                 local computedTimestamp = time() - ((numTx - i) * 1800)
                 local itemKey = (itemID > 0) and tostring(itemID) or cleanLink
-                local tupleKey = string.format("t%d:IN:%s:%s:%d", tab, normName, itemKey, count)
+                local txDir = isDeposit and "IN" or "OUT"
+                local tupleKey = string.format("t%d:%s:%s:%s:%d", tab, txDir, normName, itemKey, count)
                 
                 snapshotCounts[tupleKey] = (snapshotCounts[tupleKey] or 0) + 1
                 table.insert(txDataList, {
                     tab = tab,
+                    txDir = txDir,
                     normName = normName,
                     itemID = itemID,
                     cleanLink = cleanLink,
                     count = count,
                     computedTimestamp = computedTimestamp,
-                    tupleKey = tupleKey
+                    tupleKey = tupleKey,
+                    isFFA = isFFA
                 })
             end
         end
@@ -355,7 +429,7 @@ function Scanner:ScanLogs()
         for _, data in ipairs(txDataList) do
             local existingCount = 0
             for _, existingTx in pairs(VM.db.ledger) do
-                if not existingTx.deleted and existingTx.type == "IN" and (existingTx.tab or 1) == data.tab and existingTx.player == data.normName and existingTx.count == data.count then
+                if not existingTx.deleted and existingTx.type == data.txDir and (existingTx.tab or 1) == data.tab and existingTx.player == data.normName and existingTx.count == data.count and (existingTx.isFFA == data.isFFA) then
                     local exItemKey = (existingTx.itemID and existingTx.itemID > 0) and tostring(existingTx.itemID) or tostring(existingTx.itemLink or existingTx.itemName or "")
                     local dataItemKey = (data.itemID > 0) and tostring(data.itemID) or data.cleanLink
                     if exItemKey == dataItemKey then
@@ -366,16 +440,46 @@ function Scanner:ScanLogs()
                 end
             end
 
-            local sig = string.format("v131_t%d:%s:%s:%d:%d", data.tab, data.normName, (data.itemID > 0) and tostring(data.itemID) or data.cleanLink, data.count, math.floor(data.computedTimestamp / 172800))
+            local sig = string.format("v141_t%d:%s:%s:%s:%d:%d", data.tab, data.txDir, data.normName, (data.itemID > 0) and tostring(data.itemID) or data.cleanLink, data.count, math.floor(data.computedTimestamp / 172800))
             if not VM.db.processedBankLogs[sig] then
                 local totalAllowed = snapshotCounts[data.tupleKey] or 1
                 if existingCount < totalAllowed then
                     VM.db.processedBankLogs[sig] = true
-                    local activeRet = VM.db.activeReturn
-                    if activeRet and (data.itemID == activeRet.itemID or (data.itemID == 0 and data.cleanLink == activeRet.itemLink)) then
-                        VM.Ledger:RecordReturnDeposit(data.normName, data.itemID, data.cleanLink, data.count, activeRet.fulfillmentId)
+                    if data.txDir == "IN" then
+                        local activeRet = VM.db.activeReturn
+                        if activeRet and (data.itemID == activeRet.itemID or (data.itemID == 0 and data.cleanLink == activeRet.itemLink)) then
+                            VM.Ledger:RecordReturnDeposit(data.normName, data.itemID, data.cleanLink, data.count, activeRet.fulfillmentId)
+                        else
+                            local tx = VM.Ledger:RecordDeposit(data.normName, data.itemID, data.cleanLink, data.count, "BANK_LOG")
+                            if tx then
+                                tx.isFFA = data.isFFA
+                                tx.tab = data.tab
+                            end
+                        end
                     else
-                        VM.Ledger:RecordDeposit(data.normName, data.itemID, data.cleanLink, data.count, "BANK_LOG")
+                        local ahPrice = VM:GetItemAHPrice(data.itemID, data.cleanLink) or 0
+                        local itemName = data.cleanLink:gsub("^%[", ""):gsub("%]$", "")
+                        local tx = {
+                            id = string.format("OUT_FFA_%d_%d", time(), math.random(1000, 9999)),
+                            type = "OUT",
+                            player = data.normName,
+                            itemID = data.itemID,
+                            itemLink = data.cleanLink,
+                            itemName = itemName,
+                            count = data.count,
+                            unitPriceAtTime = ahPrice,
+                            chargedUnitPrice = 0,
+                            timestamp = data.computedTimestamp,
+                            updatedAt = time(),
+                            officer = VM:GetPlayerName(),
+                            source = "FFA_SCAN",
+                            isFFA = true,
+                            tab = data.tab,
+                            isManual = false,
+                            deleted = false
+                        }
+                        VM.db.ledger[tx.id] = tx
+                        VM.Comms:BroadcastTransaction(tx)
                     end
                     addedCount = addedCount + 1
                     existingCount = existingCount + 1

@@ -10,6 +10,7 @@ ignore:
   - .gitattributes
   - .github
   - .gitignore
+  - CHANGELOG.md
   - GEMINI.md
   - README.md
   - "*.bak"

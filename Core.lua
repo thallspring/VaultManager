@@ -40,7 +40,7 @@ function VM:GetAddonVersion()
     local getMeta = (C_AddOns and C_AddOns.GetAddOnMetadata) or GetAddOnMetadata
     local ver = getMeta and getMeta("VaultManager", "Version")
     if not ver or ver == "" then
-        ver = "1.4.0"
+        ver = "1.4.2"
     end
     ver = tostring(ver):gsub("^[vV]", ""):gsub("^%s*(.-)%s*$", "%1")
     return ver
@@ -680,6 +680,30 @@ function VM:SetTabRule(tabIndex, mode, percent)
     if self.UI then self.UI:RefreshAll() end
 end
 
+function VM:IsTabPurchased(tabIdx)
+    tabIdx = tonumber(tabIdx)
+    if not tabIdx or tabIdx < 1 then return false end
+    if GetNumGuildBankTabs then
+        local liveTabs = GetNumGuildBankTabs()
+        if liveTabs and liveTabs > 0 then
+            return tabIdx <= liveTabs
+        end
+    end
+    local inv = self.db and self.db.inventory
+    if inv then
+        if inv.numTabs and inv.numTabs > 0 then
+            return tabIdx <= inv.numTabs
+        end
+        if inv.tabs and inv.tabs[tabIdx] then
+            local t = inv.tabs[tabIdx]
+            if t.isPurchased ~= nil then return t.isPurchased end
+            if t.name == "Not purchased" then return false end
+            return true
+        end
+    end
+    return tabIdx == 1
+end
+
 function VM:ValidateTabRules()
     if not self.db or not self.db.tabRules then return end
     if not IsInGuild() or GetNumGuildMembers() == 0 then return end
@@ -689,66 +713,72 @@ function VM:ValidateTabRules()
 
     for i, rule in pairs(self.db.tabRules) do
         if rule then
-            local updatedBy = tostring(rule.updatedBy or "")
-            local cleanBy = updatedBy:match("^[^-]+") or updatedBy
-            cleanBy = self:NormalizeName(cleanBy)
+            if not self:IsTabPurchased(i) then
+                if rule.updatedBy == "System(TamperReset)" then
+                    self.db.tabRules[i] = nil
+                end
+            else
+                local updatedBy = tostring(rule.updatedBy or "")
+                local cleanBy = updatedBy:match("^[^-]+") or updatedBy
+                cleanBy = self:NormalizeName(cleanBy)
 
-            if cleanBy ~= "" and cleanBy ~= "System(TamperReset)" and cleanBy ~= "Default" then
-                local expectedSig = self:ComputeRuleSignature(guildName, i, rule)
-                local hasInvalidSig = not rule.sig or rule.sig == "" or rule.sig ~= expectedSig
+                if cleanBy ~= "" and cleanBy ~= "System(TamperReset)" and cleanBy ~= "Default" then
+                    local expectedSig = self:ComputeRuleSignature(guildName, i, rule)
+                    local hasInvalidSig = not rule.sig or rule.sig == "" or rule.sig ~= expectedSig
 
-                local foundInRoster = false
-                local isNonOfficer = false
-                local rankIndex = self.db.rosterCache[cleanBy]
+                    local foundInRoster = false
+                    local isNonOfficer = false
+                    local rankIndex = self.db.rosterCache[cleanBy]
 
-                if rankIndex == nil then
-                    local total = GetNumGuildMembers() or 0
-                    for j = 1, total do
-                        local rName, _, rIndex = GetGuildRosterInfo(j)
-                        if rName then
-                            local rClean = rName:match("^[^-]+") or rName
-                            if self:NormalizeName(rClean) == cleanBy then
-                                rankIndex = rIndex
-                                foundInRoster = true
-                                self.db.rosterCache[cleanBy] = rIndex or 99
-                                break
+                    if rankIndex == nil then
+                        local total = GetNumGuildMembers() or 0
+                        for j = 1, total do
+                            local rName, _, rIndex = GetGuildRosterInfo(j)
+                            if rName then
+                                local rClean = rName:match("^[^-]+") or rName
+                                if self:NormalizeName(rClean) == cleanBy then
+                                    rankIndex = rIndex
+                                    foundInRoster = true
+                                    self.db.rosterCache[cleanBy] = rIndex or 99
+                                    break
+                                end
                             end
                         end
-                    end
-                else
-                    foundInRoster = true
-                end
-
-                if foundInRoster and rankIndex ~= nil then
-                    if rankIndex > 1 and rankIndex ~= 0 then
-                        isNonOfficer = true
-                    end
-                end
-
-                local isTampered = false
-                if isNonOfficer then
-                    isTampered = true
-                elseif hasInvalidSig then
-                    if isLocalOfficer then
-                        rule.sig = expectedSig
-                        rule.tampered = nil
                     else
-                        isTampered = true
+                        foundInRoster = true
                     end
-                end
 
-                if isTampered then
-                    local resetRule = {
-                        mode = "LOCKED",
-                        percent = 50,
-                        updatedAt = time(),
-                        updatedBy = "System(TamperReset)",
-                        tampered = true
-                    }
-                    resetRule.sig = self:ComputeRuleSignature(guildName, i, resetRule)
-                    self.db.tabRules[i] = resetRule
-                else
-                    rule.tampered = (rule.updatedBy == "System(TamperReset)") and true or nil
+                    if foundInRoster and rankIndex ~= nil then
+                        if rankIndex > 1 and rankIndex ~= 0 then
+                            isNonOfficer = true
+                        end
+                    end
+
+                    local isTampered = false
+                    if isNonOfficer then
+                        isTampered = true
+                    elseif hasInvalidSig then
+                        if isLocalOfficer then
+                            rule.sig = expectedSig
+                            rule.tampered = nil
+                        else
+                            isTampered = true
+                        end
+                    end
+
+                    if isTampered then
+                        local resetRule = {
+                            mode = "LOCKED",
+                            percent = 50,
+                            updatedAt = time(),
+                            updatedBy = "System(TamperReset)",
+                            tampered = true
+                        }
+                        resetRule.sig = self:ComputeRuleSignature(guildName, i, resetRule)
+                        self.db.tabRules[i] = resetRule
+                    else
+                        rule.tampered = (rule.updatedBy == "System(TamperReset)") and true or nil
+                    end
                 end
             end
         end

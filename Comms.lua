@@ -218,6 +218,7 @@ function Comms:OnMessageReceived(msg, sender)
         local scanTime = tonumber(parts[2]) or 0
         local scannedBy = UnescapeStr(parts[3])
         local gold = tonumber(parts[4]) or 0
+        local numTabs = tonumber(parts[5]) or 0
         if scanTime == 0 then return end
 
         local nowServer = (GetServerTime and GetServerTime()) or time()
@@ -231,10 +232,14 @@ function Comms:OnMessageReceived(msg, sender)
             VM.db.inventory.scannedBy = scannedBy
             VM.db.inventory.lastSyncedFrom = sender
             VM.db.inventory.gold = gold
+            if numTabs > 0 then VM.db.inventory.numTabs = numTabs end
             VM.db.inventory.tabs = {}
         elseif scanTime == (VM.db.inventory.lastScan or 0) then
             VM.db.inventory.lastSyncedFrom = sender
             if gold > 0 then VM.db.inventory.gold = gold end
+            if numTabs > 0 and (not VM.db.inventory.numTabs or VM.db.inventory.numTabs == 0) then
+                VM.db.inventory.numTabs = numTabs
+            end
         end
         if VM.BankScanner then
             VM.BankScanner.scanState = "COMPLETE"
@@ -246,11 +251,15 @@ function Comms:OnMessageReceived(msg, sender)
         local tabIdx = tonumber(parts[3])
         local tabName = UnescapeStr(parts[4])
         local tabIcon = UnescapeStr(parts[5])
+        local isPurchasedNum = tonumber(parts[6])
+        local isPurchased = (isPurchasedNum == nil) or (isPurchasedNum == 1)
+        if tabName == "Not purchased" then isPurchased = false end
         if VM.db.inventory.lastScan == 0 then return end
         if scanTime >= (VM.db.inventory.lastScan or 0) and tabIdx then
             VM.db.inventory.tabs[tabIdx] = VM.db.inventory.tabs[tabIdx] or { items = {} }
             VM.db.inventory.tabs[tabIdx].name = tabName
             VM.db.inventory.tabs[tabIdx].icon = tabIcon
+            VM.db.inventory.tabs[tabIdx].isPurchased = isPurchased
         end
 
     elseif cmd == "INV_ITEM" then
@@ -262,17 +271,43 @@ function Comms:OnMessageReceived(msg, sender)
         local itemLink = UnescapeStr(parts[7])
         local icon = UnescapeStr(parts[8])
         local ahPrice = tonumber(parts[9]) or 0
+        local itemType = (#parts >= 10) and UnescapeStr(parts[10]) or ""
+        local equipSlot = (#parts >= 11) and UnescapeStr(parts[11]) or ""
         if VM.db.inventory.lastScan == 0 then return end
         if scanTime >= (VM.db.inventory.lastScan or 0) and tabIdx and (itemID or itemName) then
             local key = (itemID and itemID ~= 0) and itemID or itemName
             VM.db.inventory.tabs[tabIdx] = VM.db.inventory.tabs[tabIdx] or { name = "Tab " .. tabIdx, items = {} }
+            local syncItemType = (itemType ~= "") and itemType or nil
+            local syncEquipSlot = (equipSlot ~= "") and equipSlot or nil
+            if (not syncItemType or not syncEquipSlot) and GetItemInfo then
+                local lookup = (itemLink ~= "") and itemLink or (itemID and itemID ~= 0 and itemID)
+                if lookup then
+                    local r1, r2, r3, r4, r5, r6, r7, r8, r9 = GetItemInfo(lookup)
+                    if not syncItemType then
+                        if type(r5) == "string" and not tonumber(r5) then
+                            syncItemType = r5
+                        elseif type(r6) == "string" and not tonumber(r6) then
+                            syncItemType = r6
+                        end
+                    end
+                    if not syncEquipSlot then
+                        if type(r8) == "string" and r8:find("^INVTYPE_") then
+                            syncEquipSlot = r8
+                        elseif type(r9) == "string" and r9:find("^INVTYPE_") then
+                            syncEquipSlot = r9
+                        end
+                    end
+                end
+            end
             VM.db.inventory.tabs[tabIdx].items[key] = {
                 itemID = itemID or 0,
                 count = count,
                 name = itemName,
                 link = itemLink,
                 icon = icon,
-                ahPrice = ahPrice
+                ahPrice = ahPrice,
+                itemType = syncItemType,
+                equipSlot = syncEquipSlot
             }
             if VM.UI then VM.UI:RefreshAll() end
         end
@@ -404,14 +439,17 @@ function Comms:BroadcastInventory()
     if not inv or not inv.lastScan or inv.lastScan == 0 then return end
     local scanBy = inv.lastScanBy or inv.scannedBy or UnitName("player")
     local gold = tonumber(inv.gold) or 0
-    self:SendRaw(string.format("INV_META|%d|%s|%d", inv.lastScan, EscapeStr(scanBy), gold))
+    local numTabs = tonumber(inv.numTabs) or 1
+    self:SendRaw(string.format("INV_META|%d|%s|%d|%d", inv.lastScan, EscapeStr(scanBy), gold, numTabs))
     for tabIdx, tabData in pairs(inv.tabs) do
-        self:SendRaw(string.format("INV_TAB|%d|%d|%s|%s",
-            inv.lastScan, tabIdx, EscapeStr(tabData.name), EscapeStr(tabData.icon)))
+        local isPurchased = (tabData.isPurchased ~= false) and 1 or 0
+        self:SendRaw(string.format("INV_TAB|%d|%d|%s|%s|%d",
+            inv.lastScan, tabIdx, EscapeStr(tabData.name), EscapeStr(tabData.icon), isPurchased))
         for itemID, item in pairs(tabData.items) do
-            self:SendRaw(string.format("INV_ITEM|%d|%d|%d|%d|%s|%s|%s|%d",
+            self:SendRaw(string.format("INV_ITEM|%d|%d|%d|%d|%s|%s|%s|%d|%s|%s",
                 inv.lastScan, tabIdx, item.itemID or 0, item.count,
-                EscapeStr(item.name), EscapeStr(item.link), EscapeStr(item.icon), item.ahPrice or 0))
+                EscapeStr(item.name), EscapeStr(item.link), EscapeStr(item.icon), item.ahPrice or 0,
+                EscapeStr(item.itemType or ""), EscapeStr(item.equipSlot or "")))
         end
     end
 end

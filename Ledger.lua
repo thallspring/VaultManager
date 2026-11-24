@@ -28,6 +28,10 @@ function Ledger:RecordFulfillment(req, officerName)
         count = req.count,
         unitPriceAtTime = livePrice,
         chargedUnitPrice = unitCharged,
+        priceMode = req.priceMode,
+        pricePercent = req.pricePercent,
+        isFFA = (req.priceMode == "FREE"),
+        tab = req.tab,
         timestamp = now,
         updatedAt = now,
         officer = VM:NormalizeName(officerName),
@@ -216,6 +220,14 @@ function Ledger:GetTransactionValue(tx, useHistorical, priceMode)
     if tx.itemID == 0 or tx.itemLink == "GOLD" then
         return (tx.unitPriceAtTime or 0) * (tx.count or 1)
     end
+    if tx.type == "OUT" then
+        if tx.chargedUnitPrice ~= nil and tx.chargedUnitPrice >= 0 then
+            return tx.chargedUnitPrice * (tx.count or 1)
+        elseif tx.priceMode == "PERCENT" then
+            local base = (tx.unitPriceAtTime and tx.unitPriceAtTime > 0) and tx.unitPriceAtTime or (VM:GetEffectiveLivePrice(tx.itemID, tx.itemLink, tx.unitPriceAtTime) or 0)
+            return math.floor(base * ((tx.pricePercent or 50) / 100)) * (tx.count or 1)
+        end
+    end
 
     local mode = priceMode or (VM.db and VM.db.uiPrefs and VM.db.uiPrefs.rankingPriceMode) or "live"
     local unitVal = 0
@@ -248,9 +260,10 @@ end
 
 function Ledger:GetAggregatedByMain(useHistorical, periodFilter, priceMode)
     local groups = {}
+    local includeFFA = (VM.db and VM.db.uiPrefs and VM.db.uiPrefs.includeFFA ~= false)
 
     for _, tx in pairs(VM.db.ledger) do
-        if not tx.deleted and MatchesPeriod(tx.timestamp, periodFilter) then
+        if not tx.deleted and (includeFFA or not tx.isFFA) and MatchesPeriod(tx.timestamp, periodFilter) then
             local key = (tx.player == "UNATTRIBUTED") and "UNATTRIBUTED" or VM:GetMainFor(tx.player)
             if not groups[key] then
                 groups[key] = {

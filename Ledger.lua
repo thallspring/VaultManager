@@ -49,11 +49,12 @@ function Ledger:RecordFulfillment(req, officerName)
     return tx
 end
 
-function Ledger:RecordReturnDeposit(playerName, itemID, itemLink, count, fulfillmentId)
+function Ledger:RecordReturnDeposit(playerName, itemID, itemLink, count, fulfillmentId, customTimestamp)
     local ahPrice = VM:GetItemAHPrice(itemID, itemLink) or 0
     local cleanLink = itemLink or "item:0"
     local itemName = cleanLink:gsub("^%[", ""):gsub("%]$", "")
     local now = time()
+    local txTimestamp = customTimestamp or now
     local tx = {
         id = GenerateTxID("IN"),
         type = "IN",
@@ -64,7 +65,7 @@ function Ledger:RecordReturnDeposit(playerName, itemID, itemLink, count, fulfill
         count = count or 1,
         unitPriceAtTime = ahPrice,
         chargedUnitPrice = 0,
-        timestamp = now,
+        timestamp = txTimestamp,
         updatedAt = now,
         officer = VM:GetPlayerName(),
         source = "RETURN",
@@ -88,7 +89,7 @@ function Ledger:RecordReturnDeposit(playerName, itemID, itemLink, count, fulfill
     return tx
 end
 
-function Ledger:RecordDeposit(playerName, itemID, itemLink, count, source)
+function Ledger:RecordDeposit(playerName, itemID, itemLink, count, source, customTimestamp)
     local ahPrice = VM:GetItemAHPrice(itemID, itemLink) or 0
     local cleanLink = itemLink or "item:0"
     local itemName = "Item " .. tostring(itemID or 0)
@@ -100,6 +101,7 @@ function Ledger:RecordDeposit(playerName, itemID, itemLink, count, source)
     end
 
     local now = time()
+    local txTimestamp = customTimestamp or now
     local isMan = (source == "MANUAL")
     local tx = {
         id = GenerateTxID("IN"),
@@ -111,7 +113,7 @@ function Ledger:RecordDeposit(playerName, itemID, itemLink, count, source)
         count = count or 1,
         unitPriceAtTime = ahPrice,
         chargedUnitPrice = 0,
-        timestamp = now,
+        timestamp = txTimestamp,
         updatedAt = now,
         officer = VM:GetPlayerName(),
         source = source or "BANK_LOG",
@@ -124,8 +126,9 @@ function Ledger:RecordDeposit(playerName, itemID, itemLink, count, source)
     return tx
 end
 
-function Ledger:RecordGoldDeposit(playerName, copperAmount, source, rawSender, attributedTo)
+function Ledger:RecordGoldDeposit(playerName, copperAmount, source, rawSender, attributedTo, customTimestamp)
     local now = time()
+    local txTimestamp = customTimestamp or now
     local isMan = (source == "MANUAL_GOLD" or source == "MANUAL")
     local finalPlayer = attributedTo or playerName
     local tx = {
@@ -140,7 +143,7 @@ function Ledger:RecordGoldDeposit(playerName, copperAmount, source, rawSender, a
         count = 1,
         unitPriceAtTime = copperAmount or 0,
         chargedUnitPrice = 0,
-        timestamp = now,
+        timestamp = txTimestamp,
         updatedAt = now,
         officer = VM:GetPlayerName(),
         source = source or "BANK_MONEY_LOG",
@@ -154,8 +157,9 @@ function Ledger:RecordGoldDeposit(playerName, copperAmount, source, rawSender, a
     return tx
 end
 
-function Ledger:RecordGoldWithdrawal(playerName, copperAmount, source)
+function Ledger:RecordGoldWithdrawal(playerName, copperAmount, source, customTimestamp)
     local now = time()
+    local txTimestamp = customTimestamp or now
     local tx = {
         id = GenerateTxID("GOLD_OUT"),
         type = "OUT",
@@ -166,7 +170,7 @@ function Ledger:RecordGoldWithdrawal(playerName, copperAmount, source)
         count = 1,
         unitPriceAtTime = copperAmount or 0,
         chargedUnitPrice = 0,
-        timestamp = now,
+        timestamp = txTimestamp,
         updatedAt = now,
         officer = VM:GetPlayerName(),
         source = source or "BANK_MONEY_LOG",
@@ -455,4 +459,72 @@ function Ledger:CompactMonthlyHistory()
     if compactedCount > 0 then
         VM:LogDebug(string.format("Compacted %d monthly ledger summaries.", compactedCount))
     end
+end
+
+function Ledger:CleanupDuplicates()
+    if not VM.db or not VM.db.ledger then return 0 end
+
+    local groups = {}
+    for id, tx in pairs(VM.db.ledger) do
+        if tx and tx.timestamp and not tx.deleted then
+            local isGold = (tx.itemID == 0 or tx.itemLink == "GOLD" or tx.source == "BANK_MONEY_LOG" or tx.source == "MANUAL_GOLD" or (tx.itemName and (tx.itemName:find("Gold Deposit") or tx.itemName:find("Gold Withdrawal"))))
+            local action = VM:NormalizeAction(tx.type)
+            local actor = VM:NormalizeActor(tx.rawSender or tx.player)
+            local groupKey
+            if isGold then
+                local copper = (tx.unitPriceAtTime or 0) * (tx.count or 1)
+                groupKey = string.format("GOLD:%s:%s:%d", action, actor, copper)
+            else
+                local itemKey = VM:NormalizeItemKey(tx.itemID, tx.itemLink, tx.itemName)
+                local count = tonumber(tx.count or 1)
+                groupKey = string.format("ITEM:%s:%s:%s:%d", action, actor, itemKey, count)
+            end
+            groups[groupKey] = groups[groupKey] or {}
+            table.insert(groups[groupKey], { id = id, tx = tx })
+        end
+    end
+
+    local WINDOW_48H = 172800 -- 48 hours rolling window
+    local removedCount = 0
+
+    for _, entries in pairs(groups) do
+        if #entries > 1 then
+            -- Sort ascending by timestamp (earliest first), using id for tie break
+            table.sort(entries, function(a, b)
+                local tsA = a.tx.timestamp or 0
+                local tsB = b.tx.timestamp or 0
+                if tsA ~= tsB then
+                    return tsA < tsB
+                end
+                return tostring(a.id) < tostring(b.id)
+            end)
+
+            local kept = {}
+            for _, entry in ipairs(entries) do
+                local isDup = false
+                for _, keptTx in ipairs(kept) do
+                    local timeDiff = math.abs((entry.tx.timestamp or 0) - (keptTx.timestamp or 0))
+                    if timeDiff <= WINDOW_48H then
+                        isDup = true
+                        break
+                    end
+                end
+
+                if isDup then
+                    VM.db.ledger[entry.id] = nil
+                    removedCount = removedCount + 1
+                else
+                    table.insert(kept, entry.tx)
+                end
+            end
+        end
+    end
+
+    if removedCount > 0 then
+        VM:LogDebug(string.format("Ledger:CleanupDuplicates purged %d duplicate transactions.", removedCount))
+        if VM.UI and VM.UI.RefreshAll then
+            VM.UI:RefreshAll()
+        end
+    end
+    return removedCount
 end

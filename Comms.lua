@@ -229,12 +229,19 @@ function Comms:OnMessageReceived(msg, sender)
 
         if scanTime > (VM.db.inventory.lastScan or 0) then
             VM.db.inventory.lastScan = scanTime
+            VM.db.inventory.lastScanTime = scanTime
             VM.db.inventory.lastScanBy = scannedBy
             VM.db.inventory.scannedBy = scannedBy
             VM.db.inventory.lastSyncedFrom = sender
             VM.db.inventory.gold = gold
             if numTabs > 0 then VM.db.inventory.numTabs = numTabs end
-            VM.db.inventory.tabs = {}
+            VM.db.inventory.tabs = VM.db.inventory.tabs or {}
+            if VM.db.scanMetadata then
+                VM.db.scanMetadata.lastScan = scanTime
+                VM.db.scanMetadata.lastScanTime = scanTime
+                VM.db.scanMetadata.lastScanBy = scannedBy
+                VM.db.scanMetadata.scannedBy = scannedBy
+            end
         elseif scanTime == (VM.db.inventory.lastScan or 0) then
             VM.db.inventory.lastSyncedFrom = sender
             if gold > 0 then VM.db.inventory.gold = gold end
@@ -497,15 +504,56 @@ function Comms:OnMessageReceived(msg, sender)
         }
         local existing = VM.db.ledger[tx.id]
 
-        -- Deduplicate gold transactions across clients that generated different IDs
-        if not existing and isGold then
-            for _, exTx in pairs(VM.db.ledger) do
-                if not exTx.deleted and exTx.player == tx.player and exTx.type == tx.type and (exTx.itemLink == "GOLD" or exTx.itemID == 0) and (exTx.unitPriceAtTime or 0) == (tx.unitPriceAtTime or 0) then
-                    -- Only merge if created by different officers/scanners for the same log line within a 24h window
-                    if exTx.officer ~= tx.officer and math.abs((exTx.timestamp or 0) - (tx.timestamp or 0)) <= 86400 then
-                        existing = exTx
-                        tx.id = exTx.id -- adopt existing id to merge
-                        break
+        -- Deduplicate gold and item transactions across clients that generated different IDs
+        if not existing then
+            local txAction = VM:NormalizeAction(tx.type)
+            local txActor = VM:NormalizeActor(tx.rawSender or tx.player)
+            local WINDOW_48H = 172800
+
+            if isGold then
+                local txCopper = (tx.unitPriceAtTime or 0) * (tx.count or 1)
+                for _, exTx in pairs(VM.db.ledger) do
+                    if not exTx.deleted then
+                        local exIsGold = (exTx.itemID == 0 or exTx.itemLink == "GOLD" or exTx.source == "BANK_MONEY_LOG" or exTx.source == "MANUAL_GOLD" or (exTx.itemName and (exTx.itemName:find("Gold Deposit") or exTx.itemName:find("Gold Withdrawal"))))
+                        if exIsGold then
+                            local exAction = VM:NormalizeAction(exTx.type)
+                            local exActor = VM:NormalizeActor(exTx.rawSender or exTx.player)
+                            local exCopper = (exTx.unitPriceAtTime or 0) * (exTx.count or 1)
+                            if txAction == exAction and (txActor == exActor or (tx.rawSender and VM:NormalizeActor(tx.rawSender) == exActor) or (exTx.rawSender and VM:NormalizeActor(exTx.rawSender) == txActor)) and txCopper == exCopper then
+                                if math.abs((exTx.timestamp or 0) - (tx.timestamp or 0)) <= WINDOW_48H then
+                                    existing = exTx
+                                    tx.id = exTx.id -- adopt existing id to merge
+                                    if (exTx.timestamp or 0) > 0 and ((tx.timestamp or 0) == 0 or exTx.timestamp < tx.timestamp) then
+                                        tx.timestamp = exTx.timestamp
+                                    end
+                                    break
+                                end
+                            end
+                        end
+                    end
+                end
+            else
+                local txItemKey = VM:NormalizeItemKey(tx.itemID, tx.itemLink, tx.itemName)
+                local txCount = tonumber(tx.count or 1)
+                for _, exTx in pairs(VM.db.ledger) do
+                    if not exTx.deleted then
+                        local exIsGold = (exTx.itemID == 0 or exTx.itemLink == "GOLD" or exTx.source == "BANK_MONEY_LOG" or exTx.source == "MANUAL_GOLD")
+                        if not exIsGold then
+                            local exAction = VM:NormalizeAction(exTx.type)
+                            local exActor = VM:NormalizeActor(exTx.rawSender or exTx.player)
+                            local exItemKey = VM:NormalizeItemKey(exTx.itemID, exTx.itemLink, exTx.itemName)
+                            local exCount = tonumber(exTx.count or 1)
+                            if txAction == exAction and txActor == exActor and txItemKey == exItemKey and txCount == exCount then
+                                if math.abs((exTx.timestamp or 0) - (tx.timestamp or 0)) <= WINDOW_48H then
+                                    existing = exTx
+                                    tx.id = exTx.id -- adopt existing id to merge
+                                    if (exTx.timestamp or 0) > 0 and ((tx.timestamp or 0) == 0 or exTx.timestamp < tx.timestamp) then
+                                        tx.timestamp = exTx.timestamp
+                                    end
+                                    break
+                                end
+                            end
+                        end
                     end
                 end
             end
@@ -514,7 +562,7 @@ function Comms:OnMessageReceived(msg, sender)
         if existing and existing.unitPriceAtTime and existing.unitPriceAtTime > 0 and (tx.itemLink == "GOLD" or tx.itemID == 0) then
             tx.unitPriceAtTime = existing.unitPriceAtTime
         end
-        if not fromOfficer and not isGold and (tx.source ~= "BANK_LOG" and tx.source ~= "BANK_MONEY_LOG" and tx.source ~= "GOLD_IN" and tx.source ~= "GOLD_OUT" and tx.source ~= "MANUAL_GOLD" and tx.itemLink ~= "GOLD") then return end
+        if not fromOfficer and not isGold and (tx.source ~= "BANK_LOG" and tx.source ~= "BANK_MONEY_LOG" and tx.source ~= "FFA_SCAN" and tx.source ~= "GOLD_IN" and tx.source ~= "GOLD_OUT" and tx.source ~= "MANUAL_GOLD" and tx.itemLink ~= "GOLD") then return end
         if tx.id ~= "" and (not existing or tx.updatedAt > (existing.updatedAt or existing.timestamp or 0)) then
             VM.db.ledger[tx.id] = tx
             if VM.UI then VM.UI:RefreshAll() end
@@ -529,11 +577,11 @@ function Comms:BroadcastInventory()
     local gold = tonumber(inv.gold) or 0
     local numTabs = tonumber(inv.numTabs) or 1
     self:SendRaw(string.format("INV_META|%d|%s|%d|%d", inv.lastScan, EscapeStr(scanBy), gold, numTabs))
-    for tabIdx, tabData in pairs(inv.tabs) do
+    for tabIdx, tabData in pairs(inv.tabs or {}) do
         local isPurchased = (tabData.isPurchased ~= false) and 1 or 0
         self:SendRaw(string.format("INV_TAB|%d|%d|%s|%s|%d",
             inv.lastScan, tabIdx, EscapeStr(tabData.name), EscapeStr(tabData.icon), isPurchased))
-        for itemID, item in pairs(tabData.items) do
+        for itemID, item in pairs(tabData.items or {}) do
             self:SendRaw(string.format("INV_ITEM|%d|%d|%d|%d|%s|%s|%s|%d|%s|%s",
                 inv.lastScan, tabIdx, item.itemID or 0, item.count,
                 EscapeStr(item.name), EscapeStr(item.link), EscapeStr(item.icon), item.ahPrice or 0,
@@ -575,7 +623,17 @@ function Comms:BroadcastMains()
 end
 
 function Comms:BroadcastTransaction(tx)
-    if not VM.db.inventory or VM.db.inventory.lastScan == 0 then return end
+    if not tx then return end
+    local inv = VM.db.inventory
+    if not inv or not inv.lastScan or inv.lastScan == 0 then
+        local now = (GetServerTime and GetServerTime()) or time()
+        VM.db.inventory = VM.db.inventory or {}
+        VM.db.inventory.lastScan = now
+        VM.db.inventory.lastScanTime = now
+        VM.db.inventory.lastScanBy = UnitName("player") or VM:GetPlayerName()
+        VM.db.inventory.scannedBy = VM.db.inventory.lastScanBy
+        inv = VM.db.inventory
+    end
     local delVal = tx.deleted and 1 or 0
     self:SendRaw(string.format("TX|%s|%s|%s|%s|%d|%d|%d|%d|%s|%s|%s|%s|%d|%d|%s|%s",
         EscapeStr(tx.id), EscapeStr(tx.type), EscapeStr(tx.player),
@@ -586,7 +644,7 @@ function Comms:BroadcastTransaction(tx)
 end
 
 function Comms:BroadcastLedgerSync()
-    if not VM.db.inventory or VM.db.inventory.lastScan == 0 then return end
+    if not VM.db or not VM.db.ledger then return end
     local cutoff = time() - (90 * 86400)
     for _, tx in pairs(VM.db.ledger) do
         if not tx.deleted and (tx.updatedAt or tx.timestamp or 0) > cutoff then

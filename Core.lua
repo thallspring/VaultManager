@@ -175,6 +175,64 @@ function VM:NormalizeName(name)
     return clean:sub(1, 1):upper() .. clean:sub(2)
 end
 
+function VM:NormalizeActor(name)
+    if not name or name == "" then return "UNATTRIBUTED" end
+    local n = self:NormalizeName(name)
+    if n == "" or n:upper() == "UNATTRIBUTED" then return "UNATTRIBUTED" end
+    return n
+end
+
+function VM:NormalizeAction(actionOrType)
+    local s = tostring(actionOrType or ""):upper()
+    if s:find("OUT") or s:find("WITHDRAW") or s == "2" then
+        return "OUT"
+    end
+    return "IN"
+end
+
+function VM:NormalizeItemKey(itemID, itemLink, itemName)
+    local id = tonumber(itemID) or 0
+    if id == 0 and itemLink and type(itemLink) == "string" then
+        id = tonumber(itemLink:match("item:(%d+)")) or 0
+    end
+    local name = ""
+    if itemName and type(itemName) == "string" and itemName ~= "" and not itemName:find("^Item %d+$") then
+        name = itemName:gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", ""):gsub("^%[", ""):gsub("%]$", ""):match("^%s*(.-)%s*$")
+    end
+    if (not name or name == "") and itemLink and type(itemLink) == "string" then
+        name = itemLink:match("%[(.-)%]")
+        if name then
+            name = name:gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", ""):match("^%s*(.-)%s*$")
+        end
+    end
+    if (not name or name == "") and id > 0 and GetItemInfo then
+        local n = GetItemInfo(id)
+        if n and n ~= "" then name = n end
+    end
+    if name and name ~= "" and name:lower() ~= "unknown item" and name:lower() ~= "unknown" then
+        return "NAME:" .. name:lower()
+    elseif id > 0 then
+        return "ID:" .. id
+    else
+        return "ID:0"
+    end
+end
+
+function VM:GetTxMatchKey(tx)
+    if not tx then return "" end
+    local isGold = (tx.itemID == 0 or tx.itemLink == "GOLD" or tx.source == "BANK_MONEY_LOG" or tx.source == "MANUAL_GOLD" or (tx.itemName and (tx.itemName:find("Gold Deposit") or tx.itemName:find("Gold Withdrawal"))))
+    local action = self:NormalizeAction(tx.type)
+    local actor = self:NormalizeActor(tx.rawSender or tx.player)
+    if isGold then
+        local copper = (tx.unitPriceAtTime or 0) * (tx.count or 1)
+        return string.format("GOLD:%s:%s:%d", action, actor, copper)
+    else
+        local itemKey = self:NormalizeItemKey(tx.itemID, tx.itemLink, tx.itemName)
+        local count = tonumber(tx.count or 1)
+        return string.format("ITEM:%s:%s:%s:%d", action, actor, itemKey, count)
+    end
+end
+
 function VM:GetPlayerName()
     return self:NormalizeName(UnitName("player"))
 end
@@ -1239,6 +1297,9 @@ function VM:SwitchGuildContext(triggerEvent)
     VM.db = VaultManagerDB.guilds[guildKey]
     InitGuildSubTables(VM.db)
     self:ValidateTabRules()
+    if self.Ledger and self.Ledger.CleanupDuplicates then
+        self.Ledger:CleanupDuplicates()
+    end
     if self.UI then self.UI:RefreshAll() end
 end
 
@@ -1423,51 +1484,9 @@ initFrame:SetScript("OnEvent", function(_, event, arg1)
             VM.db.migrationVersion = 131
         end
 
-        -- Task 2: 36-hour rolling ledger duplication cleanup across all transaction types
-        if VM.db.ledger then
-            local groups = {}
-            for id, tx in pairs(VM.db.ledger) do
-                if tx and tx.timestamp and not tx.deleted then
-                    local isGold = (tx.itemID == 0 or tx.itemLink == "GOLD" or tx.source == "BANK_MONEY_LOG" or tx.source == "MANUAL_GOLD")
-                    local itemKey
-                    if isGold then
-                        itemKey = "GOLD:" .. tostring((tx.unitPriceAtTime or 0) * (tx.count or 1))
-                    else
-                        itemKey = (tx.itemID and tx.itemID > 0) and tostring(tx.itemID) or tostring(tx.itemLink or tx.itemName or "GOLD")
-                    end
-                    local groupKey = string.format("%s:%s:%s:%s:%d", tostring(tx.tab or 1), tostring(tx.type), tostring(tx.player or ""), itemKey, tonumber(tx.count or 1))
-                    groups[groupKey] = groups[groupKey] or {}
-                    table.insert(groups[groupKey], { id = id, tx = tx })
-                end
-            end
-            for _, entries in pairs(groups) do
-                table.sort(entries, function(a, b) return (a.tx.timestamp or 0) < (b.tx.timestamp or 0) end)
-                local kept = {}
-                for _, entry in ipairs(entries) do
-                    local isDup = false
-                    for _, keptTx in ipairs(kept) do
-                        local isGold = (entry.tx.itemID == 0 or entry.tx.itemLink == "GOLD")
-                        if isGold then
-                            -- For gold donations, different calendar days or >24h difference are never duplicates.
-                            -- Only merge if from different officers syncing the same deposit within a short window
-                            if entry.tx.officer ~= keptTx.officer and math.abs((entry.tx.timestamp or 0) - (keptTx.timestamp or 0)) <= 3600 then
-                                isDup = true
-                                break
-                            end
-                        else
-                            if math.abs((entry.tx.timestamp or 0) - (keptTx.timestamp or 0)) <= 129600 then
-                                isDup = true
-                                break
-                            end
-                        end
-                    end
-                    if isDup then
-                        VM.db.ledger[entry.id] = nil
-                    else
-                        table.insert(kept, entry.tx)
-                    end
-                end
-            end
+        -- 48-hour rolling ledger duplication cleanup across all transaction types
+        if VM.Ledger and VM.Ledger.CleanupDuplicates then
+            VM.Ledger:CleanupDuplicates()
         end
     elseif event == "PLAYER_LOGIN" then
         if C_ChatInfo and C_ChatInfo.RegisterAddonMessagePrefix then
@@ -1477,6 +1496,9 @@ initFrame:SetScript("OnEvent", function(_, event, arg1)
         end
 
         VM:SwitchGuildContext("PLAYER_LOGIN")
+        if VM.Ledger and VM.Ledger.CleanupDuplicates then
+            VM.Ledger:CleanupDuplicates()
+        end
 
         if IsInGuild() then
             if C_GuildInfo and C_GuildInfo.GuildRoster then

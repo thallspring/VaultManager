@@ -4,6 +4,23 @@
 
 All notable changes to **Vault Manager** will be documented in this file.
 
+## [1.4.3] - 2026-11-25
+
+### Added
+- **Crafting Reagents Category:** Added a dedicated *Crafting Reagents* category in *Vault & Requests* for items marked as crafting reagents.
+- **Custom UI Scaling & Reset Command:** Replaced the fixed scale buttons in *Settings* with a custom percentage input (50%–200%) and added the `/vm reset` command to restore 100% scale and center the window on screen.
+- **Controller & Keyboard Navigation:** Added gamepad and keyboard navigation support for switching tabs, moving through lists, toggling categories, activating buttons, and closing dialogs.
+
+### Changed
+- **Ledger Sorting:** Member groups in the *Ledger* tab are now ordered with the most recent donor at the top while keeping individual entries nested under each member.
+- **Window Layering:** Raised the Vault Manager window and popups above other addon frames so they stay visible in front of overlays such as quest trackers, and prevented windows from being dragged off-screen.
+
+### Fixed
+- Fixed incomplete bank scans overwriting cached guild bank items during peer-to-peer syncing when item data had not finished loading.
+- Fixed guild bank log timestamp parsing and duplicate ledger entries when multiple guild members scan the bank, including automatic cleanup of existing duplicates.
+- Fixed gold donations and withdrawals failing to sync automatically after bank money log scans or being filtered out by duplicate detection.
+- Fixed the header status button occasionally staying stuck on *Scanning...* after a bank scan completed.
+
 ## [1.4.2] - 2026-11-24
 
 ### Added

@@ -40,7 +40,7 @@ function VM:GetAddonVersion()
     local getMeta = (C_AddOns and C_AddOns.GetAddOnMetadata) or GetAddOnMetadata
     local ver = getMeta and getMeta("VaultManager", "Version")
     if not ver or ver == "" then
-        ver = "1.4.2"
+        ver = "1.4.3"
     end
     ver = tostring(ver):gsub("^[vV]", ""):gsub("^%s*(.-)%s*$", "%1")
     return ver

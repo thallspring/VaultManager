@@ -144,6 +144,7 @@ function Ledger:RecordGoldDeposit(playerName, copperAmount, source, rawSender, a
         updatedAt = now,
         officer = VM:GetPlayerName(),
         source = source or "BANK_MONEY_LOG",
+        isFFA = false,
         isManual = isMan,
         deleted = false
     }
@@ -169,6 +170,7 @@ function Ledger:RecordGoldWithdrawal(playerName, copperAmount, source)
         updatedAt = now,
         officer = VM:GetPlayerName(),
         source = source or "BANK_MONEY_LOG",
+        isFFA = false,
         isManual = false,
         deleted = false
     }
@@ -263,7 +265,8 @@ function Ledger:GetAggregatedByMain(useHistorical, periodFilter, priceMode)
     local includeFFA = (VM.db and VM.db.uiPrefs and VM.db.uiPrefs.includeFFA ~= false)
 
     for _, tx in pairs(VM.db.ledger) do
-        if not tx.deleted and (includeFFA or not tx.isFFA) and MatchesPeriod(tx.timestamp, periodFilter) then
+        local isGold = (tx.itemID == 0 or tx.itemLink == "GOLD")
+        if not tx.deleted and (includeFFA or not tx.isFFA or isGold) and MatchesPeriod(tx.timestamp, periodFilter) then
             local key = (tx.player == "UNATTRIBUTED") and "UNATTRIBUTED" or VM:GetMainFor(tx.player)
             if not groups[key] then
                 groups[key] = {
@@ -275,7 +278,8 @@ function Ledger:GetAggregatedByMain(useHistorical, periodFilter, priceMode)
                     totalGoldOut = 0,
                     totalItemsIn = 0,
                     totalCharged = 0,
-                    transactions = {}
+                    transactions = {},
+                    latestDonationTimestamp = 0
                 }
             end
 
@@ -286,6 +290,7 @@ function Ledger:GetAggregatedByMain(useHistorical, periodFilter, priceMode)
                 groups[key].totalGoldIn = groups[key].totalGoldIn + (tx.goldIn or 0)
                 groups[key].totalGoldOut = (groups[key].totalGoldOut or 0) + (tx.goldOut or 0)
                 groups[key].totalItemsIn = groups[key].totalItemsIn + (tx.itemsIn or 0)
+                groups[key].latestDonationTimestamp = math.max(groups[key].latestDonationTimestamp, tx.timestamp or 0)
             elseif tx.type == "OUT" then
                 groups[key].totalOutValue = groups[key].totalOutValue + val
                 groups[key].totalCharged = groups[key].totalCharged + ((tx.chargedUnitPrice or 0) * (tx.count or 0))
@@ -294,6 +299,7 @@ function Ledger:GetAggregatedByMain(useHistorical, periodFilter, priceMode)
                 end
             else
                 groups[key].totalInValue = groups[key].totalInValue + val
+                groups[key].latestDonationTimestamp = math.max(groups[key].latestDonationTimestamp, tx.timestamp or 0)
                 if tx.itemID == 0 or tx.itemLink == "GOLD" then
                     groups[key].totalGoldIn = groups[key].totalGoldIn + val
                 else
@@ -316,6 +322,9 @@ function Ledger:GetAggregatedByMain(useHistorical, periodFilter, priceMode)
         if b.mainName == "UNATTRIBUTED" then return false end
         if a.isLegacy ~= b.isLegacy then
             return not a.isLegacy
+        end
+        if (a.latestDonationTimestamp or 0) ~= (b.latestDonationTimestamp or 0) then
+            return (a.latestDonationTimestamp or 0) > (b.latestDonationTimestamp or 0)
         end
         if a.totalOutValue ~= b.totalOutValue then
             return a.totalOutValue > b.totalOutValue

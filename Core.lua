@@ -1257,6 +1257,24 @@ SlashCmdList["VAULTMANAGER"] = function(msg)
         for i = startIdx, #VM.debugLog do
             print("  " .. VM.debugLog[i])
         end
+    elseif cmd == "reset" then
+        if VM.db and VM.db.uiPrefs then
+            VM.db.uiPrefs.uiScale = 1.0
+            VM.db.uiPrefs.windowPos = nil
+        end
+        local f = _G["VaultManagerMainFrame"]
+        if f then
+            f:SetScale(1.0)
+            f:ClearAllPoints()
+            f:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
+            if not f:IsShown() then
+                f:Show()
+            end
+        end
+        if VM.UI and VM.UI.RefreshAll then
+            VM.UI:RefreshAll()
+        end
+        print("|cff00ccff[Vault Manager]|r UI scale reset to 100% and main window repositioned to center.")
     elseif cmd == "resetlocal" then
         if VM.db then
             VM.db.inventory = { lastScan = 0, scannedBy = "", tabs = {} }
@@ -1349,20 +1367,24 @@ initFrame:SetScript("OnEvent", function(_, event, arg1)
         end
 
         -- v1.3.0 Migration: Purge duplicate Guild Bank log entries sharing same tab, type, player, item/gold, count, and calendar day
-        if VM.db.ledger then
-            local seenLogs = {}
-            for id, tx in pairs(VM.db.ledger) do
-                if tx and tx.timestamp then
-                    local dayKey = date("%Y-%m-%d", tx.timestamp)
-                    local itemKey = (tx.itemID and tx.itemID > 0) and tostring(tx.itemID) or tostring(tx.itemLink or "GOLD")
-                    local sig = string.format("%s:%s:%s:%s:%s:%s", tostring(tx.tab or 1), tostring(tx.type or "IN"), tostring(tx.player or ""), itemKey, tostring(tx.count or 1), dayKey)
-                    if seenLogs[sig] then
-                        VM.db.ledger[id] = nil
-                    else
-                        seenLogs[sig] = id
+        if not VM.db.migrationVersion or VM.db.migrationVersion < 130 then
+            if VM.db.ledger then
+                local seenLogs = {}
+                for id, tx in pairs(VM.db.ledger) do
+                    if tx and tx.timestamp then
+                        local dayKey = date("%Y-%m-%d", tx.timestamp)
+                        local isGold = (tx.itemID == 0 or tx.itemLink == "GOLD")
+                        local itemKey = isGold and ("GOLD:" .. tostring((tx.unitPriceAtTime or 0) * (tx.count or 1))) or ((tx.itemID and tx.itemID > 0) and tostring(tx.itemID) or tostring(tx.itemLink or "GOLD"))
+                        local sig = string.format("%s:%s:%s:%s:%s:%s", tostring(tx.tab or 1), tostring(tx.type or "IN"), tostring(tx.player or ""), itemKey, tostring(tx.count or 1), dayKey)
+                        if seenLogs[sig] then
+                            VM.db.ledger[id] = nil
+                        else
+                            seenLogs[sig] = id
+                        end
                     end
                 end
             end
+            VM.db.migrationVersion = 130
         end
 
         -- v1.3.1 Migration (v131): Purge duplicate Guild Bank entries within 48-hour rolling window, keeping earliest entry
@@ -1371,7 +1393,8 @@ initFrame:SetScript("OnEvent", function(_, event, arg1)
                 local groups = {}
                 for id, tx in pairs(VM.db.ledger) do
                     if tx and tx.type == "IN" and tx.timestamp then
-                        local itemKey = (tx.itemID and tx.itemID > 0) and tostring(tx.itemID) or tostring(tx.itemLink or tx.itemName or "GOLD")
+                        local isGold = (tx.itemID == 0 or tx.itemLink == "GOLD")
+                        local itemKey = isGold and ("GOLD:" .. tostring((tx.unitPriceAtTime or 0) * (tx.count or 1))) or ((tx.itemID and tx.itemID > 0) and tostring(tx.itemID) or tostring(tx.itemLink or tx.itemName or "GOLD"))
                         local groupKey = string.format("%s:%s:%s:%s:%d", tostring(tx.tab or 1), tostring(tx.type), tostring(tx.player or ""), itemKey, tonumber(tx.count or 1))
                         groups[groupKey] = groups[groupKey] or {}
                         table.insert(groups[groupKey], { id = id, tx = tx })
@@ -1398,6 +1421,53 @@ initFrame:SetScript("OnEvent", function(_, event, arg1)
                 end
             end
             VM.db.migrationVersion = 131
+        end
+
+        -- Task 2: 36-hour rolling ledger duplication cleanup across all transaction types
+        if VM.db.ledger then
+            local groups = {}
+            for id, tx in pairs(VM.db.ledger) do
+                if tx and tx.timestamp and not tx.deleted then
+                    local isGold = (tx.itemID == 0 or tx.itemLink == "GOLD" or tx.source == "BANK_MONEY_LOG" or tx.source == "MANUAL_GOLD")
+                    local itemKey
+                    if isGold then
+                        itemKey = "GOLD:" .. tostring((tx.unitPriceAtTime or 0) * (tx.count or 1))
+                    else
+                        itemKey = (tx.itemID and tx.itemID > 0) and tostring(tx.itemID) or tostring(tx.itemLink or tx.itemName or "GOLD")
+                    end
+                    local groupKey = string.format("%s:%s:%s:%s:%d", tostring(tx.tab or 1), tostring(tx.type), tostring(tx.player or ""), itemKey, tonumber(tx.count or 1))
+                    groups[groupKey] = groups[groupKey] or {}
+                    table.insert(groups[groupKey], { id = id, tx = tx })
+                end
+            end
+            for _, entries in pairs(groups) do
+                table.sort(entries, function(a, b) return (a.tx.timestamp or 0) < (b.tx.timestamp or 0) end)
+                local kept = {}
+                for _, entry in ipairs(entries) do
+                    local isDup = false
+                    for _, keptTx in ipairs(kept) do
+                        local isGold = (entry.tx.itemID == 0 or entry.tx.itemLink == "GOLD")
+                        if isGold then
+                            -- For gold donations, different calendar days or >24h difference are never duplicates.
+                            -- Only merge if from different officers syncing the same deposit within a short window
+                            if entry.tx.officer ~= keptTx.officer and math.abs((entry.tx.timestamp or 0) - (keptTx.timestamp or 0)) <= 3600 then
+                                isDup = true
+                                break
+                            end
+                        else
+                            if math.abs((entry.tx.timestamp or 0) - (keptTx.timestamp or 0)) <= 129600 then
+                                isDup = true
+                                break
+                            end
+                        end
+                    end
+                    if isDup then
+                        VM.db.ledger[entry.id] = nil
+                    else
+                        table.insert(kept, entry.tx)
+                    end
+                end
+            end
         end
     elseif event == "PLAYER_LOGIN" then
         if C_ChatInfo and C_ChatInfo.RegisterAddonMessagePrefix then

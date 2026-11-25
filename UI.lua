@@ -265,6 +265,8 @@ function UI:CreateAssignModal()
     assignModalFrame:SetSize(360, 280)
     assignModalFrame:SetPoint("CENTER")
     assignModalFrame:SetFrameStrata("FULLSCREEN_DIALOG")
+    assignModalFrame:SetFrameLevel(200)
+    assignModalFrame:SetClampedToScreen(true)
     assignModalFrame:SetMovable(true)
     assignModalFrame:EnableMouse(true)
     assignModalFrame:RegisterForDrag("LeftButton")
@@ -429,6 +431,8 @@ function UI:CreateExportModal()
     exportModalFrame:SetSize(600, 420)
     exportModalFrame:SetPoint("CENTER")
     exportModalFrame:SetFrameStrata("FULLSCREEN_DIALOG")
+    exportModalFrame:SetFrameLevel(200)
+    exportModalFrame:SetClampedToScreen(true)
     exportModalFrame:SetMovable(true)
     exportModalFrame:EnableMouse(true)
     exportModalFrame:RegisterForDrag("LeftButton")
@@ -553,6 +557,8 @@ function UI:CreateRosterPickerFrame()
     rosterPickerFrame = CreateFrame("Frame", "VaultManagerRosterPicker", UIParent, "BackdropTemplate")
     rosterPickerFrame:SetSize(220, 260)
     rosterPickerFrame:SetFrameStrata("FULLSCREEN_DIALOG")
+    rosterPickerFrame:SetFrameLevel(250)
+    rosterPickerFrame:SetClampedToScreen(true)
     ApplyModernBackdrop(rosterPickerFrame, { 0.05, 0.06, 0.08, 0.98 }, THEME.accent)
     rosterPickerFrame:Hide()
     table.insert(UISpecialFrames, "VaultManagerRosterPicker")
@@ -651,6 +657,8 @@ function UI:CreateRankingPeriodPickerFrame()
     rankingPeriodDropdownFrame = CreateFrame("Frame", "VaultManagerRankingPeriodPicker", UIParent, "BackdropTemplate")
     rankingPeriodDropdownFrame:SetSize(120, 80)
     rankingPeriodDropdownFrame:SetFrameStrata("FULLSCREEN_DIALOG")
+    rankingPeriodDropdownFrame:SetFrameLevel(250)
+    rankingPeriodDropdownFrame:SetClampedToScreen(true)
     ApplyModernBackdrop(rankingPeriodDropdownFrame, { 0.05, 0.06, 0.08, 0.98 }, THEME.accent)
     rankingPeriodDropdownFrame:Hide()
     table.insert(UISpecialFrames, "VaultManagerRankingPeriodPicker")
@@ -707,7 +715,9 @@ local bankValDropdownFrame = nil
 function UI:CreateBankValDropdown()
     bankValDropdownFrame = CreateFrame("Frame", "VaultManagerBankValDropdown", UIParent, "BackdropTemplate")
     bankValDropdownFrame:SetSize(290, 240)
-    bankValDropdownFrame:SetFrameStrata("DIALOG")
+    bankValDropdownFrame:SetFrameStrata("FULLSCREEN_DIALOG")
+    bankValDropdownFrame:SetFrameLevel(200)
+    bankValDropdownFrame:SetClampedToScreen(true)
     ApplyModernBackdrop(bankValDropdownFrame, THEME.bg, THEME.accent)
     bankValDropdownFrame:Hide()
     table.insert(UISpecialFrames, "VaultManagerBankValDropdown")
@@ -798,8 +808,16 @@ function UI:CreateMainFrame()
     mainFrame = CreateFrame("Frame", "VaultManagerMainFrame", UIParent, "BackdropTemplate")
     mainFrame:SetSize(800, 560)
     mainFrame:SetPoint("CENTER")
+    mainFrame:SetFrameStrata("DIALOG")
+    mainFrame:SetToplevel(true)
+    mainFrame:SetFrameLevel(100)
+    mainFrame:SetClampedToScreen(true)
     mainFrame:SetMovable(true)
     mainFrame:EnableMouse(true)
+    mainFrame:EnableKeyboard(true)
+    if mainFrame.SetPropagateKeyboardInput then
+        mainFrame:SetPropagateKeyboardInput(true)
+    end
     mainFrame:RegisterForDrag("LeftButton")
     mainFrame:SetScript("OnDragStart", mainFrame.StartMoving)
     mainFrame:SetScript("OnDragStop", function(selfFrame)
@@ -808,6 +826,53 @@ function UI:CreateMainFrame()
         local prefs = GetUIPrefs()
         prefs.windowPos = { point = point, relativePoint = relativePoint, xOfs = xOfs, yOfs = yOfs }
     end)
+    mainFrame:SetScript("OnKeyDown", function(self, key)
+        if key == "ESCAPE" then
+            if assignModalFrame and assignModalFrame:IsShown() then
+                assignModalFrame:Hide()
+            elseif exportModalFrame and exportModalFrame:IsShown() then
+                exportModalFrame:Hide()
+            elseif rosterPickerFrame and rosterPickerFrame:IsShown() then
+                rosterPickerFrame:Hide()
+            elseif rankingPeriodDropdownFrame and rankingPeriodDropdownFrame:IsShown() then
+                rankingPeriodDropdownFrame:Hide()
+            elseif bankValDropdownFrame and bankValDropdownFrame:IsShown() then
+                bankValDropdownFrame:Hide()
+            else
+                mainFrame:Hide()
+            end
+        elseif key == "TAB" or key == "PADLSHOULDER" or key == "PADRSHOULDER" then
+            local delta = (key == "PADLSHOULDER") and -1 or 1
+            local nextTab = currentTab + delta
+            if nextTab > 6 then nextTab = 1 elseif nextTab < 1 then nextTab = 6 end
+            UI:SelectTab(nextTab)
+        end
+    end)
+    if mainFrame.SetScript then
+        pcall(function()
+            mainFrame:SetScript("OnGamePadButtonDown", function(self, button)
+                if button == "PADLSHOULDER" then
+                    local prevTab = currentTab - 1
+                    if prevTab < 1 then prevTab = 6 end
+                    UI:SelectTab(prevTab)
+                elseif button == "PADRSHOULDER" then
+                    local nextTab = currentTab + 1
+                    if nextTab > 6 then nextTab = 1 end
+                    UI:SelectTab(nextTab)
+                elseif button == "PAD2" then
+                    if assignModalFrame and assignModalFrame:IsShown() then
+                        assignModalFrame:Hide()
+                    elseif exportModalFrame and exportModalFrame:IsShown() then
+                        exportModalFrame:Hide()
+                    elseif rosterPickerFrame and rosterPickerFrame:IsShown() then
+                        rosterPickerFrame:Hide()
+                    else
+                        mainFrame:Hide()
+                    end
+                end
+            end)
+        end)
+    end
     ApplyModernBackdrop(mainFrame, THEME.bg, THEME.border)
     mainFrame:Hide()
     table.insert(UISpecialFrames, "VaultManagerMainFrame")
@@ -1172,6 +1237,7 @@ local function GetItemCategory(item)
     local hasTeaches = false
     local hasGearText = false
     local hasUse = false
+    local hasCraftingReagent = false
 
     for i = 1, numLines do
         local leftFs = _G["VM_HiddenScanTooltipTextLeft" .. i]
@@ -1182,6 +1248,9 @@ local function GetItemCategory(item)
         if leftText and type(leftText) == "string" then
             local cleanLeft = leftText:gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", "")
             local trimLeft = cleanLeft:match("^%s*(.-)%s*$") or cleanLeft
+            if cleanLeft:lower():find("crafting reagent", 1, true) then
+                hasCraftingReagent = true
+            end
             if cleanLeft:find("Use: Teaches", 1, true) then
                 hasTeaches = true
             end
@@ -1196,6 +1265,9 @@ local function GetItemCategory(item)
         if rightText and type(rightText) == "string" then
             local cleanRight = rightText:gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", "")
             local trimRight = cleanRight:match("^%s*(.-)%s*$") or cleanRight
+            if cleanRight:lower():find("crafting reagent", 1, true) then
+                hasCraftingReagent = true
+            end
             if cleanRight:find("Use: Teaches", 1, true) then
                 hasTeaches = true
             end
@@ -1248,8 +1320,11 @@ local function GetItemCategory(item)
     -- Priority 3: Consumables
     local isConsumable = ((hasUse and not isGear and not isRecipe) or (itemType == "Consumable"))
 
-    -- Priority 4: Crafting Mats
-    local isCraftingMat = (itemType == "Trade Goods" or itemType == "Reagent")
+    -- Priority 4: Crafting Reagents
+    local isCraftingReagent = hasCraftingReagent or (itemType == "Reagent")
+
+    -- Priority 5: Crafting Mats
+    local isCraftingMat = (itemType == "Trade Goods")
 
     local category
     if isRecipe then
@@ -1258,6 +1333,8 @@ local function GetItemCategory(item)
         category = "Gear"
     elseif isConsumable then
         category = "Consumables"
+    elseif isCraftingReagent then
+        category = "Crafting Reagents"
     elseif isCraftingMat then
         category = "Crafting Mats"
     else
@@ -1266,7 +1343,7 @@ local function GetItemCategory(item)
 
     -- 5. Cache result (do NOT cache "Other" permanently if item was uncached)
     if category == "Gear" or category == "Consumables" or
-       category == "Crafting Mats" or category == "Recipes" then
+       category == "Crafting Mats" or category == "Crafting Reagents" or category == "Recipes" then
         item.cachedCategory = category
     elseif numLines > 1 then
         item.cachedCategory = "Other"
@@ -1332,10 +1409,11 @@ function UI:RefreshInventory()
         ["Gear"] = {},
         ["Consumables"] = {},
         ["Crafting Mats"] = {},
+        ["Crafting Reagents"] = {},
         ["Recipes"] = {},
         ["Other"] = {}
     }
-    local catOrder = { "Gear", "Consumables", "Crafting Mats", "Recipes", "Other" }
+    local catOrder = { "Gear", "Consumables", "Crafting Mats", "Crafting Reagents", "Recipes", "Other" }
 
     for _, item in pairs(tabData.items) do
         if searchQuery == "" or (item.name and item.name:lower():find(searchQuery, 1, true)) then
@@ -2561,67 +2639,44 @@ function UI:BuildSettingsPanel(panel)
     uiPersTitle:SetPoint("TOPLEFT", 10, -206)
     uiPersTitle:SetText("|cff26a6f2Interface & Notifications|r")
 
-    -- UI Scale Buttons (85%, 100%, 115%)
+    -- UI Scale (50% - 200%)
     local scaleLabel = panel:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     scaleLabel:SetPoint("TOPLEFT", 10, -228)
-    scaleLabel:SetText("UI Scale:")
+    scaleLabel:SetText("UI Scale (50% - 200%):")
 
-    local scale85Btn = CreateModernButton(panel, 45, 20, "85%")
-    scale85Btn:SetPoint("LEFT", scaleLabel, "RIGHT", 8, 0)
-    scale85Btn:SetScript("OnClick", function()
+    local scaleEditBox = CreateModernEditBox(panel, 50, 22, true)
+    scaleEditBox:SetPoint("LEFT", scaleLabel, "RIGHT", 8, 0)
+    scaleEditBox:SetText("100")
+
+    local scaleValDisplay = panel:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    scaleValDisplay:SetPoint("LEFT", scaleEditBox, "RIGHT", 8, 0)
+
+    local scaleApplyBtn = CreateModernButton(panel, 55, 22, "Apply", THEME.accent)
+    scaleApplyBtn:SetPoint("LEFT", scaleValDisplay, "RIGHT", 8, 0)
+    scaleApplyBtn:SetScript("OnClick", function()
+        local val = tonumber(scaleEditBox:GetText()) or 100
+        if val < 50 then val = 50 elseif val > 200 then val = 200 end
+        scaleEditBox:SetText(tostring(val))
+        local scaleFactor = val / 100
         if not VM.db then VM.db = {} end
         VM.db.uiPrefs = VM.db.uiPrefs or {}
-        VM.db.uiPrefs.uiScale = 0.85
-        if mainFrame then mainFrame:SetScale(0.85) end
-        if panel.UpdateScaleButtons then panel.UpdateScaleButtons() end
+        VM.db.uiPrefs.uiScale = scaleFactor
+        if mainFrame then mainFrame:SetScale(scaleFactor) end
+        scaleValDisplay:SetText(string.format("(%d%%)", val))
     end)
-    panel.scale85Btn = scale85Btn
 
-    local scale100Btn = CreateModernButton(panel, 45, 20, "100%")
-    scale100Btn:SetPoint("LEFT", scale85Btn, "RIGHT", 4, 0)
-    scale100Btn:SetScript("OnClick", function()
-        if not VM.db then VM.db = {} end
-        VM.db.uiPrefs = VM.db.uiPrefs or {}
-        VM.db.uiPrefs.uiScale = 1.0
-        if mainFrame then mainFrame:SetScale(1.0) end
-        if panel.UpdateScaleButtons then panel.UpdateScaleButtons() end
-    end)
-    panel.scale100Btn = scale100Btn
-
-    local scale115Btn = CreateModernButton(panel, 45, 20, "115%")
-    scale115Btn:SetPoint("LEFT", scale100Btn, "RIGHT", 4, 0)
-    scale115Btn:SetScript("OnClick", function()
-        if not VM.db then VM.db = {} end
-        VM.db.uiPrefs = VM.db.uiPrefs or {}
-        VM.db.uiPrefs.uiScale = 1.15
-        if mainFrame then mainFrame:SetScale(1.15) end
-        if panel.UpdateScaleButtons then panel.UpdateScaleButtons() end
-    end)
-    panel.scale115Btn = scale115Btn
-
-    local function UpdateScaleButtons()
+    local function UpdateScaleDisplay()
         local scale = GetUIPrefs().uiScale or 1.0
-        local function StyleScaleBtn(btn, val)
-            if math.abs(scale - val) < 0.01 then
-                btn:SetBackdropColor(0.15, 0.28, 0.42, 1)
-                btn:SetBackdropBorderColor(THEME.accent[1], THEME.accent[2], THEME.accent[3], 1)
-                btn.label:SetTextColor(1, 0.82, 0)
-            else
-                btn:SetBackdropColor(THEME.btnBg[1], THEME.btnBg[2], THEME.btnBg[3], 1)
-                btn:SetBackdropBorderColor(THEME.border[1], THEME.border[2], THEME.border[3], 1)
-                btn.label:SetTextColor(0.6, 0.6, 0.6)
-            end
-        end
-        StyleScaleBtn(scale85Btn, 0.85)
-        StyleScaleBtn(scale100Btn, 1.0)
-        StyleScaleBtn(scale115Btn, 1.15)
+        local pct = math.floor(scale * 100 + 0.5)
+        scaleEditBox:SetText(tostring(pct))
+        scaleValDisplay:SetText(string.format("(%d%%)", pct))
     end
-    panel.UpdateScaleButtons = UpdateScaleButtons
+    panel.UpdateScaleButtons = UpdateScaleDisplay
 
     -- Show Minimap Button checkbox
     local minimapCb = CreateFrame("CheckButton", nil, panel, "UICheckButtonTemplate")
     minimapCb:SetSize(20, 20)
-    minimapCb:SetPoint("LEFT", scale115Btn, "RIGHT", 24, 0)
+    minimapCb:SetPoint("LEFT", scaleApplyBtn, "RIGHT", 24, 0)
     minimapCb.label = minimapCb:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     minimapCb.label:SetPoint("LEFT", minimapCb, "RIGHT", 4, 0)
     minimapCb.label:SetText("Show Minimap Button")
@@ -3012,6 +3067,9 @@ function UI:CreateOfficerPopupFrame()
     popupFrame = CreateFrame("Frame", "VaultManagerOfficerPopup", UIParent, "BackdropTemplate")
     popupFrame:SetSize(480, 270)
     popupFrame:SetPoint("TOP", 0, -110)
+    popupFrame:SetFrameStrata("FULLSCREEN_DIALOG")
+    popupFrame:SetFrameLevel(200)
+    popupFrame:SetClampedToScreen(true)
     popupFrame:SetMovable(true)
     popupFrame:EnableMouse(true)
     popupFrame:RegisterForDrag("LeftButton")

@@ -220,6 +220,7 @@ function Comms:OnMessageReceived(msg, sender)
         local gold = tonumber(parts[4]) or 0
         local numTabs = tonumber(parts[5]) or 0
         if scanTime == 0 then return end
+        if scanTime < (VM.db.inventory.lastScan or 0) then return end
 
         local nowServer = (GetServerTime and GetServerTime()) or time()
         if scanTime > nowServer + 60 then
@@ -255,7 +256,32 @@ function Comms:OnMessageReceived(msg, sender)
         local isPurchased = (isPurchasedNum == nil) or (isPurchasedNum == 1)
         if tabName == "Not purchased" then isPurchased = false end
         if VM.db.inventory.lastScan == 0 then return end
-        if scanTime >= (VM.db.inventory.lastScan or 0) and tabIdx then
+        if scanTime < (VM.db.inventory.lastScan or 0) then return end
+        if tabIdx then
+            local localTab = VM.db.inventory.tabs[tabIdx]
+            if localTab and localTab.items and next(localTab.items) and (not isPurchased or tabName == "Not purchased") then
+                local hasUnaccountedItems = false
+                for _, lItem in pairs(localTab.items) do
+                    local foundOut = false
+                    for _, tx in pairs(VM.db.ledger) do
+                        if not tx.deleted and tx.type == "OUT" and (tx.tab or 1) == tabIdx then
+                            local txItemKey = (tx.itemID and tx.itemID > 0) and tostring(tx.itemID) or tostring(tx.itemLink or tx.itemName or "")
+                            local lItemKey = (lItem.itemID and lItem.itemID > 0) and tostring(lItem.itemID) or tostring(lItem.link or lItem.name or "")
+                            if txItemKey == lItemKey and math.abs((tx.timestamp or 0) - scanTime) <= 86400 then
+                                foundOut = true
+                                break
+                            end
+                        end
+                    end
+                    if not foundOut then
+                        hasUnaccountedItems = true
+                        break
+                    end
+                end
+                if hasUnaccountedItems then
+                    return
+                end
+            end
             VM.db.inventory.tabs[tabIdx] = VM.db.inventory.tabs[tabIdx] or { items = {} }
             VM.db.inventory.tabs[tabIdx].name = tabName
             VM.db.inventory.tabs[tabIdx].icon = tabIcon
@@ -274,7 +300,7 @@ function Comms:OnMessageReceived(msg, sender)
         local itemType = (#parts >= 10) and UnescapeStr(parts[10]) or ""
         local equipSlot = (#parts >= 11) and UnescapeStr(parts[11]) or ""
         if VM.db.inventory.lastScan == 0 then return end
-        if scanTime >= (VM.db.inventory.lastScan or 0) and tabIdx and (itemID or itemName) then
+        if scanTime < (VM.db.inventory.lastScan or 0) then return end
             local key = (itemID and itemID ~= 0) and itemID or itemName
             VM.db.inventory.tabs[tabIdx] = VM.db.inventory.tabs[tabIdx] or { name = "Tab " .. tabIdx, items = {} }
             local syncItemType = (itemType ~= "") and itemType or nil
@@ -310,7 +336,6 @@ function Comms:OnMessageReceived(msg, sender)
                 equipSlot = syncEquipSlot
             }
             if VM.UI then VM.UI:RefreshAll() end
-        end
 
     elseif cmd == "REQ" then
         local req = {
@@ -403,30 +428,93 @@ function Comms:OnMessageReceived(msg, sender)
 
     elseif cmd == "TX" then
         local isNewFormat = (#parts >= 15)
+        local rawType = UnescapeStr(parts[3])
+        local player = UnescapeStr(parts[4])
+        local itemID = tonumber(parts[5]) or 0
+        local count = tonumber(parts[6]) or 1
+        local copper = tonumber(parts[7]) or 0
+        local charged = tonumber(parts[8]) or 0
+        local timestamp = tonumber(parts[9]) or 0
+        local officer = UnescapeStr(parts[10])
+        local source = UnescapeStr(parts[11])
+        local itemName = UnescapeStr(parts[12])
+        local itemLink = UnescapeStr(parts[13])
+        local deleted = isNewFormat and (tonumber(parts[14]) == 1) or false
+        local updatedAt = tonumber(isNewFormat and parts[15] or parts[14]) or timestamp or 0
+        local rawSender = (#parts >= 16) and UnescapeStr(parts[16]) or player
+        local attributedTo = (#parts >= 17) and UnescapeStr(parts[17]) or player
+        local txId = UnescapeStr(parts[2])
+
+        if copper == 0 and charged > 0 and (itemLink == "GOLD" or rawType:find("GOLD")) then
+            copper = charged
+        end
+
+        local isGold = (itemLink == "GOLD" or itemLink:find("GOLD"))
+            or (itemID == 0 and (copper > 0 or rawType:find("GOLD") or txId:find("^GOLD") or source:find("GOLD") or source == "BANK_MONEY_LOG" or source == "MANUAL_ASSIGN_PAYMENT"))
+            or (txId:find("^GOLD_"))
+            or (rawType:find("GOLD"))
+
+        local txType = rawType
+        if isGold then
+            itemID = 0
+            itemLink = "GOLD"
+            if rawType:find("OUT") or txId:find("^GOLD_OUT") or source:find("OUT") then
+                txType = "OUT"
+                if itemName == "" or itemName == "Gold Deposit" then itemName = "Gold Withdrawal" end
+            else
+                txType = "IN"
+                if itemName == "" or itemName == "Gold Withdrawal" then itemName = "Gold Deposit" end
+            end
+        elseif rawType == "GOLD_IN" or (itemID == 0 and rawType == "IN" and (source == "BANK_MONEY_LOG" or itemLink == "GOLD")) then
+            txType = "IN"
+            if itemLink == "" then itemLink = "GOLD" end
+            isGold = true
+        elseif rawType == "GOLD_OUT" or (itemID == 0 and rawType == "OUT" and (source == "BANK_MONEY_LOG" or itemLink == "GOLD")) then
+            txType = "OUT"
+            if itemLink == "" then itemLink = "GOLD" end
+            isGold = true
+        end
+
         local tx = {
-            id = UnescapeStr(parts[2]),
-            type = UnescapeStr(parts[3]),
-            player = UnescapeStr(parts[4]),
-            itemID = tonumber(parts[5]) or 0,
-            count = tonumber(parts[6]),
-            unitPriceAtTime = tonumber(parts[7]) or 0,
-            chargedUnitPrice = tonumber(parts[8]) or 0,
-            timestamp = tonumber(parts[9]) or 0,
-            officer = UnescapeStr(parts[10]),
-            source = UnescapeStr(parts[11]),
-            itemName = UnescapeStr(parts[12]),
-            itemLink = UnescapeStr(parts[13]),
-            deleted = isNewFormat and (tonumber(parts[14]) == 1) or false,
-            updatedAt = tonumber(isNewFormat and parts[15] or parts[14]) or tonumber(parts[9]) or 0,
-            rawSender = (#parts >= 16) and UnescapeStr(parts[16]) or UnescapeStr(parts[4]),
-            attributedTo = (#parts >= 17) and UnescapeStr(parts[17]) or UnescapeStr(parts[4]),
-            isManual = (UnescapeStr(parts[11]) == "MANUAL_GOLD" or UnescapeStr(parts[11]) == "MANUAL")
+            id = txId,
+            type = txType,
+            player = player,
+            itemID = itemID,
+            count = count,
+            unitPriceAtTime = copper,
+            chargedUnitPrice = charged,
+            timestamp = timestamp,
+            officer = officer,
+            source = source,
+            itemName = itemName,
+            itemLink = itemLink,
+            deleted = deleted,
+            updatedAt = updatedAt,
+            rawSender = rawSender,
+            attributedTo = attributedTo,
+            isFFA = isGold and false or nil,
+            isManual = (source == "MANUAL_GOLD" or source == "MANUAL")
         }
         local existing = VM.db.ledger[tx.id]
-        if existing and existing.unitPriceAtTime and existing.unitPriceAtTime > 0 then
+
+        -- Deduplicate gold transactions across clients that generated different IDs
+        if not existing and isGold then
+            for _, exTx in pairs(VM.db.ledger) do
+                if not exTx.deleted and exTx.player == tx.player and exTx.type == tx.type and (exTx.itemLink == "GOLD" or exTx.itemID == 0) and (exTx.unitPriceAtTime or 0) == (tx.unitPriceAtTime or 0) then
+                    -- Only merge if created by different officers/scanners for the same log line within a 24h window
+                    if exTx.officer ~= tx.officer and math.abs((exTx.timestamp or 0) - (tx.timestamp or 0)) <= 86400 then
+                        existing = exTx
+                        tx.id = exTx.id -- adopt existing id to merge
+                        break
+                    end
+                end
+            end
+        end
+
+        if existing and existing.unitPriceAtTime and existing.unitPriceAtTime > 0 and (tx.itemLink == "GOLD" or tx.itemID == 0) then
             tx.unitPriceAtTime = existing.unitPriceAtTime
         end
-        if not fromOfficer and (existing or (tx.source ~= "BANK_LOG" and tx.source ~= "BANK_MONEY_LOG")) then return end
+        if not fromOfficer and not isGold and (tx.source ~= "BANK_LOG" and tx.source ~= "BANK_MONEY_LOG" and tx.source ~= "GOLD_IN" and tx.source ~= "GOLD_OUT" and tx.source ~= "MANUAL_GOLD" and tx.itemLink ~= "GOLD") then return end
         if tx.id ~= "" and (not existing or tx.updatedAt > (existing.updatedAt or existing.timestamp or 0)) then
             VM.db.ledger[tx.id] = tx
             if VM.UI then VM.UI:RefreshAll() end

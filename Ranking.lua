@@ -60,7 +60,8 @@ function Ranking:GetRankingData(sortMode, sortDir, priceMode, periodFilter, hide
     local groups = {}
 
     for _, tx in pairs(VM.db.ledger) do
-        if not tx.deleted and (includeFFA or not tx.isFFA) and MatchesPeriod(tx.timestamp, period) then
+        local isGold = (tx.itemID == 0 or tx.itemLink == "GOLD")
+        if not tx.deleted and (includeFFA or not tx.isFFA or isGold) and MatchesPeriod(tx.timestamp, period) then
             local key = (tx.player == "UNATTRIBUTED") and "UNATTRIBUTED" or VM:GetMainFor(tx.player)
             if not groups[key] then
                 groups[key] = {

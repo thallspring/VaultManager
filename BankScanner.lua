@@ -5,13 +5,40 @@ local Scanner = VM.BankScanner
 local MAX_SLOTS_PER_TAB = 98
 local lastScanTime = 0
 local SCAN_COOLDOWN = 2.0
-local debounceTimer = nil
-local DEBOUNCE_DELAY = 0.6
 local isScanning = false
 local ignoreEventsUntil = 0
 local suppressChatPrint = false
 
 Scanner.scanState = "READY" -- "READY" | "SCANNING" | "COMPLETE" | "STALE"
+
+-- Debounce frame using OnUpdate (without C_Timer)
+local scanDebounceFrame = CreateFrame("Frame")
+local scanDebounceTimeLeft = 0
+local scanDebounceIsFinal = false
+scanDebounceFrame:Hide()
+scanDebounceFrame:SetScript("OnUpdate", function(self, elapsed)
+    scanDebounceTimeLeft = scanDebounceTimeLeft - elapsed
+    if scanDebounceTimeLeft <= 0 then
+        self:Hide()
+        if Scanner.RunFullScanPass then
+            Scanner:RunFullScanPass(scanDebounceIsFinal)
+        end
+    end
+end)
+
+-- Delayed re-scan frame using OnUpdate (without C_Timer)
+local rescanFrame = CreateFrame("Frame")
+local rescanTimeLeft = 0
+rescanFrame:Hide()
+rescanFrame:SetScript("OnUpdate", function(self, elapsed)
+    rescanTimeLeft = rescanTimeLeft - elapsed
+    if rescanTimeLeft <= 0 then
+        self:Hide()
+        if Scanner.RunFullScanPass then
+            Scanner:RunFullScanPass(true)
+        end
+    end
+end)
 
 local GB_API = {
     GetNumTabs = function() 
@@ -93,8 +120,14 @@ function Scanner:Init()
     f:SetScript("OnEvent", function(_, event)
         if VM.isUnguilded then return end
         VM:LogDebug("BankScanner event: " .. tostring(event))
+        if event == "GUILDBANKLOG_UPDATE" or event == "GUILDBANK_UPDATE_MONEY" then
+            suppressChatPrint = true
+            self:TriggerDebouncedScan(false)
+            return
+        end
+
         if isScanning or GetTime() < ignoreEventsUntil then
-            if event == "GUILDBANKBAGSLOTS_CHANGED" or event == "GUILDBANKLOG_UPDATE" or event == "GUILDBANK_UPDATE_TABS" or event == "GUILDBANK_UPDATE_MONEY" then
+            if event == "GUILDBANKBAGSLOTS_CHANGED" or event == "GUILDBANK_UPDATE_TABS" then
                 return
             end
         end
@@ -111,6 +144,7 @@ function Scanner:Init()
             self:TriggerDebouncedScan(true)
         elseif event == "GUILDBANKFRAME_CLOSED" then
             isScanning = false
+            scanDebounceFrame:Hide()
             if self.scanState == "SCANNING" then
                 self.scanState = "READY"
             end
@@ -118,10 +152,6 @@ function Scanner:Init()
                 VM.UI:UpdateScanStatusButton()
             end
         elseif event == "GUILDBANKBAGSLOTS_CHANGED" or event == "GUILDBANK_UPDATE_TABS" then
-            if isScanning or GetTime() < ignoreEventsUntil then return end
-            suppressChatPrint = true
-            self:TriggerDebouncedScan(false)
-        elseif event == "GUILDBANKLOG_UPDATE" or event == "GUILDBANK_UPDATE_MONEY" then
             if isScanning or GetTime() < ignoreEventsUntil then return end
             suppressChatPrint = true
             self:TriggerDebouncedScan(false)
@@ -133,17 +163,14 @@ function Scanner:TriggerDebouncedScan(isFinal)
     self.scanState = "SCANNING"
     isScanning = true
     ignoreEventsUntil = GetTime() + 2.0
+    if isFinal then
+        scanDebounceIsFinal = true
+    end
+    scanDebounceTimeLeft = 0.75
+    scanDebounceFrame:Show()
     if VM.UI and VM.UI.UpdateScanStatusButton then
         VM.UI:UpdateScanStatusButton()
     end
-
-    if debounceTimer then
-        debounceTimer:Cancel()
-    end
-    debounceTimer = C_Timer.NewTimer(DEBOUNCE_DELAY, function()
-        debounceTimer = nil
-        self:RunFullScanPass(isFinal)
-    end)
 end
 
 function Scanner:RequestAllTabsAndLogs()
@@ -180,11 +207,9 @@ function Scanner:ForceScan()
     end
 
     self:RequestAllTabsAndLogs()
-    if debounceTimer then debounceTimer:Cancel() end
-    debounceTimer = C_Timer.NewTimer(0.8, function()
-        debounceTimer = nil
-        self:RunFullScanPass(true)
-    end)
+    scanDebounceIsFinal = true
+    scanDebounceTimeLeft = 0.75
+    scanDebounceFrame:Show()
 end
 
 function Scanner:RunFullScanPass(isFinal)
@@ -217,6 +242,7 @@ function Scanner:ScanBank()
     local totalItemsScanned = 0
     local uniqueItemsCount = 0
     local oldTabs = VM.db.inventory and VM.db.inventory.tabs or {}
+    local hasPendingItems = false
 
     for tab = 1, maxTabs do
         local isPurchased = (tab <= numTabs)
@@ -248,6 +274,10 @@ function Scanner:ScanBank()
                     local link = GB_API.GetItemLink(tab, slot)
 
                     count = tonumber(count) or 1
+                    if texture and count > 0 and (not link or link == "") then
+                        hasPendingItems = true
+                    end
+
                     if link and link ~= "" and count > 0 then
                         local itemID = tonumber(link:match("item:(%d+)"))
                         local itemName = link:match("%[(.-)%]") or link
@@ -343,6 +373,17 @@ function Scanner:ScanBank()
         end
     end
 
+    if hasPendingItems then
+        VM:LogDebug("ScanBank detected occupied slots with missing item info; scheduling delayed re-scan.")
+        self.scanState = "STALE"
+        rescanTimeLeft = 0.75
+        rescanFrame:Show()
+        if bankMoney > 0 and VM.db.inventory then
+            VM.db.inventory.gold = bankMoney
+        end
+        return 0
+    end
+
     if totalItemsScanned == 0 and VM.db.inventory and VM.db.inventory.tabs and next(VM.db.inventory.tabs) then
         local hasExistingItems = false
         for _, tabData in pairs(VM.db.inventory.tabs) do
@@ -433,14 +474,14 @@ function Scanner:ScanLogs()
                     local exItemKey = (existingTx.itemID and existingTx.itemID > 0) and tostring(existingTx.itemID) or tostring(existingTx.itemLink or existingTx.itemName or "")
                     local dataItemKey = (data.itemID > 0) and tostring(data.itemID) or data.cleanLink
                     if exItemKey == dataItemKey then
-                        if math.abs((existingTx.timestamp or 0) - data.computedTimestamp) <= 172800 then
+                        if math.abs((existingTx.timestamp or 0) - data.computedTimestamp) <= 259200 then
                             existingCount = existingCount + 1
                         end
                     end
                 end
             end
 
-            local sig = string.format("v141_t%d:%s:%s:%s:%d:%d", data.tab, data.txDir, data.normName, (data.itemID > 0) and tostring(data.itemID) or data.cleanLink, data.count, math.floor(data.computedTimestamp / 172800))
+            local sig = string.format("v141_t%d:%s:%s:%s:%d:%d", data.tab, data.txDir, data.normName, (data.itemID > 0) and tostring(data.itemID) or data.cleanLink, data.count, math.floor(data.computedTimestamp / 259200))
             if not VM.db.processedBankLogs[sig] then
                 local totalAllowed = snapshotCounts[data.tupleKey] or 1
                 if existingCount < totalAllowed then
@@ -509,14 +550,15 @@ function Scanner:ScanMoneyLogs()
     local addedCount = 0
     VM.db.processedBankLogs = VM.db.processedBankLogs or {}
 
+    local snapshotCounts = {}
+    local txDataList = {}
+
     for i = 1, numMoneyTx do
-        local txType, name, amount = GB_API.GetMoneyTransaction(i)
+        local txType, name, amount, years, months, days, hours = GB_API.GetMoneyTransaction(i)
         local typeStr = tostring(txType or ""):lower()
 
         -- Filter out repairs and tab purchases explicitly
-        if typeStr:find("repair") or typeStr:find("buytab") then
-            -- Ignore operational expenses
-        else
+        if not (typeStr:find("repair") or typeStr:find("buytab")) then
             local copper = tonumber(amount) or 0
             if copper > 0 then
                 local normName = (name and name ~= "") and VM:NormalizeName(name) or "UNATTRIBUTED"
@@ -524,53 +566,92 @@ function Scanner:ScanMoneyLogs()
                 local isWithdraw = (typeStr:find("withdraw") or typeStr == "2")
 
                 if isDeposit or isWithdraw then
-                    local prefix = isDeposit and "money_in" or "money_out"
-                    local sig = string.format("%s_%d_%s_%d", prefix, i, normName, copper)
-                    if not VM.db.processedBankLogs[sig] then
-                        VM.db.processedBankLogs[sig] = true
-                        local exists = false
-                        for _, existingTx in pairs(VM.db.ledger) do
-                            if not existingTx.deleted and existingTx.player == normName and (existingTx.unitPriceAtTime * (existingTx.count or 1)) == copper and existingTx.itemLink == "GOLD" and ((isDeposit and existingTx.type == "IN") or (isWithdraw and existingTx.type == "OUT")) then
-                                exists = true
+                    local txDir = isDeposit and "IN" or "OUT"
+                    local ageSec = nil
+                    if years or months or days or hours then
+                        ageSec = ((tonumber(years) or 0) * 365 * 86400)
+                               + ((tonumber(months) or 0) * 30 * 86400)
+                               + ((tonumber(days) or 0) * 86400)
+                               + ((tonumber(hours) or 0) * 3600)
+                    end
+                    local computedTimestamp = ageSec and (time() - ageSec) or (time() - ((numMoneyTx - i) * 1800))
+                    local dayKey = date("%Y-%m-%d", computedTimestamp)
+                    local tupleKey = string.format("money:%s:%s:%d:%s", txDir, normName, copper, dayKey)
+
+                    snapshotCounts[tupleKey] = (snapshotCounts[tupleKey] or 0) + 1
+                    local occIdx = snapshotCounts[tupleKey]
+
+                    table.insert(txDataList, {
+                        index = i,
+                        txDir = txDir,
+                        isDeposit = isDeposit,
+                        isWithdraw = isWithdraw,
+                        normName = normName,
+                        copper = copper,
+                        computedTimestamp = computedTimestamp,
+                        dayKey = dayKey,
+                        tupleKey = tupleKey,
+                        occIdx = occIdx
+                    })
+                end
+            end
+        end
+    end
+
+    for _, data in ipairs(txDataList) do
+        local existingCount = 0
+        for _, existingTx in pairs(VM.db.ledger) do
+            if not existingTx.deleted and existingTx.player == data.normName and existingTx.type == data.txDir and (existingTx.itemLink == "GOLD" or existingTx.itemID == 0) and ((existingTx.unitPriceAtTime or 0) * (existingTx.count or 1)) == data.copper then
+                local exDay = date("%Y-%m-%d", existingTx.timestamp or 0)
+                if exDay == data.dayKey or math.abs((existingTx.timestamp or 0) - data.computedTimestamp) <= 86400 then
+                    existingCount = existingCount + 1
+                end
+            end
+        end
+
+        local sig = string.format("v142_m:%s:%s:%d:%s:%d", data.txDir, data.normName, data.copper, data.dayKey, data.occIdx)
+        if not VM.db.processedBankLogs[sig] then
+            local totalAllowed = snapshotCounts[data.tupleKey] or 1
+            if existingCount < totalAllowed then
+                VM.db.processedBankLogs[sig] = true
+                if data.isDeposit then
+                    -- Trade-to-Bank Auto-Attribution
+                    local attributedTo = data.normName
+                    local rawSender = data.normName
+                    if VM.pendingTradePayments and #VM.pendingTradePayments > 0 then
+                        local cutoff = time() - 600
+                        for idx = #VM.pendingTradePayments, 1, -1 do
+                            local p = VM.pendingTradePayments[idx]
+                            if p.timestamp < cutoff then
+                                table.remove(VM.pendingTradePayments, idx)
+                            elseif p.amount == data.copper then
+                                attributedTo = p.payer
+                                rawSender = data.normName
+                                table.remove(VM.pendingTradePayments, idx)
+                                VM:Print(string.format("Auto-attributed %s gold deposit to |cffffff00%s|r (from recent trade).",
+                                    VM:FormatMoney(data.copper), attributedTo))
                                 break
                             end
                         end
+                    end
 
-                        if not exists then
-                            if isDeposit then
-                                -- Trade-to-Bank Auto-Attribution
-                                local attributedTo = normName
-                                local rawSender = normName
-                                if VM.pendingTradePayments and #VM.pendingTradePayments > 0 then
-                                    local cutoff = time() - 600
-                                    for idx = #VM.pendingTradePayments, 1, -1 do
-                                        local p = VM.pendingTradePayments[idx]
-                                        if p.timestamp < cutoff then
-                                            table.remove(VM.pendingTradePayments, idx)
-                                        elseif p.amount == copper then
-                                            attributedTo = p.payer
-                                            rawSender = normName
-                                            table.remove(VM.pendingTradePayments, idx)
-                                            VM:Print(string.format("Auto-attributed %s gold deposit to |cffffff00%s|r (from recent trade).",
-                                                VM:FormatMoney(copper), attributedTo))
-                                            break
-                                        end
-                                    end
-                                end
+                    local tx = VM.Ledger:RecordGoldDeposit(attributedTo, data.copper, "BANK_MONEY_LOG", rawSender)
+                    if tx then
+                        tx.isFFA = false
+                    end
 
-                                VM.Ledger:RecordGoldDeposit(attributedTo, copper, "BANK_MONEY_LOG", rawSender)
-
-                                if attributedTo == normName and normName == VM:GetPlayerName() and VM:IsOfficer() then
-                                    VM:Print(string.format("Gold deposit of %s recorded. Use 'Reassign' in the Ledger if this was paid by another member.",
-                                        VM:FormatMoney(copper)))
-                                end
-                            else
-                                VM.Ledger:RecordGoldWithdrawal(normName, copper, "BANK_MONEY_LOG")
-                            end
-                            addedCount = addedCount + 1
-                        end
+                    if attributedTo == data.normName and data.normName == VM:GetPlayerName() and VM:IsOfficer() then
+                        VM:Print(string.format("Gold deposit of %s recorded. Use 'Reassign' in the Ledger if this was paid by another member.",
+                            VM:FormatMoney(data.copper)))
+                    end
+                else
+                    local tx = VM.Ledger:RecordGoldWithdrawal(data.normName, data.copper, "BANK_MONEY_LOG")
+                    if tx then
+                        tx.isFFA = false
                     end
                 end
+                addedCount = addedCount + 1
+                existingCount = existingCount + 1
             end
         end
     end

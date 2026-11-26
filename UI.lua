@@ -3565,28 +3565,36 @@ function UI:BuildSettingsPanel(panel)
 
         r.label = r:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
         r.label:SetPoint("LEFT", 10, 0)
-        r.label:SetWidth(90)
+        r.label:SetWidth(96)
         r.label:SetJustifyH("LEFT")
 
-        r.freeBtn = CreateModernButton(r, 75, 20, "Free-for-All")
-        r.freeBtn:SetPoint("LEFT", 104, 0)
+        r.freeBtn = CreateModernButton(r, 80, 20, "Free-for-All")
+        r.freeBtn:SetPoint("LEFT", 110, 0)
 
-        r.pctBtn = CreateModernButton(r, 65, 20, "% of AH")
-        r.pctBtn:SetPoint("LEFT", 182, 0)
+        r.pctBtn = CreateModernButton(r, 68, 20, "% of AH")
+        r.pctBtn:SetPoint("LEFT", 194, 0)
 
-        r.pctBox = CreateModernEditBox(r, 34, 20, true)
-        r.pctBox:SetPoint("LEFT", 250, 0)
+        r.pctBox = CreateModernEditBox(r, 36, 20, true)
+        r.pctBox:SetPoint("LEFT", 266, 0)
         r.pctBox:SetText("50")
 
-        r.lockBtn = CreateModernButton(r, 55, 20, "Locked")
-        r.lockBtn:SetPoint("LEFT", 287, 0)
+        r.lockBtn = CreateModernButton(r, 62, 20, "Locked")
+        r.lockBtn:SetPoint("LEFT", 306, 0)
 
-        r.saveBtn = CreateModernButton(r, 105, 20, "Save & Broadcast", THEME.accent)
-        r.saveBtn:SetPoint("LEFT", 345, 0)
+        r.saveBtn = CreateModernButton(r, 62, 20, "Save", THEME.accent)
+        r.saveBtn:SetPoint("LEFT", 374, 0)
+        r.saveBtn:HookScript("OnEnter", function(selfBtn)
+            GameTooltip:SetOwner(selfBtn, "ANCHOR_TOP")
+            GameTooltip:SetText("Save and broadcast tab rule to guild")
+            GameTooltip:Show()
+        end)
+        r.saveBtn:HookScript("OnLeave", function()
+            GameTooltip:Hide()
+        end)
 
         r.status = r:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-        r.status:SetPoint("LEFT", 456, 0)
-        r.status:SetWidth(280)
+        r.status:SetPoint("LEFT", 446, 0)
+        r.status:SetWidth(290)
         r.status:SetJustifyH("LEFT")
 
         r.freeBtn:SetScript("OnClick", function()
@@ -3829,7 +3837,9 @@ function UI:BuildSettingsPanel(panel)
 
     local maintDesc = lower:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
     maintDesc:SetPoint("LEFT", clearCacheBtn, "RIGHT", 10, 0)
-    maintDesc:SetText("Clears temporary bank & request cache without affecting ledger or rules.")
+    maintDesc:SetWidth(425)
+    maintDesc:SetJustifyH("LEFT")
+    maintDesc:SetText("Clears bank & request cache (keeps ledger and rules).")
     panel.maintDesc = maintDesc
 end
 
@@ -3869,25 +3879,8 @@ function UI:RefreshSettings()
         local scanTimeStr = lastScan > 0 and date("%d/%m %H:%M", lastScan) or "Never"
         local scanBy = (inv and (inv.lastScanBy or inv.scannedBy)) or "None"
 
-        local validSigs = 0
-        local totalRules = 0
-        if VM.db and VM.db.tabRules then
-            local guildName = GetGuildInfo("player") or VM:GetActiveGuildKey() or ""
-            for idx, rule in pairs(VM.db.tabRules) do
-                if rule and VM:IsTabPurchased(idx) then
-                    totalRules = totalRules + 1
-                    local expected = VM:ComputeRuleSignature(guildName, idx, rule)
-                    if rule.sig and rule.sig == expected then
-                        validSigs = validSigs + 1
-                    end
-                end
-            end
-        end
-        local sigStatus = (totalRules == 0) and "|cffaaaaaaNo Rules Set|r"
-            or (validSigs == totalRules and "|cff44dd77All Signatures Valid|r" or string.format("|cffff5555%d/%d Valid|r", validSigs, totalRules))
-
-        panel.diagInfo:SetText(string.format("Addon Version: |cffffffffv%s|r  |  Protocol: |cff26a6f2v%d|r  |  Rule Signatures: %s\nLast Bank Scan: |cffffffff%s|r (%s)  |  Guild Bucket: |cffffffff%s|r",
-            addonVer, protoVer, sigStatus, scanBy, scanTimeStr, gKey))
+        panel.diagInfo:SetText(string.format("Addon Version: |cffffffffv%s|r  |  Protocol: |cff26a6f2v%d|r  |  Guild Bucket: |cffffffff%s|r\nLast Bank Scan: |cffffffff%s|r (%s)",
+            addonVer, protoVer, gKey, scanBy, scanTimeStr))
     end
 
     local function StyleButton(btn, isActive, activeBg, activeBorder, activeText)

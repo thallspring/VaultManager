@@ -38,6 +38,29 @@ local function UnescapeStr(s)
     return tostring(s or ""):gsub("%%0A", "\n"):gsub("%%7C", "|"):gsub("%%25", "%%")
 end
 
+local function GetMaxPayloadLen()
+    local guildName = GetGuildInfo("player") or ""
+    local suffixLen = 1 + #EscapeStr(guildName)
+    return math.max(100, 254 - suffixLen)
+end
+
+local function ResolveReceivedItemLink(itemID, itemLink, itemName)
+    if itemLink and itemLink ~= "" then
+        return itemLink
+    end
+    local numID = tonumber(itemID)
+    if numID and numID > 0 and GetItemInfo then
+        local _, realLink = GetItemInfo(numID)
+        if realLink and realLink ~= "" then
+            return realLink
+        end
+    end
+    if itemName and itemName ~= "" then
+        return itemName
+    end
+    return nil
+end
+
 local function ScheduleUIRefresh()
     uiRefreshNeeded = true
     uiRefreshTimer = UI_REFRESH_DEBOUNCE
@@ -117,6 +140,10 @@ function Comms:SendRaw(payload)
     local guildName = GetGuildInfo("player") or ""
     if guildName == "" then return end
     local fullPayload = payload .. "|" .. EscapeStr(guildName)
+    if #fullPayload > 255 then
+        VM:LogDebug(string.format("Comms:SendRaw skipped oversized payload (%d bytes): %s", #fullPayload, tostring(payload):sub(1, 32)))
+        return
+    end
     for _, existing in ipairs(MSG_QUEUE) do
         if existing == fullPayload then return end
     end
@@ -437,7 +464,7 @@ function Comms:OnMessageReceived(msg, sender)
         local itemID = tonumber(parts[4])
         local count = tonumber(parts[5])
         local itemName = UnescapeStr(parts[6])
-        local itemLink = UnescapeStr(parts[7])
+        local rawItemLink = UnescapeStr(parts[7])
         local icon = UnescapeStr(parts[8])
         local ahPrice = tonumber(parts[9]) or 0
         local itemType = (#parts >= 10) and UnescapeStr(parts[10]) or ""
@@ -446,12 +473,13 @@ function Comms:OnMessageReceived(msg, sender)
         if scanTime < (VM.db.inventory.lastScan or 0) then return end
         if not tabIdx then return end
 
+        local resolvedLink = ResolveReceivedItemLink(itemID, rawItemLink, itemName)
         local key = (itemID and itemID ~= 0) and itemID or itemName
         VM.db.inventory.tabs[tabIdx] = VM.db.inventory.tabs[tabIdx] or { name = "Tab " .. tabIdx, isPurchased = true, items = {} }
         local syncItemType = (itemType ~= "") and itemType or nil
         local syncEquipSlot = (equipSlot ~= "") and equipSlot or nil
         if (not syncItemType or not syncEquipSlot) and GetItemInfo then
-            local lookup = (itemLink ~= "") and itemLink or (itemID and itemID ~= 0 and itemID)
+            local lookup = (rawItemLink ~= "") and rawItemLink or (itemID and itemID ~= 0 and itemID)
             if lookup then
                 local r1, r2, r3, r4, r5, r6, r7, r8, r9 = GetItemInfo(lookup)
                 if not syncItemType then
@@ -474,8 +502,8 @@ function Comms:OnMessageReceived(msg, sender)
             itemID = itemID or 0,
             count = count,
             name = itemName,
-            link = itemLink,
-            itemLink = itemLink,
+            link = resolvedLink,
+            itemLink = resolvedLink,
             icon = icon,
             ahPrice = ahPrice,
             itemType = syncItemType,
@@ -492,11 +520,16 @@ function Comms:OnMessageReceived(msg, sender)
         local completedMethod = (#parts >= 22) and UnescapeStr(parts[22]) or ""
 
         local rawItemID = UnescapeStr(parts[4])
+        local parsedItemID = isGoldRequest and 0 or (tonumber(rawItemID) or rawItemID)
+        local itemName = UnescapeStr(parts[15])
+        local rawItemLink = UnescapeStr(parts[16])
+        local resolvedLink = isGoldRequest and "GOLD" or ResolveReceivedItemLink(parsedItemID, rawItemLink, itemName)
+
         local req = {
             id = UnescapeStr(parts[2]),
             requester = UnescapeStr(parts[3]),
             isGoldRequest = isGoldRequest,
-            itemID = isGoldRequest and 0 or (tonumber(rawItemID) or rawItemID),
+            itemID = parsedItemID,
             count = tonumber(parts[5]) or 1,
             tab = tonumber(parts[6]) or 0,
             status = UnescapeStr(parts[7]),
@@ -511,8 +544,8 @@ function Comms:OnMessageReceived(msg, sender)
             quotedTotalPrice = quotedTotalPrice,
             priceMode = UnescapeStr(parts[13]),
             pricePercent = tonumber(parts[14]) or 0,
-            itemName = UnescapeStr(parts[15]),
-            itemLink = UnescapeStr(parts[16]),
+            itemName = itemName,
+            itemLink = resolvedLink,
             reason = reason,
         }
         if req.isGoldRequest then
@@ -627,7 +660,7 @@ function Comms:OnMessageReceived(msg, sender)
         local officer = UnescapeStr(parts[10])
         local source = UnescapeStr(parts[11])
         local itemName = UnescapeStr(parts[12])
-        local itemLink = UnescapeStr(parts[13])
+        local rawItemLink = UnescapeStr(parts[13])
         local deleted = isNewFormat and (tonumber(parts[14]) == 1) or false
         local updatedAt = tonumber(isNewFormat and parts[15] or parts[14]) or timestamp or 0
         local rawSender = (#parts >= 16 and parts[16] ~= "") and VM:NormalizeName(UnescapeStr(parts[16])) or player
@@ -644,16 +677,17 @@ function Comms:OnMessageReceived(msg, sender)
             recentPeerBroadcasts.txAt = nowGT
         end
 
-        if copper == 0 and charged > 0 and (itemLink == "GOLD" or rawType:find("GOLD")) then
+        if copper == 0 and charged > 0 and (rawItemLink == "GOLD" or rawType:find("GOLD")) then
             copper = charged
         end
 
-        local isGold = (itemLink == "GOLD" or itemLink:find("GOLD"))
+        local isGold = (rawItemLink == "GOLD" or rawItemLink:find("GOLD"))
             or (itemID == 0 and (copper > 0 or rawType:find("GOLD") or txId:find("^GOLD") or source:find("GOLD") or source == "BANK_MONEY_LOG" or source == "MANUAL_ASSIGN_PAYMENT" or source == "GOLD_REQUEST"))
             or (txId:find("^GOLD_"))
             or (rawType:find("GOLD"))
 
         local txType = rawType
+        local itemLink = rawItemLink
         if isGold then
             itemID = 0
             itemLink = "GOLD"
@@ -664,14 +698,16 @@ function Comms:OnMessageReceived(msg, sender)
                 txType = "IN"
                 if itemName == "" or itemName == "Gold Withdrawal" then itemName = "Gold Deposit" end
             end
-        elseif rawType == "GOLD_IN" or (itemID == 0 and rawType == "IN" and (source == "BANK_MONEY_LOG" or itemLink == "GOLD")) then
+        elseif rawType == "GOLD_IN" or (itemID == 0 and rawType == "IN" and (source == "BANK_MONEY_LOG" or rawItemLink == "GOLD")) then
             txType = "IN"
-            if itemLink == "" then itemLink = "GOLD" end
+            itemLink = "GOLD"
             isGold = true
-        elseif rawType == "GOLD_OUT" or (itemID == 0 and rawType == "OUT" and (source == "BANK_MONEY_LOG" or itemLink == "GOLD")) then
+        elseif rawType == "GOLD_OUT" or (itemID == 0 and rawType == "OUT" and (source == "BANK_MONEY_LOG" or rawItemLink == "GOLD")) then
             txType = "OUT"
-            if itemLink == "" then itemLink = "GOLD" end
+            itemLink = "GOLD"
             isGold = true
+        else
+            itemLink = ResolveReceivedItemLink(itemID, rawItemLink, itemName)
         end
 
         local isFFA = nil
@@ -786,6 +822,7 @@ end
 function Comms:BroadcastInventory()
     local inv = VM.db.inventory
     if not inv or not inv.lastScan or inv.lastScan == 0 then return end
+    local maxLen = GetMaxPayloadLen()
     local scanBy = inv.lastScanBy or inv.scannedBy or UnitName("player")
     local gold = math.floor(tonumber(inv.gold) or 0)
     local numTabs = math.floor(tonumber(inv.numTabs) or 1)
@@ -796,12 +833,20 @@ function Comms:BroadcastInventory()
             math.floor(inv.lastScan), tonumber(tabIdx) or 1, EscapeStr(tabData.name), EscapeStr(tabData.icon), isPurchased))
         if isPurchased == 1 then
             for _, item in pairs(tabData.items or {}) do
-                self:SendRaw(string.format("INV_ITEM|%d|%d|%d|%d|%s|%s|%s|%d|%s|%s",
-                    math.floor(inv.lastScan), tonumber(tabIdx) or 1,
-                    math.floor(tonumber(item.itemID) or 0), math.floor(tonumber(item.count) or 1),
-                    EscapeStr(item.name), EscapeStr(item.link), EscapeStr(item.icon),
-                    math.floor(tonumber(item.ahPrice) or 0),
-                    EscapeStr(item.itemType or ""), EscapeStr(item.equipSlot or "")))
+                local itemIDNum = math.floor(tonumber(item.itemID) or 0)
+                local function BuildInvItem(linkStr)
+                    return string.format("INV_ITEM|%d|%d|%d|%d|%s|%s|%s|%d|%s|%s",
+                        math.floor(inv.lastScan), tonumber(tabIdx) or 1,
+                        itemIDNum, math.floor(tonumber(item.count) or 1),
+                        EscapeStr(item.name), EscapeStr(linkStr), EscapeStr(item.icon),
+                        math.floor(tonumber(item.ahPrice) or 0),
+                        EscapeStr(item.itemType or ""), EscapeStr(item.equipSlot or ""))
+                end
+                local payload = BuildInvItem(item.link or "")
+                if #payload > maxLen and itemIDNum > 0 then
+                    payload = BuildInvItem("")
+                end
+                self:SendRaw(payload)
             end
         end
     end
@@ -812,30 +857,50 @@ function Comms:BroadcastRequest(req)
     if not req.isGoldRequest and (not VM.db.inventory or (VM.db.inventory.lastScan or 0) == 0) then
         return
     end
+    local maxLen = GetMaxPayloadLen()
     local qTotalStr = (req.quotedTotalPrice ~= nil) and tostring(math.floor(tonumber(req.quotedTotalPrice) or 0)) or ""
     local isGoldVal = req.isGoldRequest and 1 or 0
-    self:SendRaw(string.format("REQ|%s|%s|%s|%d|%d|%s|%d|%d|%s|%s|%d|%s|%d|%s|%s|%d|%d|%s|%d|%s|%s",
-        EscapeStr(req.id),
-        EscapeStr(req.requester),
-        EscapeStr(tostring(req.itemID or 0)),
-        math.floor(tonumber(req.count) or 1),
-        math.floor(tonumber(req.tab) or 0),
-        EscapeStr(req.status),
-        math.floor(tonumber(req.createdAt) or 0),
-        math.floor(tonumber(req.updatedAt) or 0),
-        EscapeStr(req.approvedBy or ""),
-        EscapeStr(req.fulfilledBy or ""),
-        math.floor(tonumber(req.quotedUnitPrice) or 0),
-        EscapeStr(req.priceMode or ""),
-        math.floor(tonumber(req.pricePercent) or 0),
-        EscapeStr(req.itemName or ""),
-        EscapeStr(req.itemLink or ""),
-        math.floor(tonumber(req.approvedAt) or 0),
-        math.floor(tonumber(req.completedAt) or 0),
-        qTotalStr,
-        isGoldVal,
-        EscapeStr(req.reason or ""),
-        EscapeStr(req.completedMethod or "")))
+    local numItemID = tonumber(req.itemID) or 0
+
+    local function BuildReqPayload(linkStr, reasonStr)
+        return string.format("REQ|%s|%s|%s|%d|%d|%s|%d|%d|%s|%s|%d|%s|%d|%s|%s|%d|%d|%s|%d|%s|%s",
+            EscapeStr(req.id),
+            EscapeStr(req.requester),
+            EscapeStr(tostring(req.itemID or 0)),
+            math.floor(tonumber(req.count) or 1),
+            math.floor(tonumber(req.tab) or 0),
+            EscapeStr(req.status),
+            math.floor(tonumber(req.createdAt) or 0),
+            math.floor(tonumber(req.updatedAt) or 0),
+            EscapeStr(req.approvedBy or ""),
+            EscapeStr(req.fulfilledBy or ""),
+            math.floor(tonumber(req.quotedUnitPrice) or 0),
+            EscapeStr(req.priceMode or ""),
+            math.floor(tonumber(req.pricePercent) or 0),
+            EscapeStr(req.itemName or ""),
+            EscapeStr(linkStr),
+            math.floor(tonumber(req.approvedAt) or 0),
+            math.floor(tonumber(req.completedAt) or 0),
+            qTotalStr,
+            isGoldVal,
+            EscapeStr(reasonStr),
+            EscapeStr(req.completedMethod or ""))
+    end
+
+    local linkStr = req.itemLink or ""
+    local reasonStr = req.reason or ""
+    local payload = BuildReqPayload(linkStr, reasonStr)
+
+    if #payload > maxLen and not req.isGoldRequest and numItemID > 0 and linkStr ~= "" then
+        linkStr = ""
+        payload = BuildReqPayload(linkStr, reasonStr)
+    end
+    while #payload > maxLen and #reasonStr > 0 do
+        reasonStr = reasonStr:sub(1, math.max(0, #reasonStr - 4))
+        payload = BuildReqPayload(linkStr, reasonStr)
+    end
+
+    self:SendRaw(payload)
 end
 
 function Comms:BroadcastTabRules(sinceTs)
@@ -876,35 +941,55 @@ function Comms:BroadcastTransaction(tx)
         VM.db.inventory.lastScanBy = UnitName("player") or VM:GetPlayerName()
         VM.db.inventory.scannedBy = VM.db.inventory.lastScanBy
     end
+
+    local maxLen = GetMaxPayloadLen()
     local delVal = tx.deleted and 1 or 0
     local cTotalStr = (tx.chargedTotalPrice ~= nil) and tostring(math.floor(tonumber(tx.chargedTotalPrice) or 0)) or ""
     local pPctStr = (tx.pricePercent ~= nil) and tostring(math.floor(tonumber(tx.pricePercent) or 0)) or ""
     local tabStr = (tx.tab ~= nil) and tostring(math.floor(tonumber(tx.tab) or 0)) or ""
     local ffaStr = (tx.isFFA == true and "1") or (tx.isFFA == false and "0") or ""
+    local numItemID = tonumber(tx.itemID) or 0
 
-    self:SendRaw(string.format("TX|%s|%s|%s|%s|%d|%d|%d|%d|%s|%s|%s|%s|%d|%d|%s|%s|%s|%s|%s|%s|%s|%s",
-        EscapeStr(tx.id),
-        EscapeStr(tx.type),
-        EscapeStr(tx.player),
-        EscapeStr(tostring(tx.itemID or 0)),
-        math.floor(tonumber(tx.count) or 1),
-        math.floor(tonumber(tx.unitPriceAtTime) or 0),
-        math.floor(tonumber(tx.chargedUnitPrice) or 0),
-        math.floor(tonumber(tx.timestamp) or 0),
-        EscapeStr(tx.officer or ""),
-        EscapeStr(tx.source or ""),
-        EscapeStr(tx.itemName or ""),
-        EscapeStr(tx.itemLink or ""),
-        delVal,
-        math.floor(tonumber(tx.updatedAt or tx.timestamp) or 0),
-        EscapeStr(tx.rawSender or tx.player or ""),
-        EscapeStr(tx.attributedTo or tx.player or ""),
-        cTotalStr,
-        EscapeStr(tx.note or ""),
-        EscapeStr(tx.priceMode or ""),
-        pPctStr,
-        tabStr,
-        ffaStr))
+    local function BuildTxPayload(linkStr, noteStr)
+        return string.format("TX|%s|%s|%s|%s|%d|%d|%d|%d|%s|%s|%s|%s|%d|%d|%s|%s|%s|%s|%s|%s|%s|%s",
+            EscapeStr(tx.id),
+            EscapeStr(tx.type),
+            EscapeStr(tx.player),
+            EscapeStr(tostring(tx.itemID or 0)),
+            math.floor(tonumber(tx.count) or 1),
+            math.floor(tonumber(tx.unitPriceAtTime) or 0),
+            math.floor(tonumber(tx.chargedUnitPrice) or 0),
+            math.floor(tonumber(tx.timestamp) or 0),
+            EscapeStr(tx.officer or ""),
+            EscapeStr(tx.source or ""),
+            EscapeStr(tx.itemName or ""),
+            EscapeStr(linkStr),
+            delVal,
+            math.floor(tonumber(tx.updatedAt or tx.timestamp) or 0),
+            EscapeStr(tx.rawSender or tx.player or ""),
+            EscapeStr(tx.attributedTo or tx.player or ""),
+            cTotalStr,
+            EscapeStr(noteStr),
+            EscapeStr(tx.priceMode or ""),
+            pPctStr,
+            tabStr,
+            ffaStr)
+    end
+
+    local linkStr = tx.itemLink or ""
+    local noteStr = tx.note or ""
+    local payload = BuildTxPayload(linkStr, noteStr)
+
+    if #payload > maxLen and numItemID > 0 and linkStr ~= "" and linkStr ~= "GOLD" then
+        linkStr = ""
+        payload = BuildTxPayload(linkStr, noteStr)
+    end
+    while #payload > maxLen and #noteStr > 0 do
+        noteStr = noteStr:sub(1, math.max(0, #noteStr - 4))
+        payload = BuildTxPayload(linkStr, noteStr)
+    end
+
+    self:SendRaw(payload)
 end
 
 function Comms:BroadcastLedgerSync(sinceTs)

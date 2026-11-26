@@ -6,33 +6,33 @@ local function GenerateTxID(prefix)
     return string.format("%s_%d_%d", prefix, time(), math.random(10000, 99999))
 end
 
-function Ledger:RecordFulfillment(req, officerName)
+function Ledger:RecordFulfillment(req, officerName, customTimestamp)
     local livePrice = VM:GetEffectiveLivePrice(req.itemID, req.itemLink, req.priceAtRequest or req.quotedUnitPrice)
-    local unitCharged = 0
-    if req.priceMode == "PERCENT" and livePrice > 0 then
-        unitCharged = math.floor(livePrice * ((req.pricePercent or 50) / 100))
-    elseif req.priceMode == "FREE" then
-        unitCharged = 0
-    else
-        unitCharged = livePrice
-    end
+    local qty = tonumber(req.count) or 1
+    local rule = { mode = req.priceMode or "FREE", percent = req.pricePercent or 50 }
+    local totalCharged = VM:CalculateMemberTotalPrice(livePrice, qty, rule)
+    local unitCharged = (qty > 0) and math.floor(totalCharged / qty) or totalCharged
 
     local now = time()
+    local txTimestamp = customTimestamp or now
     local tx = {
         id = GenerateTxID("OUT"),
         type = "OUT",
         player = VM:NormalizeName(req.requester),
+        rawSender = VM:NormalizeName(req.requester),
+        attributedTo = VM:NormalizeName(req.requester),
         itemID = req.itemID,
         itemLink = req.itemLink,
         itemName = req.itemName,
-        count = req.count,
+        count = qty,
         unitPriceAtTime = livePrice,
         chargedUnitPrice = unitCharged,
+        chargedTotalPrice = totalCharged,
         priceMode = req.priceMode,
         pricePercent = req.pricePercent,
         isFFA = (req.priceMode == "FREE"),
         tab = req.tab,
-        timestamp = now,
+        timestamp = txTimestamp,
         updatedAt = now,
         officer = VM:NormalizeName(officerName),
         source = "REQUEST",
@@ -49,16 +49,56 @@ function Ledger:RecordFulfillment(req, officerName)
     return tx
 end
 
+function Ledger:RecordGoldFulfillment(req, officerName, customTimestamp)
+    local amount = tonumber(req.goldAmount or req.quotedTotalPrice or req.quotedUnitPrice) or 0
+    if amount <= 0 then return nil end
+
+    local now = time()
+    local txTimestamp = customTimestamp or now
+    local requesterNorm = VM:NormalizeName(req.requester)
+    local tx = {
+        id = GenerateTxID("GOLD_OUT"),
+        type = "OUT",
+        player = "GUILD",
+        rawSender = requesterNorm,
+        attributedTo = "GUILD",
+        itemID = 0,
+        itemLink = "GOLD",
+        itemName = "Gold Withdrawal",
+        count = 1,
+        unitPriceAtTime = amount,
+        chargedUnitPrice = amount,
+        chargedTotalPrice = amount,
+        note = req.reason or "",
+        timestamp = txTimestamp,
+        updatedAt = now,
+        officer = VM:NormalizeName(officerName),
+        source = "GOLD_REQUEST",
+        fulfillmentId = req.id,
+        recipient = requesterNorm,
+        isFFA = false,
+        isManual = false,
+        deleted = false
+    }
+
+    VM.db.ledger[tx.id] = tx
+    VM.Comms:BroadcastTransaction(tx)
+    return tx
+end
+
 function Ledger:RecordReturnDeposit(playerName, itemID, itemLink, count, fulfillmentId, customTimestamp)
     local ahPrice = VM:GetItemAHPrice(itemID, itemLink) or 0
     local cleanLink = itemLink or "item:0"
     local itemName = cleanLink:gsub("^%[", ""):gsub("%]$", "")
     local now = time()
     local txTimestamp = customTimestamp or now
+    local normPlayer = VM:NormalizeName(playerName)
     local tx = {
         id = GenerateTxID("IN"),
         type = "IN",
-        player = VM:NormalizeName(playerName),
+        player = normPlayer,
+        rawSender = normPlayer,
+        attributedTo = normPlayer,
         itemID = itemID or 0,
         itemLink = cleanLink,
         itemName = itemName,
@@ -103,10 +143,13 @@ function Ledger:RecordDeposit(playerName, itemID, itemLink, count, source, custo
     local now = time()
     local txTimestamp = customTimestamp or now
     local isMan = (source == "MANUAL")
+    local normPlayer = (playerName == "UNATTRIBUTED") and "UNATTRIBUTED" or VM:NormalizeName(playerName)
     local tx = {
         id = GenerateTxID("IN"),
         type = "IN",
-        player = (playerName == "UNATTRIBUTED") and "UNATTRIBUTED" or VM:NormalizeName(playerName),
+        player = normPlayer,
+        rawSender = normPlayer,
+        attributedTo = normPlayer,
         itemID = itemID or 0,
         itemLink = cleanLink,
         itemName = itemName,
@@ -126,23 +169,26 @@ function Ledger:RecordDeposit(playerName, itemID, itemLink, count, source, custo
     return tx
 end
 
-function Ledger:RecordGoldDeposit(playerName, copperAmount, source, rawSender, attributedTo, customTimestamp)
+function Ledger:RecordGoldDeposit(playerName, copperAmount, source, rawSender, attributedTo, customTimestamp, note)
     local now = time()
     local txTimestamp = customTimestamp or now
     local isMan = (source == "MANUAL_GOLD" or source == "MANUAL")
     local finalPlayer = attributedTo or playerName
+    local normFinal = (finalPlayer == "UNATTRIBUTED") and "UNATTRIBUTED" or VM:NormalizeName(finalPlayer)
+    local normRaw = (rawSender and rawSender ~= "") and VM:NormalizeName(rawSender) or VM:NormalizeName(playerName)
     local tx = {
         id = GenerateTxID("GOLD_IN"),
         type = "IN",
-        player = (finalPlayer == "UNATTRIBUTED") and "UNATTRIBUTED" or VM:NormalizeName(finalPlayer),
-        rawSender = (rawSender and rawSender ~= "") and VM:NormalizeName(rawSender) or VM:NormalizeName(playerName),
-        attributedTo = (attributedTo and attributedTo ~= "") and VM:NormalizeName(attributedTo) or VM:NormalizeName(playerName),
+        player = normFinal,
+        rawSender = normRaw,
+        attributedTo = normFinal,
         itemID = 0,
         itemLink = "GOLD",
         itemName = "Gold Deposit",
         count = 1,
         unitPriceAtTime = copperAmount or 0,
         chargedUnitPrice = 0,
+        note = note or "",
         timestamp = txTimestamp,
         updatedAt = now,
         officer = VM:GetPlayerName(),
@@ -157,19 +203,25 @@ function Ledger:RecordGoldDeposit(playerName, copperAmount, source, rawSender, a
     return tx
 end
 
-function Ledger:RecordGoldWithdrawal(playerName, copperAmount, source, customTimestamp)
+function Ledger:RecordGoldWithdrawal(playerName, copperAmount, source, customTimestamp, rawSender, attributedTo, note)
     local now = time()
     local txTimestamp = customTimestamp or now
+    local finalPlayer = attributedTo or playerName
+    local normFinal = (finalPlayer == "UNATTRIBUTED") and "UNATTRIBUTED" or VM:NormalizeName(finalPlayer)
+    local normRaw = (rawSender and rawSender ~= "") and VM:NormalizeName(rawSender) or VM:NormalizeName(playerName)
     local tx = {
         id = GenerateTxID("GOLD_OUT"),
         type = "OUT",
-        player = (playerName == "UNATTRIBUTED") and "UNATTRIBUTED" or VM:NormalizeName(playerName),
+        player = normFinal,
+        rawSender = normRaw,
+        attributedTo = normFinal,
         itemID = 0,
         itemLink = "GOLD",
         itemName = "Gold Withdrawal",
         count = 1,
         unitPriceAtTime = copperAmount or 0,
         chargedUnitPrice = 0,
+        note = note or "",
         timestamp = txTimestamp,
         updatedAt = now,
         officer = VM:GetPlayerName(),
@@ -184,14 +236,16 @@ function Ledger:RecordGoldWithdrawal(playerName, copperAmount, source, customTim
     return tx
 end
 
-function Ledger:ReassignGoldDeposit(txID, newPlayerName)
+function Ledger:ReassignTransaction(txID, newPlayerName)
     if not VM:IsOfficer() then return end
     local tx = VM.db.ledger[txID]
-    if not tx then return end
+    if not tx or tx.deleted or tx.type == "SUMMARY" then return end
     local norm = VM:NormalizeName(newPlayerName)
     if norm == "" then return end
 
-    tx.rawSender = tx.rawSender or tx.player
+    if not tx.rawSender or tx.rawSender == "" then
+        tx.rawSender = tx.player
+    end
     tx.attributedTo = norm
     tx.player = norm
     tx.updatedAt = time()
@@ -200,10 +254,20 @@ function Ledger:ReassignGoldDeposit(txID, newPlayerName)
     if VM.UI then VM.UI:RefreshAll() end
 end
 
+function Ledger:ReassignGoldDeposit(txID, newPlayerName)
+    return self:ReassignTransaction(txID, newPlayerName)
+end
+
 function Ledger:AssignUnattributed(txID, memberName)
     local tx = VM.db.ledger[txID]
     if not tx then return end
-    tx.player = VM:NormalizeName(memberName)
+    local norm = VM:NormalizeName(memberName)
+    if norm == "" then return end
+    if not tx.rawSender or tx.rawSender == "" then
+        tx.rawSender = tx.player
+    end
+    tx.player = norm
+    tx.attributedTo = norm
     tx.updatedAt = time()
     VM.Comms:BroadcastTransaction(tx)
     if VM.UI then VM.UI:RefreshAll() end
@@ -227,11 +291,13 @@ function Ledger:GetTransactionValue(tx, useHistorical, priceMode)
         return (tx.unitPriceAtTime or 0) * (tx.count or 1)
     end
     if tx.type == "OUT" then
-        if tx.chargedUnitPrice ~= nil and tx.chargedUnitPrice >= 0 then
+        if tx.chargedTotalPrice ~= nil and tx.chargedTotalPrice >= 0 then
+            return tx.chargedTotalPrice
+        elseif tx.chargedUnitPrice ~= nil and tx.chargedUnitPrice >= 0 then
             return tx.chargedUnitPrice * (tx.count or 1)
         elseif tx.priceMode == "PERCENT" then
             local base = (tx.unitPriceAtTime and tx.unitPriceAtTime > 0) and tx.unitPriceAtTime or (VM:GetEffectiveLivePrice(tx.itemID, tx.itemLink, tx.unitPriceAtTime) or 0)
-            return math.floor(base * ((tx.pricePercent or 50) / 100)) * (tx.count or 1)
+            return VM:CalculateMemberTotalPrice(base, tx.count or 1, { mode = "PERCENT", percent = tx.pricePercent or 50 })
         end
     end
 
@@ -271,7 +337,14 @@ function Ledger:GetAggregatedByMain(useHistorical, periodFilter, priceMode)
     for _, tx in pairs(VM.db.ledger) do
         local isGold = (tx.itemID == 0 or tx.itemLink == "GOLD")
         if not tx.deleted and (includeFFA or not tx.isFFA or isGold) and MatchesPeriod(tx.timestamp, periodFilter) then
-            local key = (tx.player == "UNATTRIBUTED") and "UNATTRIBUTED" or VM:GetMainFor(tx.player)
+            local pNorm = VM:NormalizeName(tx.player)
+            local key
+            if pNorm == "UNATTRIBUTED" or pNorm == "GUILD" then
+                key = pNorm
+            else
+                key = VM:GetMainFor(pNorm)
+            end
+
             if not groups[key] then
                 groups[key] = {
                     mainName = key,
@@ -297,7 +370,8 @@ function Ledger:GetAggregatedByMain(useHistorical, periodFilter, priceMode)
                 groups[key].latestDonationTimestamp = math.max(groups[key].latestDonationTimestamp, tx.timestamp or 0)
             elseif tx.type == "OUT" then
                 groups[key].totalOutValue = groups[key].totalOutValue + val
-                groups[key].totalCharged = groups[key].totalCharged + ((tx.chargedUnitPrice or 0) * (tx.count or 0))
+                local chargedAmt = (tx.chargedTotalPrice ~= nil) and tx.chargedTotalPrice or ((tx.chargedUnitPrice or 0) * (tx.count or 0))
+                groups[key].totalCharged = groups[key].totalCharged + chargedAmt
                 if tx.itemID == 0 or tx.itemLink == "GOLD" then
                     groups[key].totalGoldOut = (groups[key].totalGoldOut or 0) + val
                 end
@@ -324,6 +398,8 @@ function Ledger:GetAggregatedByMain(useHistorical, periodFilter, priceMode)
     table.sort(sorted, function(a, b)
         if a.mainName == "UNATTRIBUTED" then return true end
         if b.mainName == "UNATTRIBUTED" then return false end
+        if a.mainName == "GUILD" then return true end
+        if b.mainName == "GUILD" then return false end
         if a.isLegacy ~= b.isLegacy then
             return not a.isLegacy
         end
@@ -346,7 +422,7 @@ function Ledger:GetDonationRanking(sortMode, useHistorical, periodFilter, hideOf
 
     for _, grp in ipairs(allGroups) do
         local isOfficer = VM:IsOfficerName(grp.mainName)
-        if (not hideOfficers or not isOfficer) and grp.mainName ~= "UNATTRIBUTED" then
+        if (not hideOfficers or not isOfficer) and grp.mainName ~= "UNATTRIBUTED" and grp.mainName ~= "GUILD" then
             local netTotal = grp.totalInValue - grp.totalOutValue
             local netGold = grp.totalGoldIn - (grp.totalGoldOut or 0)
             local netItems = grp.totalItemsIn - (grp.totalOutValue - (grp.totalGoldOut or 0))
@@ -376,16 +452,36 @@ function Ledger:GetDonationRanking(sortMode, useHistorical, periodFilter, hideOf
     return ranked
 end
 
--- Monthly History Compaction (Rolls up ledger entries older than 60 days into monthly summaries)
+function Ledger:HasCompactedMonth(playerName, timestamp)
+    if not VM.db or not VM.db.ledger or not timestamp or timestamp <= 0 then return false end
+    local ym = date("%Y-%m", timestamp)
+    local norm = VM:NormalizeName(playerName)
+    local main = (norm == "UNATTRIBUTED" or norm == "GUILD" or norm == "") and norm or VM:GetMainFor(norm)
+    if main == "" then return false end
+    local summaryID = string.format("SUM_%s_%s", main, ym)
+    local sumTx = VM.db.ledger[summaryID]
+    return (sumTx ~= nil and not sumTx.deleted and sumTx.type == "SUMMARY")
+end
+
+-- Monthly History Compaction (Rolls up ledger entries older than 60 days into monthly summaries & purges 90-day tombstones)
 function Ledger:CompactMonthlyHistory()
     if not VM.db or not VM.db.ledger then return end
-    local cutoff = time() - (60 * 86400)
+    local now = time()
+    local cutoff = now - (60 * 86400)
+    local tombstoneCutoff = now - (90 * 86400)
     local groups = {}
+    local purgedTombstones = 0
 
     for id, tx in pairs(VM.db.ledger) do
-        if not tx.deleted and not tx.isCompacted and (tx.timestamp or 0) < cutoff and tx.type ~= "SUMMARY" then
+        if tx and tx.deleted then
+            if (tx.updatedAt or tx.timestamp or 0) < tombstoneCutoff then
+                VM.db.ledger[id] = nil
+                purgedTombstones = purgedTombstones + 1
+            end
+        elseif tx and not tx.isCompacted and (tx.timestamp or 0) < cutoff and tx.type ~= "SUMMARY" then
             local ym = date("%Y-%m", tx.timestamp or 0)
-            local main = (tx.player == "UNATTRIBUTED") and "UNATTRIBUTED" or VM:GetMainFor(tx.player)
+            local pNorm = VM:NormalizeName(tx.player)
+            local main = (pNorm == "UNATTRIBUTED" or pNorm == "GUILD") and pNorm or VM:GetMainFor(pNorm)
             local key = main .. "_" .. ym
             if not groups[key] then
                 groups[key] = {
@@ -420,9 +516,18 @@ function Ledger:CompactMonthlyHistory()
     end
 
     local compactedCount = 0
-    for key, g in pairs(groups) do
-        if #g.txs > 1 then
-            local summaryID = string.format("SUM_%s_%s", g.main, g.ym)
+    for _, g in pairs(groups) do
+        local summaryID = string.format("SUM_%s_%s", g.main, g.ym)
+        local existingSum = VM.db.ledger[summaryID]
+        if #g.txs > 1 or (existingSum and not existingSum.deleted and existingSum.type == "SUMMARY") then
+            local baseIn = (existingSum and existingSum.contributed) or 0
+            local baseOut = (existingSum and existingSum.received) or 0
+            local baseGoldIn = (existingSum and existingSum.goldIn) or 0
+            local baseGoldOut = (existingSum and existingSum.goldOut) or 0
+            local baseItemsIn = (existingSum and existingSum.itemsIn) or 0
+
+            local totalIn = baseIn + g.totalIn
+            local totalOut = baseOut + g.totalOut
             local summaryTx = {
                 id = summaryID,
                 type = "SUMMARY",
@@ -432,16 +537,16 @@ function Ledger:CompactMonthlyHistory()
                 itemID = 0,
                 isManual = false,
                 isCompacted = true,
-                contributed = g.totalIn,
-                received = g.totalOut,
-                goldIn = g.totalGoldIn,
-                goldOut = g.totalGoldOut,
-                itemsIn = g.totalItemsIn,
-                unitPriceAtTime = g.totalIn - g.totalOut,
+                contributed = totalIn,
+                received = totalOut,
+                goldIn = baseGoldIn + g.totalGoldIn,
+                goldOut = baseGoldOut + g.totalGoldOut,
+                itemsIn = baseItemsIn + g.totalItemsIn,
+                unitPriceAtTime = totalIn - totalOut,
                 chargedUnitPrice = 0,
                 count = 1,
-                timestamp = g.ts,
-                updatedAt = time(),
+                timestamp = (existingSum and existingSum.timestamp) or g.ts,
+                updatedAt = now,
                 officer = VM:GetPlayerName(),
                 source = "COMPACTED",
                 deleted = false
@@ -456,18 +561,29 @@ function Ledger:CompactMonthlyHistory()
         end
     end
 
-    if compactedCount > 0 then
-        VM:LogDebug(string.format("Compacted %d monthly ledger summaries.", compactedCount))
+    if compactedCount > 0 or purgedTombstones > 0 then
+        VM:LogDebug(string.format("Compacted %d monthly summaries, purged %d old tombstones.", compactedCount, purgedTombstones))
     end
 end
 
 function Ledger:CleanupDuplicates()
     if not VM.db or not VM.db.ledger then return 0 end
 
+    local protectedSources = {
+        MANUAL = true,
+        MANUAL_GOLD = true,
+        MANUAL_ASSIGN = true,
+        MANUAL_ASSIGN_PAYMENT = true,
+        REQUEST = true,
+        GOLD_REQUEST = true,
+        RETURN = true,
+        COMPACTED = true,
+    }
+
     local groups = {}
     for id, tx in pairs(VM.db.ledger) do
-        if tx and tx.timestamp and not tx.deleted then
-            local isGold = (tx.itemID == 0 or tx.itemLink == "GOLD" or tx.source == "BANK_MONEY_LOG" or tx.source == "MANUAL_GOLD" or (tx.itemName and (tx.itemName:find("Gold Deposit") or tx.itemName:find("Gold Withdrawal"))))
+        if tx and tx.timestamp and not tx.deleted and not tx.isManual and tx.type ~= "SUMMARY" and not protectedSources[tx.source or ""] then
+            local isGold = (tx.itemID == 0 or tx.itemLink == "GOLD" or tx.source == "BANK_MONEY_LOG" or (tx.itemName and (tx.itemName:find("Gold Deposit") or tx.itemName:find("Gold Withdrawal"))))
             local action = VM:NormalizeAction(tx.type)
             local actor = VM:NormalizeActor(tx.rawSender or tx.player)
             local groupKey
@@ -484,12 +600,11 @@ function Ledger:CleanupDuplicates()
         end
     end
 
-    local WINDOW_48H = 172800 -- 48 hours rolling window
+    local WINDOW_48H = 172800 -- 48 hours rolling window for bank-log duplicates
     local removedCount = 0
 
     for _, entries in pairs(groups) do
         if #entries > 1 then
-            -- Sort ascending by timestamp (earliest first), using id for tie break
             table.sort(entries, function(a, b)
                 local tsA = a.tx.timestamp or 0
                 local tsB = b.tx.timestamp or 0
@@ -526,5 +641,3 @@ function Ledger:CleanupDuplicates()
             VM.UI:RefreshAll()
         end
     end
-    return removedCount
-end

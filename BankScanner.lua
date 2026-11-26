@@ -572,12 +572,7 @@ function Scanner:ScanLogs()
                 if activeRet and (entry.itemID == activeRet.itemID or (entry.itemID == 0 and entry.cleanLink == activeRet.itemLink)) then
                     VM.Ledger:RecordReturnDeposit(entry.normName, entry.itemID, entry.cleanLink, entry.count, activeRet.fulfillmentId, entry.computedTimestamp)
                 else
-                    local tx = VM.Ledger:RecordDeposit(entry.normName, entry.itemID, entry.cleanLink, entry.count, "BANK_LOG", entry.computedTimestamp)
-                    if tx then
-                        tx.isFFA = entry.isFFA
-                        tx.tab = entry.tab
-                        tx.timestamp = entry.computedTimestamp
-                    end
+                    VM.Ledger:RecordDeposit(entry.normName, entry.itemID, entry.cleanLink, entry.count, "BANK_LOG", entry.computedTimestamp, entry.tab, entry.isFFA)
                 end
             else
                 local matchedReq = nil

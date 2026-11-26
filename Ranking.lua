@@ -10,11 +10,13 @@ function Ranking:GetTransactionValuation(tx, priceMode)
         return (tx.unitPriceAtTime or 0) * (tx.count or 1)
     end
     if tx.type == "OUT" then
-        if tx.chargedUnitPrice ~= nil and tx.chargedUnitPrice >= 0 then
+        if tx.chargedTotalPrice ~= nil and tx.chargedTotalPrice >= 0 then
+            return tx.chargedTotalPrice
+        elseif tx.chargedUnitPrice ~= nil and tx.chargedUnitPrice >= 0 then
             return tx.chargedUnitPrice * (tx.count or 1)
         elseif tx.priceMode == "PERCENT" then
             local base = (tx.unitPriceAtTime and tx.unitPriceAtTime > 0) and tx.unitPriceAtTime or (VM:GetEffectiveLivePrice(tx.itemID, tx.itemLink, tx.unitPriceAtTime) or 0)
-            return math.floor(base * ((tx.pricePercent or 50) / 100)) * (tx.count or 1)
+            return VM:CalculateMemberTotalPrice(base, tx.count or 1, { mode = "PERCENT", percent = tx.pricePercent or 50 })
         end
     end
 
@@ -62,7 +64,14 @@ function Ranking:GetRankingData(sortMode, sortDir, priceMode, periodFilter, hide
     for _, tx in pairs(VM.db.ledger) do
         local isGold = (tx.itemID == 0 or tx.itemLink == "GOLD")
         if not tx.deleted and (includeFFA or not tx.isFFA or isGold) and MatchesPeriod(tx.timestamp, period) then
-            local key = (tx.player == "UNATTRIBUTED") and "UNATTRIBUTED" or VM:GetMainFor(tx.player)
+            local pNorm = VM:NormalizeName(tx.player)
+            local key
+            if pNorm == "UNATTRIBUTED" or pNorm == "GUILD" then
+                key = pNorm
+            else
+                key = VM:GetMainFor(pNorm)
+            end
+
             if not groups[key] then
                 groups[key] = {
                     mainName = key,
@@ -104,7 +113,7 @@ function Ranking:GetRankingData(sortMode, sortDir, priceMode, periodFilter, hide
 
     local ranked = {}
     for _, grp in pairs(groups) do
-        if grp.mainName ~= "UNATTRIBUTED" then
+        if grp.mainName ~= "UNATTRIBUTED" and grp.mainName ~= "GUILD" then
             local isOfficer = VM:IsOfficerName(grp.mainName)
             if not hideOff or not isOfficer then
                 if showLeg or not grp.isLegacy then

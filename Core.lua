@@ -21,6 +21,7 @@ local DEFAULT_UI_PREFS = {
     rankingPriceMode = "live",
     hideOfficers = false,
     showLegacyRanking = true,
+    hideLegacyLedger = false,
     rankingPeriod = "ALL",
     rankingSortBy = "net",
     rankingSortDir = "desc",
@@ -93,6 +94,7 @@ local function InitGuildSubTables(db)
     db.roster = db.roster or db.mains
     db.rosterCache = db.rosterCache or {}
     db.memberClasses = db.memberClasses or {}
+    db.rankNames = db.rankNames or {}
     db.archivedMembers = db.archivedMembers or {}
     db.tabRules = db.tabRules or {}
     db.scanMetadata = db.scanMetadata or db.inventory
@@ -123,10 +125,41 @@ end
 
 function VM:GetClassHex(charName)
     local norm = self:NormalizeName(charName)
-    if norm == "" then return nil end
-    local classToken = self.db and self.db.memberClasses and self.db.memberClasses[norm]
-    if classToken and self.CLASS_COLORS[classToken] then
-        return self.CLASS_COLORS[classToken]
+    if norm == "" or norm == "GUILD" or norm == "UNATTRIBUTED" then return nil end
+    local classes = self.db and self.db.memberClasses
+    if classes then
+        local classToken = classes[norm]
+        if not classToken then
+            local normLower = norm:lower()
+            for k, v in pairs(classes) do
+                if type(k) == "string" and k:lower() == normLower then
+                    classToken = v
+                    classes[norm] = v
+                    break
+                end
+            end
+        end
+        if classToken and self.CLASS_COLORS[classToken] then
+            return self.CLASS_COLORS[classToken]
+        end
+    end
+    if IsInGuild() and GetNumGuildMembers then
+        local normLower = norm:lower()
+        local total = GetNumGuildMembers() or 0
+        for i = 1, total do
+            local rName, _, _, _, rClass, _, _, _, _, _, rClassFile = GetGuildRosterInfo(i)
+            if rName and self:NormalizeName(rName):lower() == normLower then
+                local token = (rClassFile and rClassFile ~= "") and strupper(rClassFile):gsub("%s+", "") or self:NormalizeClassToken(rClass)
+                if token and self.CLASS_COLORS[token] then
+                    if self.db then
+                        self.db.memberClasses = self.db.memberClasses or {}
+                        self.db.memberClasses[norm] = token
+                    end
+                    return self.CLASS_COLORS[token]
+                end
+                break
+            end
+        end
     end
     return nil
 end
@@ -172,13 +205,16 @@ function VM:NormalizeName(name)
     if not name or name == "" then return "" end
     local clean = strtrim(strsplit("-", name))
     if clean == "" then return "" end
+    local upper = clean:upper()
+    if upper == "GUILD" then return "GUILD" end
+    if upper == "UNATTRIBUTED" then return "UNATTRIBUTED" end
     return clean:sub(1, 1):upper() .. clean:sub(2)
 end
 
 function VM:NormalizeActor(name)
     if not name or name == "" then return "UNATTRIBUTED" end
     local n = self:NormalizeName(name)
-    if n == "" or n:upper() == "UNATTRIBUTED" then return "UNATTRIBUTED" end
+    if n == "" or n == "UNATTRIBUTED" then return "UNATTRIBUTED" end
     return n
 end
 
@@ -254,14 +290,24 @@ end
 
 function VM:IsOfficerName(name)
     local norm = self:NormalizeName(name)
-    if norm == "" then return false end
+    if norm == "" or norm == "GUILD" or norm == "UNATTRIBUTED" then return false end
     local rankIndex = self.db.rosterCache[norm]
+    if type(rankIndex) ~= "number" then
+        local normLower = norm:lower()
+        for k, v in pairs(self.db.rosterCache) do
+            if type(k) == "string" and k:lower() == normLower and type(v) == "number" then
+                rankIndex = v
+                break
+            end
+        end
+    end
     if type(rankIndex) ~= "number" then
         if IsInGuild() then
             local total = GetNumGuildMembers() or 0
+            local normLower = norm:lower()
             for i = 1, total do
                 local rName, _, rIndex = GetGuildRosterInfo(i)
-                if rName and self:NormalizeName(rName) == norm then
+                if rName and self:NormalizeName(rName):lower() == normLower then
                     self.db.rosterCache[norm] = rIndex or 99
                     return (rIndex ~= nil and rIndex <= VM.OFFICER_MAX_RANK_INDEX)
                 end
@@ -278,11 +324,15 @@ function VM:UpdateRosterCache()
     if total and total > 0 then
         local fresh = {}
         self.db.memberClasses = self.db.memberClasses or {}
+        self.db.rankNames = self.db.rankNames or {}
         for i = 1, total do
-            local name, _, rankIndex, _, class, _, _, _, _, _, classFileName = GetGuildRosterInfo(i)
+            local name, rankName, rankIndex, _, class, _, _, _, _, _, classFileName = GetGuildRosterInfo(i)
             if name then
                 local norm = self:NormalizeName(name)
                 fresh[norm] = rankIndex
+                if rankIndex ~= nil and rankName and rankName ~= "" then
+                    self.db.rankNames[rankIndex] = rankName
+                end
                 local token = classFileName
                 if not token or token == "" then
                     token = self:NormalizeClassToken(class)
@@ -306,11 +356,44 @@ function VM:UpdateRosterCache()
     end
 end
 
+function VM:GetMemberRankIndex(charName)
+    local norm = self:NormalizeName(charName)
+    if norm == "" or not self.db or not self.db.rosterCache then return 999 end
+    local idx = self.db.rosterCache[norm]
+    if type(idx) == "number" then return idx end
+    local normLower = norm:lower()
+    for k, v in pairs(self.db.rosterCache) do
+        if type(k) == "string" and k:lower() == normLower and type(v) == "number" then
+            return v
+        end
+    end
+    return 999
+end
+
+function VM:GetRankName(rankIndex)
+    if type(rankIndex) ~= "number" or rankIndex >= 999 then return "Legacy Members" end
+    if self.db and self.db.rankNames and self.db.rankNames[rankIndex] then
+        return self.db.rankNames[rankIndex]
+    end
+    if GuildControlGetRankName then
+        local ok, rName = pcall(GuildControlGetRankName, rankIndex + 1)
+        if ok and rName and rName ~= "" then return rName end
+    end
+    return "Rank " .. tostring(rankIndex)
+end
+
 function VM:IsLegacyMember(charName)
     local norm = self:NormalizeName(charName)
-    if norm == "" or norm == "Unattributed" or norm == "UNATTRIBUTED" then return false end
+    if norm == "" or norm == "UNATTRIBUTED" or norm == "GUILD" then return false end
     if not next(self.db.rosterCache) then return false end
-    return not self.db.rosterCache[norm]
+    if self.db.rosterCache[norm] ~= nil then return false end
+    local normLower = norm:lower()
+    for k in pairs(self.db.rosterCache) do
+        if type(k) == "string" and k:lower() == normLower then
+            return false
+        end
+    end
+    return true
 end
 
 function VM:MigrateMainsFormat()
@@ -323,6 +406,7 @@ end
 
 function VM:GetMainFor(charName)
     local norm = self:NormalizeName(charName)
+    if norm == "GUILD" or norm == "UNATTRIBUTED" then return norm end
     local visited = {}
     while self.db.mains[norm] and self.db.mains[norm].main and self.db.mains[norm].main ~= "" and not visited[norm] do
         visited[norm] = true
@@ -333,7 +417,7 @@ end
 
 function VM:SetMainCharacter(newMain, charsToLink)
     local targetMain = self:NormalizeName(newMain)
-    if targetMain == "" then return end
+    if targetMain == "" or targetMain == "GUILD" or targetMain == "UNATTRIBUTED" then return end
 
     local now = time()
     local group = { [targetMain] = true }
@@ -342,7 +426,9 @@ function VM:SetMainCharacter(newMain, charsToLink)
     if charsToLink then
         for _, c in ipairs(charsToLink) do
             local normC = self:NormalizeName(c)
-            if normC ~= "" then table.insert(queue, normC) end
+            if normC ~= "" and normC ~= "GUILD" and normC ~= "UNATTRIBUTED" then
+                table.insert(queue, normC)
+            end
         end
     end
 
@@ -409,7 +495,7 @@ end
 function VM:MergeCharacter(oldName, newName)
     local oldNorm = self:NormalizeName(oldName)
     local newNorm = self:NormalizeName(newName)
-    if oldNorm == "" or newNorm == "" or oldNorm == oldNorm then return end
+    if oldNorm == "" or newNorm == "" or oldNorm == newNorm then return end
 
     if self.db.ledger then
         for _, tx in pairs(self.db.ledger) do
@@ -472,13 +558,13 @@ function VM:GetGuildRosterNames(includeLegacy)
     if includeLegacy then
         local legacy = {}
         for char in pairs(self.db.mains) do
-            if not seen[char] then
+            if char ~= "UNATTRIBUTED" and char ~= "GUILD" and not seen[char] then
                 table.insert(legacy, char)
                 seen[char] = true
             end
         end
         for _, tx in pairs(self.db.ledger) do
-            if tx.player and tx.player ~= "UNATTRIBUTED" and not seen[tx.player] then
+            if tx.player and tx.player ~= "UNATTRIBUTED" and tx.player ~= "GUILD" and not seen[tx.player] then
                 table.insert(legacy, tx.player)
                 seen[tx.player] = true
             end
@@ -513,15 +599,22 @@ function VM:GetRosterHierarchy(includeLegacy)
     for mainName, alts in pairs(mainsMap) do
         table.sort(alts)
         local isLeg = self:IsLegacyMember(mainName)
+        local rankIdx = isLeg and 999 or self:GetMemberRankIndex(mainName)
+        local rankName = isLeg and "Legacy Members" or self:GetRankName(rankIdx)
         table.insert(hierarchy, {
             name = mainName,
             isLegacy = isLeg,
+            rankIndex = rankIdx,
+            rankName = rankName,
             alts = alts
         })
     end
 
     table.sort(hierarchy, function(a, b)
         if a.isLegacy ~= b.isLegacy then return not a.isLegacy end
+        if (a.rankIndex or 999) ~= (b.rankIndex or 999) then
+            return (a.rankIndex or 999) < (b.rankIndex or 999)
+        end
         return a.name < b.name
     end)
 
@@ -600,37 +693,60 @@ function VM:GetEffectiveLivePrice(itemID, itemLink, fallbackScanPrice)
     return 0
 end
 
+function VM:CalculateMemberTotalPrice(unitAHPrice, count, rule)
+    local qty = tonumber(count) or 1
+    if qty <= 0 then return 0 end
+    local mode = rule and rule.mode or "FREE"
+    if mode == "FREE" then
+        return 0
+    elseif mode == "PERCENT" then
+        local unit = tonumber(unitAHPrice) or 0
+        if unit <= 0 then return 0 end
+        local pct = tonumber(rule.percent) or 50
+        local rawTotal = unit * (pct / 100) * qty
+        return math.max(10000, math.floor((rawTotal + 5000) / 10000) * 10000)
+    else
+        return math.floor((tonumber(unitAHPrice) or 0) * qty)
+    end
+end
+
 function VM:FormatMoney(copper)
     if not copper then return "|cff777777N/A|r" end
     if copper == 0 then return "|cffaaaaaa0g|r" end
+    local isNeg = copper < 0
+    local absCopper = math.floor(math.abs(copper))
+    local prefix = isNeg and "-" or ""
     if GetCoinTextureString then
-        local ok, res = pcall(GetCoinTextureString, math.floor(copper))
-        if ok and res then return res end
+        local ok, res = pcall(GetCoinTextureString, absCopper)
+        if ok and res then return prefix .. res end
     end
-    local g = math.floor(copper / 10000)
-    local s = math.floor((copper % 10000) / 100)
-    local c = copper % 100
+    local g = math.floor(absCopper / 10000)
+    local s = math.floor((absCopper % 10000) / 100)
+    local c = absCopper % 100
     local txt = ""
     if g > 0 then txt = txt .. g .. "|cffffd700g|r " end
     if s > 0 or g > 0 then txt = txt .. s .. "|cffc0c0c0s|r " end
     txt = txt .. c .. "|cffcd7f32c|r"
-    return txt
+    return prefix .. txt
 end
 
 function VM:FormatMoneyShort(copper)
     if not copper or copper == 0 then return "0g" end
-    local g = math.floor(copper / 10000)
-    local s = math.floor((copper % 10000) / 100)
+    local isNeg = copper < 0
+    local absCopper = math.floor(math.abs(copper))
+    local prefix = isNeg and "-" or ""
+    local g = math.floor(absCopper / 10000)
+    local s = math.floor((absCopper % 10000) / 100)
     if g > 0 then
         if s > 0 and g < 100 then
-            return string.format("%dg %ds", g, s)
+            return string.format("%s%dg %ds", prefix, g, s)
         else
-            return string.format("%dg", g)
+            return string.format("%s%dg", prefix, g)
         end
     elseif s > 0 then
-        return string.format("%ds", s)
+        return string.format("%s%ds", prefix, s)
     else
-        return string.format("%dc", copper)
+        return string.format("%s%dc", prefix, absCopper)
     end
 end
 
@@ -649,7 +765,7 @@ function VM:CalculateBankWealth()
 
         for _, tabIdx in ipairs(tabIndices) do
             local tabData = inv.tabs[tabIdx]
-            if tabData then
+            if tabData and tabData.isPurchased ~= false and self:IsTabPurchased(tabIdx) then
                 local tabItemCount = 0
                 local tabVal = 0
                 if tabData.items then
@@ -846,7 +962,7 @@ end
 function VM:GetReservedCount(itemID, tabIndex)
     local reserved = 0
     for _, req in pairs(self.db.requests) do
-        if req.status == "APPROVED" and (req.itemID == itemID or req.itemName == itemID) then
+        if req.status == "APPROVED" and not req.isGoldRequest and (req.itemID == itemID or req.itemName == itemID) then
             if not tabIndex or req.tab == tabIndex then
                 reserved = reserved + (req.count or 0)
             end
@@ -979,12 +1095,30 @@ function VM:MergeGuildData(target, source)
     end
     target.roster = target.mains
 
-    -- 4. archivedMembers
+    -- 4. archivedMembers, memberClasses & rankNames
     target.archivedMembers = target.archivedMembers or {}
     if source.archivedMembers then
         for char, isArchived in pairs(source.archivedMembers) do
             if target.archivedMembers[char] == nil then
                 target.archivedMembers[char] = isArchived
+            end
+        end
+    end
+
+    target.memberClasses = target.memberClasses or {}
+    if source.memberClasses then
+        for char, token in pairs(source.memberClasses) do
+            if not target.memberClasses[char] then
+                target.memberClasses[char] = token
+            end
+        end
+    end
+
+    target.rankNames = target.rankNames or {}
+    if source.rankNames then
+        for rIdx, rName in pairs(source.rankNames) do
+            if not target.rankNames[rIdx] then
+                target.rankNames[rIdx] = rName
             end
         end
     end
@@ -1227,6 +1361,8 @@ function VM:SwitchGuildContext(triggerEvent)
                 mains = {},
                 roster = {},
                 rosterCache = {},
+                memberClasses = {},
+                rankNames = {},
                 archivedMembers = {},
                 dbEpoch = 1,
                 uiPrefs = VaultManagerDB.uiPrefs,
@@ -1376,32 +1512,29 @@ end
 local guildEventFrame = CreateFrame("Frame")
 guildEventFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
 guildEventFrame:RegisterEvent("PLAYER_GUILD_UPDATE")
-guildEventFrame:RegisterEvent("GUILD_ROSTER_UPDATE")
 guildEventFrame:SetScript("OnEvent", function(_, event)
-    if event == "PLAYER_ENTERING_WORLD" or event == "PLAYER_GUILD_UPDATE" or event == "GUILD_ROSTER_UPDATE" then
-        if event == "PLAYER_ENTERING_WORLD" or event == "GUILD_ROSTER_UPDATE" then
-            VM:UpdateRosterCache()
-        end
-        if event == "PLAYER_GUILD_UPDATE" then
-            if VM.SwitchGuildContext then
-                VM:SwitchGuildContext(event)
-            end
-        end
-        if C_Timer and C_Timer.After then
-            C_Timer.After(0.5, function()
-                VM:UpdateRosterCache()
-                if VM.SwitchGuildContext then
-                    VM:SwitchGuildContext(event)
-                end
-            end)
-        else
+    if event == "PLAYER_ENTERING_WORLD" then
+        VM:UpdateRosterCache()
+    end
+    if event == "PLAYER_GUILD_UPDATE" and VM.SwitchGuildContext then
+        VM:SwitchGuildContext(event)
+    end
+    if C_Timer and C_Timer.After then
+        C_Timer.After(0.5, function()
             VM:UpdateRosterCache()
             if VM.SwitchGuildContext then
                 VM:SwitchGuildContext(event)
             end
+        end)
+    else
+        VM:UpdateRosterCache()
+        if VM.SwitchGuildContext then
+            VM.SwitchGuildContext(event)
         end
     end
 end)
+
+local rosterUpdatePending = false
 
 local initFrame = CreateFrame("Frame")
 initFrame:RegisterEvent("ADDON_LOADED")
@@ -1519,8 +1652,25 @@ initFrame:SetScript("OnEvent", function(_, event, arg1)
 
         print("|cff00ccff[Vault Manager]|r Loaded. Type |cffffff00/vm|r to open.")
     elseif event == "GUILD_ROSTER_UPDATE" then
-        VM:UpdateRosterCache()
-        VM:ValidateTabRules()
-        if VM.UI then VM.UI:RefreshAll() end
+        if not rosterUpdatePending then
+            rosterUpdatePending = true
+            local function HandleRosterUpdate()
+                rosterUpdatePending = false
+                if VM.isUnguilded and IsInGuild() and VM.SwitchGuildContext then
+                    VM:SwitchGuildContext("GUILD_ROSTER_UPDATE")
+                end
+                VM:UpdateRosterCache()
+                VM:ValidateTabRules()
+                local f = _G["VaultManagerMainFrame"]
+                if f and f:IsShown() and VM.UI then
+                    VM.UI:RefreshAll()
+                end
+            end
+            if C_Timer and C_Timer.After then
+                C_Timer.After(0.5, HandleRosterUpdate)
+            else
+                HandleRosterUpdate()
+            end
+        end
     end
 end)

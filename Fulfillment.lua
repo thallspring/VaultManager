@@ -21,6 +21,18 @@ local function CleanItemName(str)
     return (s:match("^%s*(.-)%s*$") or s):lower()
 end
 
+local function DoesBagItemMatchRequest(bagItemID, bagItemName, req)
+    if not req or req.isGoldRequest then return false end
+    local reqID = tonumber(req.itemID) or 0
+    local bID = tonumber(bagItemID) or 0
+    if reqID > 0 and bID > 0 then
+        return bID == reqID
+    end
+    local reqName = CleanItemName(req.itemName or req.itemLink)
+    local bagName = CleanItemName(bagItemName)
+    return reqName ~= "" and bagName ~= "" and reqName == bagName
+end
+
 local function IsSameRecipient(reqRequester, targetName)
     local rNorm = VM:NormalizeName(reqRequester)
     local tNorm = VM:NormalizeName(targetName)
@@ -605,7 +617,7 @@ function Fulfillment:PopulateMail(req)
             if link then
                 local id = tonumber(link:match("item:(%d+)"))
                 local name = link:match("%[(.-)%]") or link
-                if (id == req.itemID or name == req.itemName or req.itemID == req.itemName) and remaining > 0 then
+                if DoesBagItemMatchRequest(id, name, req) and remaining > 0 then
                     if C_Container and C_Container.PickupContainerItem then
                         C_Container.PickupContainerItem(bag, slot)
                     else
@@ -653,7 +665,7 @@ function Fulfillment:PopulateTrade(req)
             if link then
                 local id = tonumber(link:match("item:(%d+)"))
                 local name = link:match("%[(.-)%]") or link
-                if (id == req.itemID or name == req.itemName or req.itemID == req.itemName) and remaining > 0 then
+                if DoesBagItemMatchRequest(id, name, req) and remaining > 0 then
                     if C_Container and C_Container.PickupContainerItem then
                         C_Container.PickupContainerItem(bag, slot)
                     else

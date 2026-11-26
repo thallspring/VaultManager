@@ -4,6 +4,29 @@
 
 All notable changes to **Vault Manager** will be documented in this file.
 
+## v1.4.4 (2026-11-26)
+
+### New Features
+- **Gold Requests for Guild Expenses:** Members and officers can now submit gold requests with an expense reason from the **Requests** tab. Approved gold requests pre-fill *Send Money* in Mail or Trade and are booked directly to the dedicated **GUILD** account instead of the member's personal balance.
+- **Dedicated GUILD Account & Reassignment:** Added a system **GUILD** account for guild operations (AH sales, guild purchases, external donations). Officers can reassign `[GOLD IN]`, `[GOLD OUT]`, and item `[OUT]` entries in the **Ledger** to **GUILD** or any member while preserving the original actor. **GUILD** is excluded from **Ranking**.
+- **Quantity Dropdown Picker:** Replaced the manual quantity input box in **Vault & Requests** with a scrollable dropdown selector that updates `% of AH` total prices live.
+- **Automatic Request Completion:** Approved item and gold requests now auto-complete when fulfilled via Guild Bank withdrawal, Mail, or Trade, recording the delivery method and officer.
+- **Rank-Grouped Roster & Foldable Sections:** **Roster & Mains** now groups mains by foldable guild ranks (keeping linked alts nested under their main regardless of alt rank) with an officer **Unlinked Only** filter and collapsed **Legacy Members** section. **Requests** is organized into foldable *Pending*, *Approved*, and collapsed *History* sections with an open-request counter on the tab.
+
+### Improvements & UI Polish
+- **1g Member Price Rounding:** `% of AH` item requests and manual assignments now round total prices to the nearest gold (minimum 1g) consistently across Requests, Mail CoD, Ledger, and Ranking.
+- **Requests Workflow & Metadata:** Reordered approved request buttons to `Prepare` (blue) → `Complete` (green) → `Cancel` (red), and expanded rows to two lines showing request time, approving officer, and completion/cancellation details.
+- **Ledger, Ranking & Settings Cleanup:** Rebuilt the **Ledger** topbar with a search filter, aligned columns, and a collapsed *Legacy Members* group; added color-coded positive/negative `Net Balance` values in **Ranking**; compressed unpurchased bank tabs in **Settings**, fixed button overlap on tab rules, and removed the unused *Rule Signatures* counter.
+- **Minimap Button Upgrade:** Switched to a Vault chest icon with an event-driven, color-coded request badge (removed background polling), status tooltip, and right-click shortcut to **Requests**.
+- **P2P Sync & Performance:** Added delta-sync with randomized response delay, 255-byte payload protection, ghost-item cleanup on newer bank scans, 30-day pruning of closed requests, 90-day tombstone cleanup, search debouncing, and reduced `GUILD_ROSTER_UPDATE` overhead.
+
+### Bug Fixes
+- Fixed non-purchased bank tabs (e.g., Tab 2) temporarily appearing in **Vault & Requests** or affecting **Bank Value**.
+- Fixed player names occasionally appearing white instead of class-colored in **Ledger** and **Requests** on first open.
+- Fixed an item-matching bug in Mail/Trade auto-fill for items without an `itemID`.
+- Fixed the **Show Minimap Button** setting toggle not hiding/showing the button reliably.
+- Fixed compressed monthly `SUMMARY` rows displaying as gold entries when expanded in **Ranking**.
+
 ## [1.4.3] - 2026-11-25
 
 ### Added

@@ -129,7 +129,7 @@ function Ledger:RecordReturnDeposit(playerName, itemID, itemLink, count, fulfill
     return tx
 end
 
-function Ledger:RecordDeposit(playerName, itemID, itemLink, count, source, customTimestamp)
+function Ledger:RecordDeposit(playerName, itemID, itemLink, count, source, customTimestamp, tab, isFFA)
     local ahPrice = VM:GetItemAHPrice(itemID, itemLink) or 0
     local cleanLink = itemLink or "item:0"
     local itemName = "Item " .. tostring(itemID or 0)
@@ -156,6 +156,8 @@ function Ledger:RecordDeposit(playerName, itemID, itemLink, count, source, custo
         count = count or 1,
         unitPriceAtTime = ahPrice,
         chargedUnitPrice = 0,
+        tab = tab,
+        isFFA = isFFA,
         timestamp = txTimestamp,
         updatedAt = now,
         officer = VM:GetPlayerName(),
@@ -259,6 +261,7 @@ function Ledger:ReassignGoldDeposit(txID, newPlayerName)
 end
 
 function Ledger:AssignUnattributed(txID, memberName)
+    if not VM:IsOfficer() then return end
     local tx = VM.db.ledger[txID]
     if not tx then return end
     local norm = VM:NormalizeName(memberName)
@@ -396,10 +399,12 @@ function Ledger:GetAggregatedByMain(useHistorical, periodFilter, priceMode)
     end
 
     table.sort(sorted, function(a, b)
-        if a.mainName == "UNATTRIBUTED" then return true end
-        if b.mainName == "UNATTRIBUTED" then return false end
-        if a.mainName == "GUILD" then return true end
-        if b.mainName == "GUILD" then return false end
+        if a.mainName ~= b.mainName then
+            if a.mainName == "UNATTRIBUTED" then return true end
+            if b.mainName == "UNATTRIBUTED" then return false end
+            if a.mainName == "GUILD" then return true end
+            if b.mainName == "GUILD" then return false end
+        end
         if a.isLegacy ~= b.isLegacy then
             return not a.isLegacy
         end
@@ -641,3 +646,5 @@ function Ledger:CleanupDuplicates()
             VM.UI:RefreshAll()
         end
     end
+    return removedCount
+end

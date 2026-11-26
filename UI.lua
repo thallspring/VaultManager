@@ -1232,7 +1232,7 @@ function UI:CreateMainFrame()
 
     local title = headerBar:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
     title:SetPoint("LEFT", 14, 0)
-    local ver = "v" .. (VM.GetAddonVersion and VM:GetAddonVersion() or "1.4.3")
+    local ver = "v" .. (VM.GetAddonVersion and VM:GetAddonVersion() or "1.4.4")
     title:SetText(string.format("|cff26a6f2VAULT|r |cffffffffMANAGER|r |cff8899aa%s|r", ver))
 
     mainFrame.scanStatusBtn = CreateModernButton(headerBar, 110, 22, "Scan Bank", { 0.25, 0.55, 0.85, 1 })
@@ -1862,7 +1862,7 @@ function UI:RefreshInventory()
                     local itemKey = (item.itemID and item.itemID ~= 0) and item.itemID or item.name
                     row.itemKey = itemKey
 
-                    local reserved = VM:GetReservedCount(item.itemID, STATE.selectedBankTab)
+                    local reserved = VM:GetReservedCount(itemKey, STATE.selectedBankTab)
                     local available = math.max(0, (item.count or 0) - reserved)
                     row.available = available
 
@@ -2168,13 +2168,14 @@ function UI:RefreshRequests()
                     if req.createdAt and req.createdAt > 0 then
                         table.insert(metaParts, "Requested: " .. date("%d/%m %H:%M", req.createdAt))
                     end
-                    if req.approvedBy and req.approvedBy ~= "" then
-                        if req.status == "REJECTED" and (not req.approvedAt or req.approvedAt == 0) then
+                    if req.status == "REJECTED" then
+                        if req.approvedBy and req.approvedBy ~= "" then
                             local rejTime = (req.completedAt and req.completedAt > 0) and (" " .. date("%d/%m %H:%M", req.completedAt)) or ""
-                            table.insert(metaParts, string.format("Rejected%s by: %s", rejTime, VM:ColorizeName(req.approvedBy)))
-                        else
-                            table.insert(metaParts, "Approved by: " .. VM:ColorizeName(req.approvedBy))
+                            local label = (req.approvedAt and req.approvedAt > 0) and "Cancelled" or "Rejected"
+                            table.insert(metaParts, string.format("%s%s by: %s", label, rejTime, VM:ColorizeName(req.approvedBy)))
                         end
+                    elseif req.approvedBy and req.approvedBy ~= "" then
+                        table.insert(metaParts, "Approved by: " .. VM:ColorizeName(req.approvedBy))
                     end
                     if req.status == "FULFILLED" then
                         local hasCompTime = (req.completedAt and req.completedAt > 0)
@@ -2231,7 +2232,7 @@ function UI:RefreshRequests()
     content:SetHeight(math.max(1, y))
 end
 
--- === END OF PART 1 (PASTE PART 2 DIRECTLY BELOW THIS LINE IN STEP 8) ===
+-- === END OF PART 1 (PASTE PART 2 DIRECTLY BELOW THIS LINE) ===
 --------------------------------------------------------------------------------
 -- TAB 3: LEDGER
 --------------------------------------------------------------------------------
@@ -2596,9 +2597,13 @@ function UI:RefreshLedger()
         y = y + 30
 
         if isExpanded then
+            local headerMatchesQuery = (q == "")
+                or (grp.mainName and grp.mainName:lower():find(q, 1, true))
+                or (grp.mainName == "GUILD" and ("guild bank guild operations"):find(q, 1, true))
+
             for _, tx in ipairs(grp.transactions) do
                 local showTx = true
-                if q ~= "" and not grp.mainName:lower():find(q, 1, true) then
+                if not headerMatchesQuery then
                     showTx = (tx.itemName and tx.itemName:lower():find(q, 1, true))
                         or (tx.player and tx.player:lower():find(q, 1, true))
                         or (tx.rawSender and tx.rawSender:lower():find(q, 1, true))
@@ -2609,8 +2614,9 @@ function UI:RefreshLedger()
                 if showTx then
                     local sub = AcquireRow()
                     local subBg = THEME.rowOdd
-                    local isGold = (tx.itemID == 0 or tx.itemLink == "GOLD")
-                    local isItemTx = not isGold and (tx.itemLink ~= "SUMMARY") and (tx.type ~= "SUMMARY")
+                    local isSummary = (tx.type == "SUMMARY" or tx.itemLink == "SUMMARY")
+                    local isGold = (not isSummary) and (tx.itemID == 0 or tx.itemLink == "GOLD")
+                    local isItemTx = (not isSummary) and (not isGold)
 
                     sub.baseBg = subBg
                     sub.groupMainKey = nil
@@ -2632,7 +2638,7 @@ function UI:RefreshLedger()
                     sub.deleteBtn:Hide()
 
                     local dir
-                    if tx.type == "SUMMARY" then
+                    if isSummary then
                         dir = "|cff8899aaSUMMARY|r"
                     elseif tx.type == "OUT" then
                         dir = isGold and "|cffff6666GOLD OUT|r" or "|cffff6666OUT|r"
@@ -2654,7 +2660,7 @@ function UI:RefreshLedger()
                     local noteTag = (tx.note and tx.note ~= "") and (" |cffcccccc— " .. tx.note .. "|r") or ""
 
                     local ruleTag = ""
-                    if tx.type == "OUT" and not isGold then
+                    if tx.type == "OUT" and not isGold and not isSummary then
                         if tx.isFFA or tx.priceMode == "FREE" then
                             ruleTag = " |cff44dd77(FFA)|r"
                         elseif tx.priceMode == "PERCENT" or (tx.chargedUnitPrice ~= nil and tx.unitPriceAtTime and tx.chargedUnitPrice < tx.unitPriceAtTime and tx.chargedUnitPrice > 0) then
@@ -2663,7 +2669,7 @@ function UI:RefreshLedger()
                         end
                     end
 
-                    if tx.type == "SUMMARY" then
+                    if isSummary then
                         sub.subText:SetText(string.format("|cff999999%s|r [%s] %s — In: %s | Out: %s",
                             dateStr, dir, tx.itemName or "Monthly Summary",
                             VM:FormatMoney(tx.contributed or 0), VM:FormatMoney(tx.received or 0)))
@@ -2681,7 +2687,7 @@ function UI:RefreshLedger()
                     local showDelete = isOff and (tx.isManual == true)
                     local showAction = false
 
-                    if isOff and tx.type ~= "SUMMARY" then
+                    if isOff and not isSummary then
                         if grp.mainName == "UNATTRIBUTED" then
                             sub.actionMode = "ASSIGN_UNATTRIBUTED"
                             sub.actionBtn:SetText("Assign Member")
@@ -3087,8 +3093,9 @@ function UI:RefreshRanking()
             for _, tx in ipairs(grp.transactions) do
                 local sub = AcquireRow()
                 local subBg = THEME.rowOdd
-                local isGold = (tx.itemID == 0 or tx.itemLink == "GOLD")
-                local isItemTx = not isGold and (tx.itemLink ~= "SUMMARY") and (tx.type ~= "SUMMARY")
+                local isSummary = (tx.type == "SUMMARY" or tx.itemLink == "SUMMARY")
+                local isGold = (not isSummary) and (tx.itemID == 0 or tx.itemLink == "GOLD")
+                local isItemTx = (not isSummary) and (not isGold)
 
                 sub.baseBg = subBg
                 sub.groupMainKey = nil
@@ -3107,26 +3114,34 @@ function UI:RefreshRanking()
                 sub.totalText:Hide()
                 sub.detailText:Show()
 
-                local dir = (tx.type == "OUT") and (isGold and "|cffff6666[GOLD OUT]|r" or "|cffff6666[OUT]|r")
-                    or (isGold and "|cffffd700[GOLD IN]|r" or "|cff44dd77[IN]|r")
                 local dateStr = date("%d/%m %H:%M", tx.timestamp or 0)
-                local itemDisplay = isGold and "Gold" or (tx.itemLink or tx.itemName or "Item")
-                local lockedVal = VM.Ranking:GetTransactionValuation(tx, "locked")
-                local liveVal = VM.Ranking:GetTransactionValuation(tx, "live")
-                local charTag = (tx.player ~= grp.mainName and tx.player ~= "UNATTRIBUTED")
-                    and (" (" .. VM:ColorizeName(tx.player, grp.isLegacy and "808080" or nil) .. ")") or ""
-
-                local lockedDisplay, liveDisplay
-                if priceMode == "locked" then
-                    lockedDisplay = string.format("|cffffcc33Historical: %s (Active)|r", VM:FormatMoney(lockedVal))
-                    liveDisplay = string.format("|cff888888Current: %s|r", VM:FormatMoney(liveVal))
+                if isSummary then
+                    sub.detailText:SetText(string.format("|cff888888%s|r |cff8899aa[SUMMARY]|r %s  —  In: %s  |  Out: %s",
+                        dateStr,
+                        tx.itemName or "Monthly Summary",
+                        VM:FormatMoney(tx.contributed or 0),
+                        VM:FormatMoney(tx.received or 0)))
                 else
-                    lockedDisplay = string.format("|cff888888Historical: %s|r", VM:FormatMoney(lockedVal))
-                    liveDisplay = string.format("|cff26a6f2Current: %s (Active)|r", VM:FormatMoney(liveVal))
-                end
+                    local dir = (tx.type == "OUT") and (isGold and "|cffff6666[GOLD OUT]|r" or "|cffff6666[OUT]|r")
+                        or (isGold and "|cffffd700[GOLD IN]|r" or "|cff44dd77[IN]|r")
+                    local itemDisplay = isGold and "Gold" or (tx.itemLink or tx.itemName or "Item")
+                    local lockedVal = VM.Ranking:GetTransactionValuation(tx, "locked")
+                    local liveVal = VM.Ranking:GetTransactionValuation(tx, "live")
+                    local charTag = (tx.player ~= grp.mainName and tx.player ~= "UNATTRIBUTED")
+                        and (" (" .. VM:ColorizeName(tx.player, grp.isLegacy and "808080" or nil) .. ")") or ""
 
-                sub.detailText:SetText(string.format("|cff888888%s|r %s %s%s  —  %s  |  %s",
-                    dateStr, dir, itemDisplay, charTag, lockedDisplay, liveDisplay))
+                    local lockedDisplay, liveDisplay
+                    if priceMode == "locked" then
+                        lockedDisplay = string.format("|cffffcc33Historical: %s (Active)|r", VM:FormatMoney(lockedVal))
+                        liveDisplay = string.format("|cff888888Current: %s|r", VM:FormatMoney(liveVal))
+                    else
+                        lockedDisplay = string.format("|cff888888Historical: %s|r", VM:FormatMoney(lockedVal))
+                        liveDisplay = string.format("|cff26a6f2Current: %s (Active)|r", VM:FormatMoney(liveVal))
+                    end
+
+                    sub.detailText:SetText(string.format("|cff888888%s|r %s %s%s  —  %s  |  %s",
+                        dateStr, dir, itemDisplay, charTag, lockedDisplay, liveDisplay))
+                end
 
                 y = y + 22
             end

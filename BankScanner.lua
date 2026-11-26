@@ -63,8 +63,8 @@ scanTimeoutFrame:SetScript("OnUpdate", function(self, elapsed)
 end)
 
 local GB_API = {
-    GetNumTabs = function() 
-        local n = GetNumGuildBankTabs and GetNumGuildBankTabs() or 0 
+    GetNumTabs = function()
+        local n = GetNumGuildBankTabs and GetNumGuildBankTabs() or 0
         if n > 0 then return n end
         local inv = VM.db and VM.db.inventory
         if inv and inv.numTabs and inv.numTabs > 0 then return inv.numTabs end
@@ -243,7 +243,7 @@ function Scanner:RunFullScanPass(isFinal)
 
     local ok3, res3 = pcall(function() return self:ScanMoneyLogs() end)
     if ok3 then moneyAdded = res3 or 0 else VM:LogDebug("ScanMoneyLogs error: " .. tostring(res3)) end
-    
+
     self.scanState = "COMPLETE"
     isScanning = false
     ignoreEventsUntil = GetTime() + 2.0
@@ -461,6 +461,7 @@ function Scanner:ScanLogs()
     local snapshotCounts = {}
     local minLogTs, maxLogTs = nil, nil
     local now = (GetServerTime and GetServerTime()) or time()
+    local isOfficer = VM:IsOfficer()
 
     for tab = 1, numTabs do
         local numTx = GB_API.GetNumTransactions(tab)
@@ -477,47 +478,59 @@ function Scanner:ScanLogs()
             end
             local typeStr = tostring(txType or ""):lower()
             local isDeposit = (typeStr:find("deposit") or typeStr == "1")
-            local isWithdraw = (isFFA and (typeStr:find("withdraw") or typeStr == "2" or typeStr:find("take")))
+            local isRawWithdraw = (typeStr:find("withdraw") or typeStr == "2" or typeStr:find("take"))
 
-            if isDeposit or isWithdraw then
+            if isDeposit or isRawWithdraw then
                 local cleanLink = itemLink or "[Unknown Item]"
                 local itemID = tonumber(cleanLink and cleanLink:match("item:(%d+)")) or 0
+                local extractedName = cleanLink:match("%[(.-)%]") or cleanLink:gsub("^%[", ""):gsub("%]$", "")
                 local normName = VM:NormalizeActor(name)
                 count = tonumber(count) or 1
 
-                local hasTime = (year ~= nil or month ~= nil or day ~= nil or hour ~= nil)
-                local computedTimestamp
-                if hasTime then
-                    local ageSec = (tonumber(year) or 0) * 31536000
-                                 + (tonumber(month) or 0) * 2592000
-                                 + (tonumber(day) or 0) * 86400
-                                 + (tonumber(hour) or 0) * 3600
-                    computedTimestamp = now - ageSec
-                else
-                    computedTimestamp = now - ((numTx - i) * 1800)
+                local matchesApproved = false
+                if isRawWithdraw and isOfficer and VM.Fulfillment and VM.Fulfillment.FindMatchingApprovedRequest then
+                    if VM.Fulfillment:FindMatchingApprovedRequest(normName, itemID, extractedName, count, 0) then
+                        matchesApproved = true
+                    end
                 end
 
-                if not minLogTs or computedTimestamp < minLogTs then minLogTs = computedTimestamp end
-                if not maxLogTs or computedTimestamp > maxLogTs then maxLogTs = computedTimestamp end
+                if isDeposit or isFFA or matchesApproved then
+                    local hasTime = (year ~= nil or month ~= nil or day ~= nil or hour ~= nil)
+                    local computedTimestamp
+                    if hasTime then
+                        local ageSec = (tonumber(year) or 0) * 31536000
+                                     + (tonumber(month) or 0) * 2592000
+                                     + (tonumber(day) or 0) * 86400
+                                     + (tonumber(hour) or 0) * 3600
+                        computedTimestamp = now - ageSec
+                    else
+                        computedTimestamp = now - ((numTx - i) * 1800)
+                    end
 
-                local txDir = isDeposit and "IN" or "OUT"
-                local itemKey = VM:NormalizeItemKey(itemID, cleanLink, cleanLink:match("%[(.-)%]"))
-                local matchKey = string.format("ITEM:%s:%s:%s:%d", txDir, normName, itemKey, count)
-                snapshotCounts[matchKey] = (snapshotCounts[matchKey] or 0) + 1
+                    if not minLogTs or computedTimestamp < minLogTs then minLogTs = computedTimestamp end
+                    if not maxLogTs or computedTimestamp > maxLogTs then maxLogTs = computedTimestamp end
 
-                table.insert(bankLogEntries, {
-                    tab = tab,
-                    txDir = txDir,
-                    isDeposit = isDeposit,
-                    normName = normName,
-                    itemID = itemID,
-                    cleanLink = cleanLink,
-                    count = count,
-                    computedTimestamp = computedTimestamp,
-                    matchKey = matchKey,
-                    occIndex = snapshotCounts[matchKey],
-                    isFFA = isFFA
-                })
+                    local txDir = isDeposit and "IN" or "OUT"
+                    local itemKey = VM:NormalizeItemKey(itemID, cleanLink, extractedName)
+                    local matchKey = string.format("ITEM:%s:%s:%s:%d", txDir, normName, itemKey, count)
+                    snapshotCounts[matchKey] = (snapshotCounts[matchKey] or 0) + 1
+
+                    table.insert(bankLogEntries, {
+                        tab = tab,
+                        rule = rule,
+                        txDir = txDir,
+                        isDeposit = isDeposit,
+                        normName = normName,
+                        itemID = itemID,
+                        cleanLink = cleanLink,
+                        itemName = extractedName,
+                        count = count,
+                        computedTimestamp = computedTimestamp,
+                        matchKey = matchKey,
+                        occIndex = snapshotCounts[matchKey],
+                        isFFA = isFFA
+                    })
+                end
             end
         end
     end
@@ -567,29 +580,82 @@ function Scanner:ScanLogs()
                     end
                 end
             else
-                local ahPrice = VM:GetItemAHPrice(entry.itemID, entry.cleanLink) or 0
-                local itemName = entry.cleanLink:gsub("^%[", ""):gsub("%]$", "")
-                local tx = {
-                    id = string.format("OUT_FFA_%d_%d", time(), math.random(1000, 9999)),
-                    type = "OUT",
-                    player = entry.normName,
-                    itemID = entry.itemID,
-                    itemLink = entry.cleanLink,
-                    itemName = itemName,
-                    count = entry.count,
-                    unitPriceAtTime = ahPrice,
-                    chargedUnitPrice = 0,
-                    timestamp = entry.computedTimestamp,
-                    updatedAt = time(),
-                    officer = VM:GetPlayerName(),
-                    source = "FFA_SCAN",
-                    isFFA = true,
-                    tab = entry.tab,
-                    isManual = false,
-                    deleted = false
-                }
-                VM.db.ledger[tx.id] = tx
-                VM.Comms:BroadcastTransaction(tx)
+                local matchedReq = nil
+                if isOfficer and VM.Fulfillment and VM.Fulfillment.FindMatchingApprovedRequest then
+                    matchedReq = VM.Fulfillment:FindMatchingApprovedRequest(entry.normName, entry.itemID, entry.itemName, entry.count, 0)
+                end
+
+                local ahPrice = VM:GetEffectiveLivePrice(entry.itemID, entry.cleanLink, 0)
+                local itemName = entry.itemName or entry.cleanLink:gsub("^%[", ""):gsub("%]$", "")
+
+                if matchedReq then
+                    local effMode = matchedReq.priceMode or (entry.rule and entry.rule.mode) or "FREE"
+                    local effPct = matchedReq.pricePercent or (entry.rule and entry.rule.percent) or 50
+                    local totalCharged = VM:CalculateMemberTotalPrice(ahPrice, entry.count, { mode = effMode, percent = effPct })
+                    local unitCharged = (entry.count > 0) and math.floor(totalCharged / entry.count) or totalCharged
+                    local targetPlayer = VM:NormalizeName(matchedReq.requester)
+
+                    local tx = {
+                        id = string.format("OUT_REQ_%d_%d", time(), math.random(1000, 9999)),
+                        type = "OUT",
+                        player = targetPlayer,
+                        rawSender = entry.normName,
+                        attributedTo = targetPlayer,
+                        itemID = entry.itemID,
+                        itemLink = entry.cleanLink,
+                        itemName = itemName,
+                        count = entry.count,
+                        unitPriceAtTime = ahPrice,
+                        chargedUnitPrice = unitCharged,
+                        chargedTotalPrice = totalCharged,
+                        priceMode = effMode,
+                        pricePercent = effPct,
+                        isFFA = (effMode == "FREE"),
+                        tab = entry.tab,
+                        timestamp = entry.computedTimestamp,
+                        updatedAt = time(),
+                        officer = VM:GetPlayerName(),
+                        source = "REQUEST",
+                        fulfillmentId = matchedReq.id,
+                        recipient = targetPlayer,
+                        isManual = false,
+                        deleted = false
+                    }
+                    VM.db.ledger[tx.id] = tx
+                    VM.Comms:BroadcastTransaction(tx)
+                    VM.Fulfillment:CompleteRequest(matchedReq.id, {
+                        skipLedger = true,
+                        completedBy = entry.normName,
+                        completedAt = entry.computedTimestamp,
+                        method = "BANK"
+                    })
+                elseif entry.isFFA then
+                    local tx = {
+                        id = string.format("OUT_FFA_%d_%d", time(), math.random(1000, 9999)),
+                        type = "OUT",
+                        player = entry.normName,
+                        rawSender = entry.normName,
+                        attributedTo = entry.normName,
+                        itemID = entry.itemID,
+                        itemLink = entry.cleanLink,
+                        itemName = itemName,
+                        count = entry.count,
+                        unitPriceAtTime = ahPrice,
+                        chargedUnitPrice = 0,
+                        chargedTotalPrice = 0,
+                        priceMode = "FREE",
+                        timestamp = entry.computedTimestamp,
+                        updatedAt = time(),
+                        officer = VM:GetPlayerName(),
+                        source = "FFA_SCAN",
+                        isFFA = true,
+                        tab = entry.tab,
+                        isManual = false,
+                        deleted = false
+                    }
+                    VM.db.ledger[tx.id] = tx
+                    VM.Comms:BroadcastTransaction(tx)
+                end
             end
 
             existingCounts[entry.matchKey] = existingM + 1
@@ -608,7 +674,6 @@ function Scanner:ScanLogs()
                 VM.db.inventory.scannedBy = pName
             end
         end
-        VM.Comms:BroadcastLedgerSync()
         if VM.UI then VM.UI:RefreshAll() end
     end
     return addedCount
@@ -625,6 +690,7 @@ function Scanner:ScanMoneyLogs()
     local snapshotCounts = {}
     local minLogTs, maxLogTs = nil, nil
     local now = (GetServerTime and GetServerTime()) or time()
+    local isOfficer = VM:IsOfficer()
 
     for i = numMoneyTx, 1, -1 do
         local txType, name, amount, year, month, day, hour = GB_API.GetMoneyTransaction(i)
@@ -680,7 +746,7 @@ function Scanner:ScanMoneyLogs()
     if VM.db and VM.db.ledger then
         for _, exTx in pairs(VM.db.ledger) do
             if exTx and not exTx.deleted and exTx.timestamp then
-                local isGold = (exTx.itemID == 0 or exTx.itemLink == "GOLD" or exTx.source == "BANK_MONEY_LOG" or exTx.source == "MANUAL_GOLD" or (exTx.itemName and (exTx.itemName:find("Gold Deposit") or exTx.itemName:find("Gold Withdrawal"))))
+                local isGold = (exTx.itemID == 0 or exTx.itemLink == "GOLD" or exTx.source == "BANK_MONEY_LOG" or exTx.source == "MANUAL_GOLD" or exTx.source == "GOLD_REQUEST" or (exTx.itemName and (exTx.itemName:find("Gold Deposit") or exTx.itemName:find("Gold Withdrawal"))))
                 if isGold then
                     local exDir = VM:NormalizeAction(exTx.type)
                     local exActor = VM:NormalizeActor(exTx.rawSender or exTx.player)
@@ -732,15 +798,35 @@ function Scanner:ScanMoneyLogs()
                     tx.timestamp = entry.computedTimestamp
                 end
 
-                if attributedTo == entry.normName and entry.normName == VM:GetPlayerName() and VM:IsOfficer() then
+                if attributedTo == entry.normName and entry.normName == VM:GetPlayerName() and isOfficer then
                     VM:Print(string.format("Gold deposit of %s recorded. Use 'Reassign' in the Ledger if this was paid by another member.",
                         VM:FormatMoney(entry.copper)))
                 end
             else
-                local tx = VM.Ledger:RecordGoldWithdrawal(entry.normName, entry.copper, "BANK_MONEY_LOG", entry.computedTimestamp)
-                if tx then
-                    tx.isFFA = false
-                    tx.timestamp = entry.computedTimestamp
+                local matchedGoldReq = nil
+                if isOfficer and VM.Fulfillment and VM.Fulfillment.FindMatchingApprovedRequest then
+                    matchedGoldReq = VM.Fulfillment:FindMatchingApprovedRequest(entry.normName, nil, nil, nil, entry.copper)
+                end
+
+                if matchedGoldReq then
+                    local tx = VM.Ledger:RecordGoldWithdrawal("GUILD", entry.copper, "GOLD_REQUEST", entry.computedTimestamp, entry.normName, "GUILD", matchedGoldReq.reason)
+                    if tx then
+                        tx.isFFA = false
+                        tx.timestamp = entry.computedTimestamp
+                        tx.fulfillmentId = matchedGoldReq.id
+                    end
+                    VM.Fulfillment:CompleteRequest(matchedGoldReq.id, {
+                        skipLedger = true,
+                        completedBy = entry.normName,
+                        completedAt = entry.computedTimestamp,
+                        method = "BANK"
+                    })
+                else
+                    local tx = VM.Ledger:RecordGoldWithdrawal(entry.normName, entry.copper, "BANK_MONEY_LOG", entry.computedTimestamp, entry.normName, entry.normName)
+                    if tx then
+                        tx.isFFA = false
+                        tx.timestamp = entry.computedTimestamp
+                    end
                 end
             end
 
@@ -770,7 +856,6 @@ function Scanner:ScanMoneyLogs()
             VM.db.scanMetadata.scannedBy = pName
         end
         VM.Comms:BroadcastInventory()
-        VM.Comms:BroadcastLedgerSync()
         if VM.UI then VM.UI:RefreshAll() end
     end
     return addedCount

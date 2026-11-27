@@ -505,7 +505,7 @@ end
 --------------------------------------------------------------------------------
 function UI:CreateRequestsHelpModal()
     requestsHelpFrame = CreateFrame("Frame", "VaultManagerRequestsHelpModal", UIParent, "BackdropTemplate")
-    requestsHelpFrame:SetSize(450, 325)
+    requestsHelpFrame:SetSize(480, 390)
     requestsHelpFrame:SetPoint("CENTER")
     requestsHelpFrame:SetFrameStrata("FULLSCREEN_DIALOG")
     requestsHelpFrame:SetFrameLevel(210)

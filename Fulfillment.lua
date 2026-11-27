@@ -3,6 +3,7 @@ VM.Fulfillment = {}
 local Fulfillment = VM.Fulfillment
 
 Fulfillment.activeOrder = nil
+Fulfillment.isWithdrawing = false
 
 local MAX_SLOTS_PER_TAB = 98
 local currentTradeTargetMoney = 0
@@ -135,24 +136,6 @@ local function GetEmptyGeneralBagSlots()
         end
     end
     return empties
-end
-
-local function CountMatchingItemsInBags(req)
-    local total = 0
-    for bag = 0, 4 do
-        local numSlots = GetContainerSlotCount(bag)
-        for slot = 1, numSlots do
-            local link, count = GetBagSlotInfo(bag, slot)
-            if link then
-                local id = tonumber(link:match("item:(%d+)")) or 0
-                local name = link:match("%[(.-)%]") or link
-                if DoesItemMatchRequest(id, name, req) then
-                    total = total + (tonumber(count) or 1)
-                end
-            end
-        end
-    end
-    return total
 end
 
 function Fulfillment:GetExpectedMemberPayment(req)
@@ -476,6 +459,7 @@ function Fulfillment:Init()
     end
 
     local f = CreateFrame("Frame")
+    f:RegisterEvent("GUILDBANKFRAME_CLOSED")
     f:RegisterEvent("MAIL_SHOW")
     f:RegisterEvent("MAIL_CLOSED")
     f:RegisterEvent("MAIL_SEND_SUCCESS")
@@ -487,7 +471,9 @@ function Fulfillment:Init()
     f:RegisterEvent("UI_INFO_MESSAGE")
 
     f:SetScript("OnEvent", function(_, event, arg1, arg2)
-        if event == "MAIL_SHOW" then
+        if event == "GUILDBANKFRAME_CLOSED" then
+            self.isWithdrawing = false
+        elseif event == "MAIL_SHOW" then
             pendingMailSnapshot = nil
             if VM:IsOfficer() then
                 local mine = self:GetMyPreparedOrders()
@@ -707,7 +693,7 @@ function Fulfillment:ApproveRequest(reqID)
     if VM.UI then VM.UI:RefreshAll() end
 end
 
--- Helper to mark request PREPARED (or FULFILLED directly if officer prepared their own request at the bank)
+-- Helper to mark request PREPARED (or FULFILLED directly if officer prepared their own/alt request at the bank)
 function Fulfillment:FinalizePreparedState(req, withdrawnFromBank)
     local me = VM:GetPlayerName()
     local now = time()
@@ -746,11 +732,16 @@ function Fulfillment:ExecuteBankWithdrawSteps(req, tab, steps)
     local function RunStep(idx)
         local step = steps[idx]
         if not step then
+            self.isWithdrawing = false
             self:FinalizePreparedState(req, true)
+            if VM.BankScanner and VM.BankScanner.SchedulePostWithdrawScan then
+                VM.BankScanner:SchedulePostWithdrawScan()
+            end
             return
         end
 
         if not (GuildBankFrame and GuildBankFrame:IsVisible()) then
+            self.isWithdrawing = false
             VM:Print("|cffff4444Guild Bank closed before withdrawal finished.|r")
             return
         end
@@ -775,69 +766,72 @@ function Fulfillment:ExecuteBankWithdrawSteps(req, tab, steps)
                 RunStep(idx + 1)
             end
         else
+            self.isWithdrawing = false
             self:FinalizePreparedState(req, true)
+            if VM.BankScanner and VM.BankScanner.SchedulePostWithdrawScan then
+                VM.BankScanner:SchedulePostWithdrawScan()
+            end
         end
     end
 
     RunStep(1)
 end
 
--- Prepare request: auto-withdraws from Guild Bank if open, or marks PREPARED if already in bags
+-- Prepare request: requires open Guild Bank to prevent accidental fulfillment from personal bags/gold
 function Fulfillment:PrepareRequest(reqID)
     if not VM:IsOfficer() then return end
     local req = VM.db.requests[reqID]
     if not req or req.status ~= "APPROVED" then return end
 
-    local isBankOpen = GuildBankFrame and GuildBankFrame:IsVisible()
+    if self.isWithdrawing then
+        VM:Print("|cffffaa00Already withdrawing a request from the Guild Bank. Please wait a moment.|r")
+        return
+    end
+
+    if not (GuildBankFrame and GuildBankFrame:IsVisible()) then
+        VM:Print("|cffff4444Open the Guild Bank to prepare and withdraw this request.|r")
+        return
+    end
 
     if req.isGoldRequest then
         local goldAmt = tonumber(req.goldAmount or req.quotedTotalPrice or req.quotedUnitPrice) or 0
         if goldAmt <= 0 then return end
 
-        if isBankOpen then
-            local bankGold = (GetGuildBankMoney and GetGuildBankMoney()) or 0
-            if bankGold < goldAmt then
-                VM:Print(string.format("|cffff4444Not enough gold in Guild Bank (Have: %s, Need: %s).|r",
-                    VM:FormatMoney(bankGold), VM:FormatMoney(goldAmt)))
-                return
-            end
-            local limit = (GetGuildBankWithdrawMoney and GetGuildBankWithdrawMoney()) or -1
-            if limit >= 0 and limit < goldAmt then
-                VM:Print(string.format("|cffff4444Your daily Guild Bank withdraw limit (%s) is below %s.|r",
-                    VM:FormatMoney(limit), VM:FormatMoney(goldAmt)))
-                return
-            end
-            if WithdrawGuildBankMoney then
-                WithdrawGuildBankMoney(goldAmt)
-            end
-            self:FinalizePreparedState(req, true)
-        else
-            local myGold = (GetMoney and GetMoney()) or 0
-            if myGold >= goldAmt then
-                self:FinalizePreparedState(req, false)
-            else
-                VM:Print(string.format("|cffff4444Open the Guild Bank to withdraw %s for this request.|r", VM:FormatMoney(goldAmt)))
-            end
+        local bankGold = (GetGuildBankMoney and GetGuildBankMoney()) or 0
+        if bankGold < goldAmt then
+            VM:Print(string.format("|cffff4444Not enough gold in Guild Bank (Have: %s, Need: %s).|r",
+                VM:FormatMoney(bankGold), VM:FormatMoney(goldAmt)))
+            return
+        end
+        local limit = (GetGuildBankWithdrawMoney and GetGuildBankWithdrawMoney()) or -1
+        if limit >= 0 and limit < goldAmt then
+            VM:Print(string.format("|cffff4444Your daily Guild Bank withdraw limit (%s) is below %s.|r",
+                VM:FormatMoney(limit), VM:FormatMoney(goldAmt)))
+            return
+        end
+
+        self.isWithdrawing = true
+        if WithdrawGuildBankMoney then
+            WithdrawGuildBankMoney(goldAmt)
+        end
+        self.isWithdrawing = false
+        self:FinalizePreparedState(req, true)
+        if VM.BankScanner and VM.BankScanner.SchedulePostWithdrawScan then
+            VM.BankScanner:SchedulePostWithdrawScan()
         end
         return
     end
 
     -- Item Request
     local needed = tonumber(req.count) or 1
-    if not isBankOpen then
-        local inBags = CountMatchingItemsInBags(req)
-        if inBags >= needed then
-            self:FinalizePreparedState(req, false)
-        else
-            VM:Print(string.format("|cffff4444Open the Guild Bank to withdraw %dx %s (found %d in bags).|r",
-                needed, req.itemLink or req.itemName or "Item", inBags))
-        end
-        return
-    end
-
     local targetTab = tonumber(req.tab) or 1
+    self.isWithdrawing = true
+
     local function ScanAndWithdrawFromTab()
-        if not (GuildBankFrame and GuildBankFrame:IsVisible()) then return end
+        if not (GuildBankFrame and GuildBankFrame:IsVisible()) then
+            self.isWithdrawing = false
+            return
+        end
 
         local matchingSlots = {}
         local totalAvailable = 0
@@ -855,6 +849,7 @@ function Fulfillment:PrepareRequest(reqID)
         end
 
         if totalAvailable < needed then
+            self.isWithdrawing = false
             VM:Print(string.format("|cffff4444Only %d of %d %s found in Tab %d. Try again after the tab loads.|r",
                 totalAvailable, needed, req.itemLink or req.itemName or "Item", targetTab))
             return
@@ -875,6 +870,7 @@ function Fulfillment:PrepareRequest(reqID)
         for _, s in ipairs(matchingSlots) do
             if remaining <= 0 then break end
             if not empties[emptyIdx] then
+                self.isWithdrawing = false
                 VM:Print(string.format("|cffff4444Not enough free general bag slots to withdraw %dx %s.|r",
                     needed, req.itemLink or req.itemName or "Item"))
                 return
@@ -1119,6 +1115,22 @@ function Fulfillment:PopulateMail(req)
             MailFrameTab_OnClick(nil, 2) -- Switch to Send Mail tab
         end
     end
+
+    -- Guard against accidentally mailing items/gold from a previously filled order to a different recipient
+    local hasExistingAttachment = false
+    local maxSlots = ATTACHMENTS_MAX_SEND or 12
+    for i = 1, maxSlots do
+        if (GetSendMailItemLink and GetSendMailItemLink(i)) or (GetSendMailItem and GetSendMailItem(i)) then
+            hasExistingAttachment = true
+            break
+        end
+    end
+    local existingMoney = (GetSendMailMoney and GetSendMailMoney()) or 0
+    if hasExistingAttachment or existingMoney > 0 then
+        VM:Print("|cffffaa00Clear existing attachments or gold in Send Mail before filling another request.|r")
+        return
+    end
+
     if SendMailNameEditBox then
         SendMailNameEditBox:SetText(req.requester or "")
     end
@@ -1209,6 +1221,11 @@ function Fulfillment:PopulateTrade(req)
     end
 
     if req.isGoldRequest then
+        local existingTradeMoney = (GetPlayerTradeMoney and GetPlayerTradeMoney()) or 0
+        if existingTradeMoney > 0 then
+            VM:Print("|cffffaa00Gold is already entered in the Trade window. Complete one gold request per trade.|r")
+            return
+        end
         local goldAmt = tonumber(req.goldAmount or req.quotedTotalPrice or req.quotedUnitPrice) or 0
         if goldAmt > 0 and SetTradeMoney then
             SetTradeMoney(goldAmt)

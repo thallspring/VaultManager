@@ -10,6 +10,17 @@ local uiRefreshNeeded = false
 local uiRefreshTimer = 0
 local UI_REFRESH_DEBOUNCE = 0.35
 
+local ZONE_HELLO_INTERVAL = 900 -- 15 min cooldown on regular zone/instance loading screens
+local MANUAL_SYNC_COOLDOWN = 10
+
+Comms.lastHelloSentAt = 0
+Comms.lastManualSyncAt = 0
+Comms.lastDataReceivedAt = 0
+Comms.isSyncingUntil = 0
+Comms.peerHasNewerData = false
+Comms.peerNewerSetAt = 0
+local helloTimerPending = false
+
 local pendingHelloSync = nil
 local recentPeerBroadcasts = {
     invScan = 0, invAt = 0,
@@ -28,6 +39,9 @@ local PROTECTED_TX_SOURCES = {
     GOLD_REQUEST = true,
     RETURN = true,
     COMPACTED = true,
+    WRITE_OFF = true,
+    TAB_PURCHASE = true,
+    GUILD_EXPENSE = true,
 }
 
 local function EscapeStr(s)
@@ -66,6 +80,36 @@ local function ScheduleUIRefresh()
     uiRefreshTimer = UI_REFRESH_DEBOUNCE
 end
 
+local function MarkDataReceived()
+    local nowGT = GetTime and GetTime() or 0
+    Comms.lastDataReceivedAt = time()
+    Comms.peerHasNewerData = false
+    Comms.isSyncingUntil = math.max(Comms.isSyncingUntil or 0, nowGT + 1.5)
+    if C_Timer and C_Timer.After then
+        C_Timer.After(1.7, function()
+            if VM.UI and VM.UI.UpdateScanStatusButton then
+                VM.UI:UpdateScanStatusButton()
+            end
+        end)
+    end
+end
+
+local function ScheduleHelloWithDelay(delaySec)
+    if helloTimerPending then return end
+    helloTimerPending = true
+    local function RunHello()
+        helloTimerPending = false
+        if IsInGuild() and not VM.isUnguilded then
+            Comms:SendHello()
+        end
+    end
+    if C_Timer and C_Timer.After then
+        C_Timer.After(delaySec, RunHello)
+    else
+        RunHello()
+    end
+end
+
 function Comms:GetMaxTimestamp(tbl, field)
     local maxTs = 0
     for _, v in pairs(tbl or {}) do
@@ -86,25 +130,88 @@ function Comms:GetRulesMaxTimestamp(tbl)
     return maxTs
 end
 
+function Comms:RequestManualSync()
+    if VM.isUnguilded or not IsInGuild() then
+        return false, 0
+    end
+    local nowGT = GetTime and GetTime() or 0
+    local elapsed = nowGT - (self.lastManualSyncAt or 0)
+    if self.lastManualSyncAt > 0 and elapsed < MANUAL_SYNC_COOLDOWN then
+        return false, math.ceil(MANUAL_SYNC_COOLDOWN - elapsed)
+    end
+
+    self.lastManualSyncAt = nowGT
+    self.isSyncingUntil = nowGT + 4.0
+    self:SendHello()
+    if VM.UI and VM.UI.UpdateScanStatusButton then
+        VM.UI:UpdateScanStatusButton()
+    end
+    if C_Timer and C_Timer.After then
+        C_Timer.After(4.2, function()
+            if VM.UI and VM.UI.UpdateScanStatusButton then
+                VM.UI:UpdateScanStatusButton()
+            end
+        end)
+    end
+    return true, 0
+end
+
+function Comms:GetSyncButtonStatus()
+    if VM.isUnguilded then
+        return "NO_GUILD", "No Guild", { 0.35, 0.35, 0.35, 1 }, "Join a guild to sync vault data."
+    end
+    if VM.BankScanner and VM.BankScanner.scanState == "SCANNING" then
+        return "SCANNING", "Scanning...", { 0.70, 0.55, 0.10, 1 }, "Scanning Guild Bank tabs and logs..."
+    end
+
+    local nowGT = GetTime and GetTime() or 0
+    if nowGT < (self.isSyncingUntil or 0) then
+        return "SYNCING", "Syncing...", { 0.70, 0.55, 0.10, 1 }, "Checking online guild members for newer data..."
+    end
+
+    -- Expire stale peer-newer hint after 30s if the peer went offline
+    if self.peerHasNewerData and (nowGT - (self.peerNewerSetAt or 0)) > 30 then
+        self.peerHasNewerData = false
+    end
+
+    local lastScan = (VM.db and VM.db.inventory and VM.db.inventory.lastScan) or 0
+    if lastScan == 0 then
+        return "NEED_SYNC", "Request Sync", { 0.15, 0.50, 0.80, 1 }, "No local bank data. Click to request guild sync from online members."
+    end
+
+    if self.peerHasNewerData then
+        return "NEED_SYNC", "Sync Data", { 0.15, 0.50, 0.80, 1 }, "An online guild member has newer data. Click to sync."
+    end
+
+    local lastRxStr = (self.lastDataReceivedAt and self.lastDataReceivedAt > 0)
+        and ("Last guild update: " .. date("%H:%M", self.lastDataReceivedAt))
+        or "Up to date with online peers"
+    return "SYNCED", "Data Synced", { 0.18, 0.55, 0.28, 1 }, lastRxStr .. "\nClick to check online members for updates."
+end
+
 function Comms:Init()
     local f = CreateFrame("Frame")
     f:RegisterEvent("CHAT_MSG_ADDON")
     f:RegisterEvent("PLAYER_ENTERING_WORLD")
 
-    f:SetScript("OnEvent", function(_, event, prefix, msg, channel, sender)
+    f:SetScript("OnEvent", function(_, event, arg1, arg2, arg3, arg4)
         if event == "CHAT_MSG_ADDON" then
+            local prefix, msg, channel, sender = arg1, arg2, arg3, arg4
             if prefix == VM.PREFIX and channel == "GUILD" then
                 self:OnMessageReceived(msg, VM:NormalizeName(sender))
             end
         elseif event == "PLAYER_ENTERING_WORLD" then
-            if C_Timer and C_Timer.After then
-                C_Timer.After(4, function()
-                    if IsInGuild() then
-                        self:SendHello()
-                    end
-                end)
-            elseif IsInGuild() then
-                self:SendHello()
+            local isInitialLogin, isReloadingUi = arg1, arg2
+            local emptyCache = (not VM.db or not VM.db.inventory or (VM.db.inventory.lastScan or 0) == 0)
+            if isInitialLogin or isReloadingUi or emptyCache then
+                -- Randomized 3-8s delay on login/reload to prevent guild-wide spikes
+                ScheduleHelloWithDelay(3 + (math.random() * 5))
+            else
+                -- Regular zone/instance loading screens: only sync if 15+ min elapsed
+                local now = time()
+                if (now - (self.lastHelloSentAt or 0)) >= ZONE_HELLO_INTERVAL then
+                    ScheduleHelloWithDelay(4 + (math.random() * 8))
+                end
             end
         end
     end)
@@ -155,6 +262,8 @@ function Comms:BroadcastEpoch()
 end
 
 function Comms:SendHello()
+    if VM.isUnguilded or not IsInGuild() then return end
+    self.lastHelloSentAt = time()
     local epoch = VM.db.dbEpoch or 1
     local invTs = (VM.db.inventory and VM.db.inventory.lastScan) or 0
     local reqTs = self:GetMaxTimestamp(VM.db.requests, "updatedAt")
@@ -210,7 +319,8 @@ local function ExecutePendingHelloSync()
             local cutoff = time() - (30 * 86400)
             for _, r in pairs(VM.db.requests or {}) do
                 local rUpd = r.updatedAt or r.createdAt or 0
-                if rUpd > req.reqTs and (r.status == "PENDING" or r.status == "APPROVED" or rUpd > cutoff) then
+                local isActive = (r.status == "PENDING" or r.status == "APPROVED" or r.status == "PREPARED")
+                if rUpd > req.reqTs and (isActive or rUpd > cutoff) then
                     Comms:BroadcastRequest(r)
                 end
             end
@@ -353,15 +463,38 @@ function Comms:OnMessageReceived(msg, sender)
             ScheduleUIRefresh()
         end
 
-        local hasAnythingNewer =
-            ((VM.db.inventory and VM.db.inventory.lastScan or 0) > peerInvTs)
-            or (self:GetMaxTimestamp(VM.db.requests, "updatedAt") > peerReqTs)
-            or (self:GetMaxTimestamp(VM.db.mains, "updatedAt") > peerMainTs)
-            or (self:GetRulesMaxTimestamp(VM.db.tabRules) > peerRuleTs)
-            or (self:GetMaxTimestamp(VM.db.ledger, "updatedAt") > peerTxTs)
+        local myInvTs = (VM.db.inventory and VM.db.inventory.lastScan) or 0
+        local myReqTs = self:GetMaxTimestamp(VM.db.requests, "updatedAt")
+        local myMainTs = self:GetMaxTimestamp(VM.db.mains, "updatedAt")
+        local myRuleTs = self:GetRulesMaxTimestamp(VM.db.tabRules)
+        local myTxTs = self:GetMaxTimestamp(VM.db.ledger, "updatedAt")
 
-        if hasAnythingNewer then
+        local iHaveNewer =
+            (myInvTs > peerInvTs)
+            or (myReqTs > peerReqTs)
+            or (myMainTs > peerMainTs)
+            or (myRuleTs > peerRuleTs)
+            or (myTxTs > peerTxTs)
+
+        if iHaveNewer then
             self:ScheduleHelloResponse(peerInvTs, peerReqTs, peerMainTs, peerRuleTs, peerTxTs)
+        end
+
+        -- If the peer has newer data than us, automatically send our HELLO back (throttled) so they push the delta
+        local peerHasNewer =
+            (peerInvTs > myInvTs)
+            or (peerReqTs > myReqTs)
+            or (peerMainTs > myMainTs)
+            or (peerRuleTs > myRuleTs)
+            or (peerTxTs > myTxTs)
+
+        if peerHasNewer then
+            self.peerHasNewerData = true
+            self.peerNewerSetAt = nowGT
+            if (time() - (self.lastHelloSentAt or 0)) >= 30 then
+                ScheduleHelloWithDelay(1.5 + (math.random() * 2.5))
+            end
+            ScheduleUIRefresh()
         end
 
     elseif cmd == "INV_META" then
@@ -392,7 +525,6 @@ function Comms:OnMessageReceived(msg, sender)
             VM.db.inventory.lastSyncedFrom = sender
             VM.db.inventory.gold = gold
             if numTabs > 0 then VM.db.inventory.numTabs = numTabs end
-            -- Clear previous tab snapshot so removed items do not remain as ghosts
             VM.db.inventory.tabs = {}
             VM.db.vault = VM.db.inventory
             if VM.db.scanMetadata then
@@ -411,6 +543,7 @@ function Comms:OnMessageReceived(msg, sender)
         if VM.BankScanner then
             VM.BankScanner.scanState = "COMPLETE"
         end
+        MarkDataReceived()
         ScheduleUIRefresh()
 
     elseif cmd == "INV_TAB" then
@@ -455,6 +588,7 @@ function Comms:OnMessageReceived(msg, sender)
             if not isPurchased then
                 VM.db.inventory.tabs[tabIdx].items = {}
             end
+            MarkDataReceived()
             ScheduleUIRefresh()
         end
 
@@ -509,6 +643,7 @@ function Comms:OnMessageReceived(msg, sender)
             itemType = syncItemType,
             equipSlot = syncEquipSlot
         }
+        MarkDataReceived()
         ScheduleUIRefresh()
 
     elseif cmd == "REQ" then
@@ -518,6 +653,8 @@ function Comms:OnMessageReceived(msg, sender)
         local isGoldRequest = (#parts >= 20) and (tonumber(parts[20]) == 1) or false
         local reason = (#parts >= 21) and UnescapeStr(parts[21]) or ""
         local completedMethod = (#parts >= 22) and UnescapeStr(parts[22]) or ""
+        local preparedBy = (#parts >= 23) and UnescapeStr(parts[23]) or ""
+        local preparedAt = (#parts >= 24) and (tonumber(parts[24]) or 0) or 0
 
         local rawItemID = UnescapeStr(parts[4])
         local parsedItemID = isGoldRequest and 0 or (tonumber(rawItemID) or rawItemID)
@@ -537,6 +674,8 @@ function Comms:OnMessageReceived(msg, sender)
             updatedAt = tonumber(parts[9]) or 0,
             approvedBy = UnescapeStr(parts[10]),
             approvedAt = approvedAt,
+            preparedBy = preparedBy,
+            preparedAt = preparedAt,
             fulfilledBy = UnescapeStr(parts[11]),
             completedAt = completedAt,
             completedMethod = completedMethod,
@@ -572,6 +711,7 @@ function Comms:OnMessageReceived(msg, sender)
                 end
             end
             if VM.Minimap and VM.Minimap.UpdateBadge then VM.Minimap:UpdateBadge() end
+            MarkDataReceived()
             ScheduleUIRefresh()
         end
 
@@ -600,7 +740,8 @@ function Comms:OnMessageReceived(msg, sender)
         VM:UpdateRosterCache()
         local normBy = VM:NormalizeName(updatedBy)
         if VM.db.rosterCache and next(VM.db.rosterCache) then
-            local rankIdx = VM.db.rosterCache[normBy]
+            local rKey = VM:ResolveNameKey(VM.db.rosterCache, normBy)
+            local rankIdx = rKey and VM.db.rosterCache[rKey] or nil
             if rankIdx ~= nil and rankIdx > VM.OFFICER_MAX_RANK_INDEX and rankIdx ~= 0 then
                 return
             end
@@ -626,6 +767,7 @@ function Comms:OnMessageReceived(msg, sender)
         end
 
         VM.db.tabRules[tabIdx] = ruleData
+        MarkDataReceived()
         ScheduleUIRefresh()
 
     elseif cmd == "MAIN" then
@@ -643,6 +785,7 @@ function Comms:OnMessageReceived(msg, sender)
         local existingTs = (type(existing) == "table" and existing.updatedAt) or 0
         if alt ~= "" and updatedAt > existingTs then
             VM.db.mains[alt] = { main = main, updatedAt = updatedAt }
+            MarkDataReceived()
             ScheduleUIRefresh()
         end
 
@@ -682,7 +825,7 @@ function Comms:OnMessageReceived(msg, sender)
         end
 
         local isGold = (rawItemLink == "GOLD" or rawItemLink:find("GOLD"))
-            or (itemID == 0 and (copper > 0 or rawType:find("GOLD") or txId:find("^GOLD") or source:find("GOLD") or source == "BANK_MONEY_LOG" or source == "MANUAL_ASSIGN_PAYMENT" or source == "GOLD_REQUEST"))
+            or (itemID == 0 and (copper > 0 or rawType:find("GOLD") or txId:find("^GOLD") or source:find("GOLD") or source == "BANK_MONEY_LOG" or source == "MANUAL_ASSIGN_PAYMENT" or source == "GOLD_REQUEST" or source == "TAB_PURCHASE" or source == "GUILD_EXPENSE"))
             or (txId:find("^GOLD_"))
             or (rawType:find("GOLD"))
 
@@ -691,7 +834,7 @@ function Comms:OnMessageReceived(msg, sender)
         if isGold then
             itemID = 0
             itemLink = "GOLD"
-            if rawType:find("OUT") or txId:find("^GOLD_OUT") or source:find("OUT") or source == "GOLD_REQUEST" then
+            if rawType:find("OUT") or txId:find("^GOLD_OUT") or source:find("OUT") or source == "GOLD_REQUEST" or source == "TAB_PURCHASE" or source == "GUILD_EXPENSE" or source == "WRITE_OFF" then
                 txType = "OUT"
                 if itemName == "" or itemName == "Gold Deposit" then itemName = "Gold Withdrawal" end
             else
@@ -717,12 +860,17 @@ function Comms:OnMessageReceived(msg, sender)
             isFFA = false
         end
 
-        if source == "GOLD_REQUEST" and not fromOfficer then return end
-        if not fromOfficer and not isGold and (source ~= "BANK_LOG" and source ~= "BANK_MONEY_LOG" and source ~= "FFA_SCAN" and source ~= "GOLD_IN" and source ~= "GOLD_OUT" and source ~= "MANUAL_GOLD" and itemLink ~= "GOLD") then
+        local guildCategory = nil
+        if #parts >= 24 and parts[24] ~= "" then
+            local rawCat = UnescapeStr(parts[24])
+            guildCategory = (VM.Ledger and VM.Ledger.NormalizeGuildCategory) and VM.Ledger:NormalizeGuildCategory(rawCat) or rawCat
+        end
+
+        if (source == "GOLD_REQUEST" or source == "WRITE_OFF" or source == "GUILD_EXPENSE") and not fromOfficer then return end
+        if not fromOfficer and not isGold and (source ~= "BANK_LOG" and source ~= "BANK_MONEY_LOG" and source ~= "TAB_PURCHASE" and source ~= "FFA_SCAN" and source ~= "GOLD_IN" and source ~= "GOLD_OUT" and source ~= "MANUAL_GOLD" and itemLink ~= "GOLD") then
             return
         end
 
-        -- Drop incoming raw transactions for months already compacted into a monthly SUMMARY
         if not deleted and VM.Ledger and VM.Ledger.HasCompactedMonth and VM.Ledger:HasCompactedMonth(player, timestamp) then
             return
         end
@@ -740,6 +888,7 @@ function Comms:OnMessageReceived(msg, sender)
             pricePercent = pricePercent,
             tab = tab,
             note = note,
+            guildCategory = guildCategory,
             timestamp = timestamp,
             officer = officer,
             source = source,
@@ -750,11 +899,11 @@ function Comms:OnMessageReceived(msg, sender)
             rawSender = rawSender,
             attributedTo = attributedTo,
             isFFA = isFFA,
-            isManual = (source == "MANUAL_GOLD" or source == "MANUAL" or source == "MANUAL_ASSIGN")
+            isManual = (source == "MANUAL_GOLD" or source == "MANUAL" or source == "MANUAL_ASSIGN" or source == "GUILD_EXPENSE")
         }
         local existing = VM.db.ledger[tx.id]
 
-        -- Deduplicate bank-log transactions across clients that generated different IDs
+        -- Deduplicate automatic bank-log transactions across clients that generated different IDs
         if not existing and not PROTECTED_TX_SOURCES[source or ""] then
             local txAction = VM:NormalizeAction(tx.type)
             local txActor = VM:NormalizeActor(tx.rawSender or tx.player)
@@ -809,11 +958,30 @@ function Comms:OnMessageReceived(msg, sender)
             end
         end
 
+        -- Also deduplicate TAB_PURCHASE by copper amount within 48h across clients
+        if not existing and source == "TAB_PURCHASE" then
+            local txCopper = (tx.unitPriceAtTime or 0) * (tx.count or 1)
+            for _, exTx in pairs(VM.db.ledger) do
+                if not exTx.deleted and exTx.source == "TAB_PURCHASE" then
+                    local exCopper = (exTx.unitPriceAtTime or 0) * (exTx.count or 1)
+                    if exCopper == txCopper and math.abs((exTx.timestamp or 0) - (tx.timestamp or 0)) <= 172800 then
+                        existing = exTx
+                        tx.id = exTx.id
+                        if (exTx.timestamp or 0) > 0 and ((tx.timestamp or 0) == 0 or exTx.timestamp < tx.timestamp) then
+                            tx.timestamp = exTx.timestamp
+                        end
+                        break
+                    end
+                end
+            end
+        end
+
         if existing and existing.unitPriceAtTime and existing.unitPriceAtTime > 0 and (tx.itemLink == "GOLD" or tx.itemID == 0) then
             tx.unitPriceAtTime = existing.unitPriceAtTime
         end
         if tx.id ~= "" and (not existing or tx.updatedAt > (existing.updatedAt or existing.timestamp or 0)) then
             VM.db.ledger[tx.id] = tx
+            MarkDataReceived()
             ScheduleUIRefresh()
         end
     end
@@ -863,7 +1031,7 @@ function Comms:BroadcastRequest(req)
     local numItemID = tonumber(req.itemID) or 0
 
     local function BuildReqPayload(linkStr, reasonStr)
-        return string.format("REQ|%s|%s|%s|%d|%d|%s|%d|%d|%s|%s|%d|%s|%d|%s|%s|%d|%d|%s|%d|%s|%s",
+        return string.format("REQ|%s|%s|%s|%d|%d|%s|%d|%d|%s|%s|%d|%s|%d|%s|%s|%d|%d|%s|%d|%s|%s|%s|%d",
             EscapeStr(req.id),
             EscapeStr(req.requester),
             EscapeStr(tostring(req.itemID or 0)),
@@ -884,7 +1052,9 @@ function Comms:BroadcastRequest(req)
             qTotalStr,
             isGoldVal,
             EscapeStr(reasonStr),
-            EscapeStr(req.completedMethod or ""))
+            EscapeStr(req.completedMethod or ""),
+            EscapeStr(req.preparedBy or ""),
+            math.floor(tonumber(req.preparedAt) or 0))
     end
 
     local linkStr = req.itemLink or ""
@@ -931,7 +1101,7 @@ function Comms:BroadcastMains(sinceTs)
 end
 
 function Comms:BroadcastTransaction(tx)
-    if not tx or tx.type == "SUMMARY" then return end
+    if not tx or tx.type == "SUMMARY" or tx.isDerived then return end
     local inv = VM.db.inventory
     if not inv or not inv.lastScan or inv.lastScan == 0 then
         local now = (GetServerTime and GetServerTime()) or time()
@@ -948,10 +1118,11 @@ function Comms:BroadcastTransaction(tx)
     local pPctStr = (tx.pricePercent ~= nil) and tostring(math.floor(tonumber(tx.pricePercent) or 0)) or ""
     local tabStr = (tx.tab ~= nil) and tostring(math.floor(tonumber(tx.tab) or 0)) or ""
     local ffaStr = (tx.isFFA == true and "1") or (tx.isFFA == false and "0") or ""
+    local guildCatStr = tostring(tx.guildCategory or "")
     local numItemID = tonumber(tx.itemID) or 0
 
     local function BuildTxPayload(linkStr, noteStr)
-        return string.format("TX|%s|%s|%s|%s|%d|%d|%d|%d|%s|%s|%s|%s|%d|%d|%s|%s|%s|%s|%s|%s|%s|%s",
+        return string.format("TX|%s|%s|%s|%s|%d|%d|%d|%d|%s|%s|%s|%s|%d|%d|%s|%s|%s|%s|%s|%s|%s|%s|%s",
             EscapeStr(tx.id),
             EscapeStr(tx.type),
             EscapeStr(tx.player),
@@ -973,7 +1144,8 @@ function Comms:BroadcastTransaction(tx)
             EscapeStr(tx.priceMode or ""),
             pPctStr,
             tabStr,
-            ffaStr)
+            ffaStr,
+            EscapeStr(guildCatStr))
     end
 
     local linkStr = tx.itemLink or ""
@@ -997,7 +1169,7 @@ function Comms:BroadcastLedgerSync(sinceTs)
     local minTs = tonumber(sinceTs) or 0
     local cutoff = time() - (60 * 86400)
     for _, tx in pairs(VM.db.ledger) do
-        if tx and tx.type ~= "SUMMARY" then
+        if tx and tx.type ~= "SUMMARY" and not tx.isDerived then
             local upd = tx.updatedAt or tx.timestamp or 0
             if upd > cutoff and (minTs == 0 or upd > minTs) then
                 self:BroadcastTransaction(tx)

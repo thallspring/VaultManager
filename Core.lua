@@ -2,7 +2,7 @@ local ADDON_NAME, VM = ...
 _G.VaultManager = VM
 
 VM.PREFIX = "VMGR_V1"
-VM.VERSION = 6
+VM.VERSION = 7
 VM.OFFICER_MAX_RANK_INDEX = 1
 VM.debugLog = {}
 VM.pendingTradePayments = {}
@@ -27,6 +27,7 @@ local DEFAULT_UI_PREFS = {
     rankingSortDir = "desc",
     enableChatNotifications = true,
     notifyNewerVersion = true,
+    autoOpenAtBank = true,
 }
 
 function VM:Print(msg)
@@ -84,6 +85,10 @@ local function InitGuildSubTables(db)
             db.uiPrefs[k] = v
         end
     end
+    db.minimap = db.minimap or { angle = 220, hide = false }
+    if db.minimap.angle == nil then db.minimap.angle = 220 end
+    if db.minimap.hide == nil then db.minimap.hide = false end
+
     db.inventory = db.inventory or { lastScan = 0, scannedBy = "", gold = 0, tabs = {} }
     if db.inventory.gold == nil then db.inventory.gold = 0 end
     db.vault = db.vault or db.inventory
@@ -115,12 +120,94 @@ VM.CLASS_COLORS = {
     WARLOCK = "9482C9",
     DRUID = "FF7D0A",
     DEATHKNIGHT = "C41F3B",
+    MONK = "00FF96",
+    DEMONHUNTER = "A330C9",
+    EVOKER = "33937F",
 }
 
 function VM:NormalizeClassToken(classStr)
     if not classStr or classStr == "" then return nil end
-    local upper = strupper(classStr):gsub("%s+", "")
+    local upper = strupper(tostring(classStr)):gsub("%s+", "")
+    if self.CLASS_COLORS[upper] or (RAID_CLASS_COLORS and RAID_CLASS_COLORS[upper]) then
+        return upper
+    end
+    local lowerIn = tostring(classStr):lower()
+    if LOCALIZED_CLASS_NAMES_MALE then
+        for token, locName in pairs(LOCALIZED_CLASS_NAMES_MALE) do
+            if type(locName) == "string" and locName:lower() == lowerIn then
+                return strupper(token):gsub("%s+", "")
+            end
+        end
+    end
+    if LOCALIZED_CLASS_NAMES_FEMALE then
+        for token, locName in pairs(LOCALIZED_CLASS_NAMES_FEMALE) do
+            if type(locName) == "string" and locName:lower() == lowerIn then
+                return strupper(token):gsub("%s+", "")
+            end
+        end
+    end
     return upper
+end
+
+function VM:GetHexForClassToken(token)
+    if not token or token == "" then return nil end
+    local normToken = self:NormalizeClassToken(token)
+    if not normToken then return nil end
+    if self.CLASS_COLORS[normToken] then
+        return self.CLASS_COLORS[normToken]
+    end
+    if RAID_CLASS_COLORS and RAID_CLASS_COLORS[normToken] then
+        local c = RAID_CLASS_COLORS[normToken]
+        if c.colorStr and type(c.colorStr) == "string" and #c.colorStr >= 8 then
+            return c.colorStr:sub(3, 8)
+        elseif c.r and c.g and c.b then
+            return string.format("%02X%02X%02X",
+                math.floor(c.r * 255 + 0.5),
+                math.floor(c.g * 255 + 0.5),
+                math.floor(c.b * 255 + 0.5))
+        end
+    end
+    return nil
+end
+
+-- Generic name key resolver: exact match -> case-insensitive exact -> unambiguous first-word match
+function VM:ResolveNameKey(tbl, charName)
+    if type(tbl) ~= "table" then return nil end
+    local norm = self:NormalizeName(charName)
+    if norm == "" or norm == "GUILD" or norm == "UNATTRIBUTED" then return nil end
+    if tbl[norm] ~= nil then return norm end
+
+    local normLower = norm:lower()
+    for k in pairs(tbl) do
+        if type(k) == "string" and k:lower() == normLower then
+            return k
+        end
+    end
+
+    -- First-word fallback (for servers with two-word character names where logs only record the first name)
+    if not norm:find("%s") then
+        local prefix = normLower .. " "
+        local prefixLen = #prefix
+        local matchedKey = nil
+        local matchCount = 0
+        for k in pairs(tbl) do
+            if type(k) == "string" then
+                local kl = k:lower()
+                if #kl > prefixLen and kl:sub(1, prefixLen) == prefix then
+                    matchedKey = k
+                    matchCount = matchCount + 1
+                    if matchCount > 1 then
+                        return nil -- Ambiguous first name
+                    end
+                end
+            end
+        end
+        if matchCount == 1 then
+            return matchedKey
+        end
+    end
+
+    return nil
 end
 
 function VM:GetClassHex(charName)
@@ -128,37 +215,45 @@ function VM:GetClassHex(charName)
     if norm == "" or norm == "GUILD" or norm == "UNATTRIBUTED" then return nil end
     local classes = self.db and self.db.memberClasses
     if classes then
-        local classToken = classes[norm]
-        if not classToken then
-            local normLower = norm:lower()
-            for k, v in pairs(classes) do
-                if type(k) == "string" and k:lower() == normLower then
-                    classToken = v
-                    classes[norm] = v
-                    break
-                end
-            end
-        end
-        if classToken and self.CLASS_COLORS[classToken] then
-            return self.CLASS_COLORS[classToken]
+        local key = self:ResolveNameKey(classes, norm)
+        if key then
+            local hex = self:GetHexForClassToken(classes[key])
+            if hex then return hex end
         end
     end
     if IsInGuild() and GetNumGuildMembers then
         local normLower = norm:lower()
+        local allowPrefix = not norm:find("%s")
+        local prefix = normLower .. " "
+        local prefixLen = #prefix
         local total = GetNumGuildMembers() or 0
+        local prefixToken, prefixCount = nil, 0
+
         for i = 1, total do
             local rName, _, _, _, rClass, _, _, _, _, _, rClassFile = GetGuildRosterInfo(i)
-            if rName and self:NormalizeName(rName):lower() == normLower then
-                local token = (rClassFile and rClassFile ~= "") and strupper(rClassFile):gsub("%s+", "") or self:NormalizeClassToken(rClass)
-                if token and self.CLASS_COLORS[token] then
-                    if self.db then
-                        self.db.memberClasses = self.db.memberClasses or {}
-                        self.db.memberClasses[norm] = token
+            if rName then
+                local rNorm = self:NormalizeName(rName)
+                local rLower = rNorm:lower()
+                local token = (rClassFile and rClassFile ~= "") and self:NormalizeClassToken(rClassFile) or self:NormalizeClassToken(rClass)
+                if rLower == normLower then
+                    local hex = self:GetHexForClassToken(token)
+                    if hex then
+                        if self.db then
+                            self.db.memberClasses = self.db.memberClasses or {}
+                            self.db.memberClasses[rNorm] = token
+                        end
+                        return hex
                     end
-                    return self.CLASS_COLORS[token]
+                    return nil
+                elseif allowPrefix and #rLower > prefixLen and rLower:sub(1, prefixLen) == prefix then
+                    prefixToken = token
+                    prefixCount = prefixCount + 1
                 end
-                break
             end
+        end
+
+        if prefixCount == 1 and prefixToken then
+            return self:GetHexForClassToken(prefixToken)
         end
     end
     return nil
@@ -187,6 +282,7 @@ local DEFAULT_DB = {
         rankingPriceMode = "live",
         hideOfficers = false,
         rankingPeriod = "ALL",
+        autoOpenAtBank = true,
     }
 }
 
@@ -291,26 +387,35 @@ end
 function VM:IsOfficerName(name)
     local norm = self:NormalizeName(name)
     if norm == "" or norm == "GUILD" or norm == "UNATTRIBUTED" then return false end
-    local rankIndex = self.db.rosterCache[norm]
+
+    local key = self:ResolveNameKey(self.db.rosterCache, norm)
+    local rankIndex = key and self.db.rosterCache[key] or nil
+
     if type(rankIndex) ~= "number" then
-        local normLower = norm:lower()
-        for k, v in pairs(self.db.rosterCache) do
-            if type(k) == "string" and k:lower() == normLower and type(v) == "number" then
-                rankIndex = v
-                break
-            end
-        end
-    end
-    if type(rankIndex) ~= "number" then
-        if IsInGuild() then
+        if IsInGuild() and GetNumGuildMembers then
             local total = GetNumGuildMembers() or 0
             local normLower = norm:lower()
+            local allowPrefix = not norm:find("%s")
+            local prefix = normLower .. " "
+            local prefixLen = #prefix
+            local prefixRank, prefixCount = nil, 0
+
             for i = 1, total do
                 local rName, _, rIndex = GetGuildRosterInfo(i)
-                if rName and self:NormalizeName(rName):lower() == normLower then
-                    self.db.rosterCache[norm] = rIndex or 99
-                    return (rIndex ~= nil and rIndex <= VM.OFFICER_MAX_RANK_INDEX)
+                if rName then
+                    local rNorm = self:NormalizeName(rName)
+                    local rLower = rNorm:lower()
+                    if rLower == normLower then
+                        self.db.rosterCache[rNorm] = rIndex or 99
+                        return (rIndex ~= nil and rIndex <= VM.OFFICER_MAX_RANK_INDEX)
+                    elseif allowPrefix and #rLower > prefixLen and rLower:sub(1, prefixLen) == prefix then
+                        prefixRank = rIndex
+                        prefixCount = prefixCount + 1
+                    end
                 end
+            end
+            if prefixCount == 1 and type(prefixRank) == "number" then
+                return prefixRank <= VM.OFFICER_MAX_RANK_INDEX
             end
         end
         return false
@@ -333,12 +438,7 @@ function VM:UpdateRosterCache()
                 if rankIndex ~= nil and rankName and rankName ~= "" then
                     self.db.rankNames[rankIndex] = rankName
                 end
-                local token = classFileName
-                if not token or token == "" then
-                    token = self:NormalizeClassToken(class)
-                else
-                    token = strupper(token):gsub("%s+", "")
-                end
+                local token = (classFileName and classFileName ~= "") and self:NormalizeClassToken(classFileName) or self:NormalizeClassToken(class)
                 if token and token ~= "" then
                     self.db.memberClasses[norm] = token
                 end
@@ -351,7 +451,7 @@ function VM:UpdateRosterCache()
         self.db.memberClasses = self.db.memberClasses or {}
         local _, pClass = UnitClass("player")
         if pClass then
-            self.db.memberClasses[pName] = strupper(pClass):gsub("%s+", "")
+            self.db.memberClasses[pName] = self:NormalizeClassToken(pClass)
         end
     end
 end
@@ -359,13 +459,9 @@ end
 function VM:GetMemberRankIndex(charName)
     local norm = self:NormalizeName(charName)
     if norm == "" or not self.db or not self.db.rosterCache then return 999 end
-    local idx = self.db.rosterCache[norm]
-    if type(idx) == "number" then return idx end
-    local normLower = norm:lower()
-    for k, v in pairs(self.db.rosterCache) do
-        if type(k) == "string" and k:lower() == normLower and type(v) == "number" then
-            return v
-        end
+    local key = self:ResolveNameKey(self.db.rosterCache, norm)
+    if key and type(self.db.rosterCache[key]) == "number" then
+        return self.db.rosterCache[key]
     end
     return 999
 end
@@ -385,13 +481,9 @@ end
 function VM:IsLegacyMember(charName)
     local norm = self:NormalizeName(charName)
     if norm == "" or norm == "UNATTRIBUTED" or norm == "GUILD" then return false end
-    if not next(self.db.rosterCache) then return false end
-    if self.db.rosterCache[norm] ~= nil then return false end
-    local normLower = norm:lower()
-    for k in pairs(self.db.rosterCache) do
-        if type(k) == "string" and k:lower() == normLower then
-            return false
-        end
+    if not self.db or not self.db.rosterCache or not next(self.db.rosterCache) then return false end
+    if self:ResolveNameKey(self.db.rosterCache, norm) ~= nil then
+        return false
     end
     return true
 end
@@ -406,11 +498,11 @@ end
 
 function VM:GetMainFor(charName)
     local norm = self:NormalizeName(charName)
-    if norm == "GUILD" or norm == "UNATTRIBUTED" then return norm end
+    if norm == "" or norm == "GUILD" or norm == "UNATTRIBUTED" then return norm end
     local visited = {}
     while self.db.mains[norm] and self.db.mains[norm].main and self.db.mains[norm].main ~= "" and not visited[norm] do
         visited[norm] = true
-        norm = self.db.mains[norm].main
+        norm = self:NormalizeName(self.db.mains[norm].main)
     end
     return norm
 end
@@ -750,6 +842,23 @@ function VM:FormatMoneyShort(copper)
     end
 end
 
+-- Plain-text currency string safe for SendChatMessage / whispers (no escape codes or textures)
+function VM:FormatMoneyPlain(copper)
+    if not copper or copper == 0 then return "0g" end
+    local isNeg = copper < 0
+    local absCopper = math.floor(math.abs(copper))
+    local prefix = isNeg and "-" or ""
+    local g = math.floor(absCopper / 10000)
+    local s = math.floor((absCopper % 10000) / 100)
+    local c = absCopper % 100
+    local parts = {}
+    if g > 0 then table.insert(parts, g .. "g") end
+    if s > 0 then table.insert(parts, s .. "s") end
+    if c > 0 and g == 0 then table.insert(parts, c .. "c") end
+    if #parts == 0 then return "0g" end
+    return prefix .. table.concat(parts, " ")
+end
+
 function VM:CalculateBankWealth()
     local inv = self.db and self.db.inventory or {}
     local gold = tonumber(inv.gold) or 0
@@ -902,7 +1011,8 @@ function VM:ValidateTabRules()
 
                     local foundInRoster = false
                     local isNonOfficer = false
-                    local rankIndex = self.db.rosterCache[cleanBy]
+                    local rKey = self:ResolveNameKey(self.db.rosterCache, cleanBy)
+                    local rankIndex = rKey and self.db.rosterCache[rKey] or nil
 
                     if rankIndex == nil then
                         local total = GetNumGuildMembers() or 0
@@ -959,6 +1069,7 @@ function VM:ValidateTabRules()
     end
 end
 
+-- Only APPROVED items still sitting in the bank are soft-locked; PREPARED items have already been withdrawn
 function VM:GetReservedCount(itemID, tabIndex)
     local reserved = 0
     for _, req in pairs(self.db.requests) do
@@ -1328,7 +1439,6 @@ function VM:SwitchGuildContext(triggerEvent)
     local isLoginEvent = (triggerEvent == "ADDON_LOADED" or triggerEvent == "PLAYER_LOGIN" or triggerEvent == "PLAYER_ENTERING_WORLD")
 
     if not guildKey or guildKey == "" then
-        -- Never treat GetGuildInfo("player") == nil during login as leaving a guild
         if not isLoginEvent and triggerEvent == "PLAYER_GUILD_UPDATE" and not IsInGuild() then
             if charKey ~= "" then
                 VaultManagerDB.charGuilds[charKey] = nil
@@ -1369,6 +1479,7 @@ function VM:SwitchGuildContext(triggerEvent)
                 scanMetadata = { lastScan = 0, scannedBy = "", tabs = {} },
             }
             InitGuildSubTables(VM.db)
+            if self.Minimap and self.Minimap.SyncVisibility then self.Minimap:SyncVisibility() end
             if self.UI then self.UI:RefreshAll() end
             return
         end
@@ -1436,6 +1547,9 @@ function VM:SwitchGuildContext(triggerEvent)
     if self.Ledger and self.Ledger.CleanupDuplicates then
         self.Ledger:CleanupDuplicates()
     end
+    if self.Minimap and self.Minimap.SyncVisibility then
+        self.Minimap:SyncVisibility()
+    end
     if self.UI then self.UI:RefreshAll() end
 end
 
@@ -1458,6 +1572,10 @@ SlashCmdList["VAULTMANAGER"] = function(msg)
         if VM.db and VM.db.uiPrefs then
             VM.db.uiPrefs.uiScale = 1.0
             VM.db.uiPrefs.windowPos = nil
+            VM.db.uiPrefs.showMinimap = true
+        end
+        if VM.Minimap and VM.Minimap.ResetPosition then
+            VM.Minimap:ResetPosition()
         end
         local f = _G["VaultManagerMainFrame"]
         if f then
@@ -1471,7 +1589,7 @@ SlashCmdList["VAULTMANAGER"] = function(msg)
         if VM.UI and VM.UI.RefreshAll then
             VM.UI:RefreshAll()
         end
-        print("|cff00ccff[Vault Manager]|r UI scale reset to 100% and main window repositioned to center.")
+        print("|cff00ccff[Vault Manager]|r UI scale, window position, and minimap button reset.")
     elseif cmd == "resetlocal" then
         if VM.db then
             VM.db.inventory = { lastScan = 0, scannedBy = "", tabs = {} }
@@ -1529,7 +1647,7 @@ guildEventFrame:SetScript("OnEvent", function(_, event)
     else
         VM:UpdateRosterCache()
         if VM.SwitchGuildContext then
-            VM.SwitchGuildContext(event)
+            VM:SwitchGuildContext(event)
         end
     end
 end)

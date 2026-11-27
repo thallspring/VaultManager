@@ -2,6 +2,27 @@ local _, VM = ...
 VM.Ledger = {}
 local Ledger = VM.Ledger
 
+Ledger.GUILD_CATEGORIES = { "RAID", "MEMBER", "TABS" }
+Ledger.GUILD_CATEGORY_LABELS = {
+    RAID = "Raid",
+    MEMBER = "Member",
+    TABS = "Tabs",
+}
+
+function Ledger:NormalizeGuildCategory(cat)
+    if not cat or cat == "" then return nil end
+    local u = strupper(strtrim(tostring(cat)))
+    if u == "RAID" or u == "RAIDS" then return "RAID" end
+    if u == "MEMBER" or u == "MEMBERS" then return "MEMBER" end
+    if u == "TAB" or u == "TABS" then return "TABS" end
+    return nil
+end
+
+function Ledger:GetGuildCategoryLabel(cat)
+    local norm = self:NormalizeGuildCategory(cat)
+    return norm and self.GUILD_CATEGORY_LABELS[norm] or nil
+end
+
 local function GenerateTxID(prefix)
     return string.format("%s_%d_%d", prefix, time(), math.random(10000, 99999))
 end
@@ -56,12 +77,14 @@ function Ledger:RecordGoldFulfillment(req, officerName, customTimestamp)
     local now = time()
     local txTimestamp = customTimestamp or now
     local requesterNorm = VM:NormalizeName(req.requester)
+    local guildCat = self:NormalizeGuildCategory(req.guildCategory) or "RAID"
     local tx = {
         id = GenerateTxID("GOLD_OUT"),
         type = "OUT",
         player = "GUILD",
         rawSender = requesterNorm,
         attributedTo = "GUILD",
+        guildCategory = guildCat,
         itemID = 0,
         itemLink = "GOLD",
         itemName = "Gold Withdrawal",
@@ -76,6 +99,166 @@ function Ledger:RecordGoldFulfillment(req, officerName, customTimestamp)
         source = "GOLD_REQUEST",
         fulfillmentId = req.id,
         recipient = requesterNorm,
+        isFFA = false,
+        isManual = false,
+        deleted = false
+    }
+
+    VM.db.ledger[tx.id] = tx
+    VM.Comms:BroadcastTransaction(tx)
+    return tx
+end
+
+-- Write off a PREPARED request when the responsible officer has left the guild (100% AH / gold charged to departed officer)
+function Ledger:RecordWriteOff(req, officerName)
+    if not req then return nil end
+    local departedOfficer = VM:NormalizeName(req.preparedBy or req.approvedBy or "")
+    if departedOfficer == "" then return nil end
+
+    local now = time()
+    local reqName = VM:NormalizeName(req.requester or "Unknown")
+    local tx
+
+    if req.isGoldRequest then
+        local amount = tonumber(req.goldAmount or req.quotedTotalPrice or req.quotedUnitPrice) or 0
+        if amount <= 0 then return nil end
+        tx = {
+            id = GenerateTxID("GOLD_WO"),
+            type = "OUT",
+            player = departedOfficer,
+            rawSender = departedOfficer,
+            attributedTo = departedOfficer,
+            itemID = 0,
+            itemLink = "GOLD",
+            itemName = "Gold Write-Off",
+            count = 1,
+            unitPriceAtTime = amount,
+            chargedUnitPrice = amount,
+            chargedTotalPrice = amount,
+            note = string.format("Write-off: unfulfilled gold request for %s", reqName),
+            timestamp = now,
+            updatedAt = now,
+            officer = VM:NormalizeName(officerName),
+            source = "WRITE_OFF",
+            fulfillmentId = req.id,
+            recipient = departedOfficer,
+            isFFA = false,
+            isManual = false,
+            deleted = false
+        }
+    else
+        local qty = tonumber(req.count) or 1
+        local fullUnit = VM:GetEffectiveLivePrice(req.itemID, req.itemLink, req.priceAtRequest or req.quotedUnitPrice)
+        local fullTotal = fullUnit * qty
+        tx = {
+            id = GenerateTxID("OUT_WO"),
+            type = "OUT",
+            player = departedOfficer,
+            rawSender = departedOfficer,
+            attributedTo = departedOfficer,
+            itemID = req.itemID,
+            itemLink = req.itemLink,
+            itemName = req.itemName,
+            count = qty,
+            unitPriceAtTime = fullUnit,
+            chargedUnitPrice = fullUnit,
+            chargedTotalPrice = fullTotal,
+            priceMode = "WRITE_OFF",
+            isFFA = false,
+            tab = req.tab,
+            note = string.format("Write-off: unfulfilled request for %s", reqName),
+            timestamp = now,
+            updatedAt = now,
+            officer = VM:NormalizeName(officerName),
+            source = "WRITE_OFF",
+            fulfillmentId = req.id,
+            recipient = departedOfficer,
+            isManual = false,
+            deleted = false
+        }
+    end
+
+    VM.db.ledger[tx.id] = tx
+    VM.Comms:BroadcastTransaction(tx)
+    return tx
+end
+
+-- General officer guild expense / write-off under GUILD (categorized as RAID, MEMBER, or TABS)
+function Ledger:RecordGuildExpense(copperAmount, guildCategory, note, actorName)
+    if not VM:IsOfficer() then return nil end
+    local amount = math.floor(tonumber(copperAmount) or 0)
+    if amount <= 0 then return nil end
+
+    local now = time()
+    local cat = self:NormalizeGuildCategory(guildCategory) or "MEMBER"
+    local actor = (actorName and actorName ~= "") and VM:NormalizeName(actorName) or VM:GetPlayerName()
+    local tx = {
+        id = GenerateTxID("GOLD_EXP"),
+        type = "OUT",
+        player = "GUILD",
+        rawSender = actor,
+        attributedTo = "GUILD",
+        guildCategory = cat,
+        itemID = 0,
+        itemLink = "GOLD",
+        itemName = "Guild Expense",
+        count = 1,
+        unitPriceAtTime = amount,
+        chargedUnitPrice = amount,
+        chargedTotalPrice = amount,
+        note = strtrim(tostring(note or "")),
+        timestamp = now,
+        updatedAt = now,
+        officer = VM:GetPlayerName(),
+        source = "GUILD_EXPENSE",
+        isFFA = false,
+        isManual = true,
+        deleted = false
+    }
+
+    VM.db.ledger[tx.id] = tx
+    VM.Comms:BroadcastTransaction(tx)
+    if VM.UI then VM.UI:RefreshAll() end
+    return tx
+end
+
+-- Automatic Guild Bank Tab purchase booking under GUILD (Tabs) with 48h duplicate protection
+function Ledger:RecordTabPurchase(copperAmount, buyerName, customTimestamp, tabNumber)
+    local amount = math.floor(tonumber(copperAmount) or 0)
+    if amount <= 0 then return nil end
+
+    local now = time()
+    local txTimestamp = customTimestamp or now
+    for _, exTx in pairs(VM.db.ledger or {}) do
+        if not exTx.deleted and exTx.source == "TAB_PURCHASE" then
+            local exCopper = (exTx.unitPriceAtTime or 0) * (exTx.count or 1)
+            if exCopper == amount and math.abs((exTx.timestamp or 0) - txTimestamp) <= 172800 then
+                return exTx
+            end
+        end
+    end
+
+    local actor = (buyerName and buyerName ~= "") and VM:NormalizeName(buyerName) or "GUILD"
+    local noteStr = tabNumber and ("Guild Bank Tab " .. tostring(tabNumber)) or "New Guild Bank Tab"
+    local tx = {
+        id = GenerateTxID("GOLD_TAB"),
+        type = "OUT",
+        player = "GUILD",
+        rawSender = actor,
+        attributedTo = "GUILD",
+        guildCategory = "TABS",
+        itemID = 0,
+        itemLink = "GOLD",
+        itemName = "Guild Bank Tab Purchase",
+        count = 1,
+        unitPriceAtTime = amount,
+        chargedUnitPrice = amount,
+        chargedTotalPrice = amount,
+        note = noteStr,
+        timestamp = txTimestamp,
+        updatedAt = now,
+        officer = VM:GetPlayerName(),
+        source = "TAB_PURCHASE",
         isFFA = false,
         isManual = false,
         deleted = false
@@ -171,19 +354,21 @@ function Ledger:RecordDeposit(playerName, itemID, itemLink, count, source, custo
     return tx
 end
 
-function Ledger:RecordGoldDeposit(playerName, copperAmount, source, rawSender, attributedTo, customTimestamp, note)
+function Ledger:RecordGoldDeposit(playerName, copperAmount, source, rawSender, attributedTo, customTimestamp, note, guildCategory)
     local now = time()
     local txTimestamp = customTimestamp or now
     local isMan = (source == "MANUAL_GOLD" or source == "MANUAL")
     local finalPlayer = attributedTo or playerName
     local normFinal = (finalPlayer == "UNATTRIBUTED") and "UNATTRIBUTED" or VM:NormalizeName(finalPlayer)
     local normRaw = (rawSender and rawSender ~= "") and VM:NormalizeName(rawSender) or VM:NormalizeName(playerName)
+    local normCat = (normFinal == "GUILD") and self:NormalizeGuildCategory(guildCategory) or nil
     local tx = {
         id = GenerateTxID("GOLD_IN"),
         type = "IN",
         player = normFinal,
         rawSender = normRaw,
         attributedTo = normFinal,
+        guildCategory = normCat,
         itemID = 0,
         itemLink = "GOLD",
         itemName = "Gold Deposit",
@@ -205,18 +390,20 @@ function Ledger:RecordGoldDeposit(playerName, copperAmount, source, rawSender, a
     return tx
 end
 
-function Ledger:RecordGoldWithdrawal(playerName, copperAmount, source, customTimestamp, rawSender, attributedTo, note)
+function Ledger:RecordGoldWithdrawal(playerName, copperAmount, source, customTimestamp, rawSender, attributedTo, note, guildCategory)
     local now = time()
     local txTimestamp = customTimestamp or now
     local finalPlayer = attributedTo or playerName
     local normFinal = (finalPlayer == "UNATTRIBUTED") and "UNATTRIBUTED" or VM:NormalizeName(finalPlayer)
     local normRaw = (rawSender and rawSender ~= "") and VM:NormalizeName(rawSender) or VM:NormalizeName(playerName)
+    local normCat = (normFinal == "GUILD") and self:NormalizeGuildCategory(guildCategory) or nil
     local tx = {
         id = GenerateTxID("GOLD_OUT"),
         type = "OUT",
         player = normFinal,
         rawSender = normRaw,
         attributedTo = normFinal,
+        guildCategory = normCat,
         itemID = 0,
         itemLink = "GOLD",
         itemName = "Gold Withdrawal",
@@ -238,10 +425,10 @@ function Ledger:RecordGoldWithdrawal(playerName, copperAmount, source, customTim
     return tx
 end
 
-function Ledger:ReassignTransaction(txID, newPlayerName)
+function Ledger:ReassignTransaction(txID, newPlayerName, guildCategory)
     if not VM:IsOfficer() then return end
     local tx = VM.db.ledger[txID]
-    if not tx or tx.deleted or tx.type == "SUMMARY" then return end
+    if not tx or tx.deleted or tx.type == "SUMMARY" or tx.isDerived then return end
     local norm = VM:NormalizeName(newPlayerName)
     if norm == "" then return end
 
@@ -250,20 +437,25 @@ function Ledger:ReassignTransaction(txID, newPlayerName)
     end
     tx.attributedTo = norm
     tx.player = norm
+    if norm == "GUILD" then
+        tx.guildCategory = self:NormalizeGuildCategory(guildCategory) or tx.guildCategory or "MEMBER"
+    else
+        tx.guildCategory = nil
+    end
     tx.updatedAt = time()
 
     VM.Comms:BroadcastTransaction(tx)
     if VM.UI then VM.UI:RefreshAll() end
 end
 
-function Ledger:ReassignGoldDeposit(txID, newPlayerName)
-    return self:ReassignTransaction(txID, newPlayerName)
+function Ledger:ReassignGoldDeposit(txID, newPlayerName, guildCategory)
+    return self:ReassignTransaction(txID, newPlayerName, guildCategory)
 end
 
-function Ledger:AssignUnattributed(txID, memberName)
+function Ledger:AssignUnattributed(txID, memberName, guildCategory)
     if not VM:IsOfficer() then return end
     local tx = VM.db.ledger[txID]
-    if not tx then return end
+    if not tx or tx.isDerived then return end
     local norm = VM:NormalizeName(memberName)
     if norm == "" then return end
     if not tx.rawSender or tx.rawSender == "" then
@@ -271,6 +463,11 @@ function Ledger:AssignUnattributed(txID, memberName)
     end
     tx.player = norm
     tx.attributedTo = norm
+    if norm == "GUILD" then
+        tx.guildCategory = self:NormalizeGuildCategory(guildCategory) or tx.guildCategory or "MEMBER"
+    else
+        tx.guildCategory = nil
+    end
     tx.updatedAt = time()
     VM.Comms:BroadcastTransaction(tx)
     if VM.UI then VM.UI:RefreshAll() end
@@ -279,29 +476,19 @@ end
 function Ledger:DeleteTransaction(txID)
     if not VM:IsOfficer() then return end
     local tx = VM.db.ledger[txID]
-    if not tx or not tx.isManual then return end
+    if not tx or not tx.isManual or tx.isDerived then return end
     tx.deleted = true
     tx.updatedAt = time()
     VM.Comms:BroadcastTransaction(tx)
     if VM.UI then VM.UI:RefreshAll() end
 end
 
-function Ledger:GetTransactionValue(tx, useHistorical, priceMode)
-    if tx.voided or tx.netValue == 0 or tx.tag == "[RETURNED]" then
+function Ledger:GetFullItemValue(tx, useHistorical, priceMode)
+    if not tx or tx.voided or tx.netValue == 0 or tx.tag == "[RETURNED]" then
         return 0
     end
     if tx.itemID == 0 or tx.itemLink == "GOLD" then
         return (tx.unitPriceAtTime or 0) * (tx.count or 1)
-    end
-    if tx.type == "OUT" then
-        if tx.chargedTotalPrice ~= nil and tx.chargedTotalPrice >= 0 then
-            return tx.chargedTotalPrice
-        elseif tx.chargedUnitPrice ~= nil and tx.chargedUnitPrice >= 0 then
-            return tx.chargedUnitPrice * (tx.count or 1)
-        elseif tx.priceMode == "PERCENT" then
-            local base = (tx.unitPriceAtTime and tx.unitPriceAtTime > 0) and tx.unitPriceAtTime or (VM:GetEffectiveLivePrice(tx.itemID, tx.itemLink, tx.unitPriceAtTime) or 0)
-            return VM:CalculateMemberTotalPrice(base, tx.count or 1, { mode = "PERCENT", percent = tx.pricePercent or 50 })
-        end
     end
 
     local mode = priceMode or (VM.db and VM.db.uiPrefs and VM.db.uiPrefs.rankingPriceMode) or "live"
@@ -313,6 +500,63 @@ function Ledger:GetTransactionValue(tx, useHistorical, priceMode)
         unitVal = (livePrice > 0) and livePrice or (tx.unitPriceAtTime or 0)
     end
     return unitVal * (tx.count or 0)
+end
+
+-- Returns member/account valuation:
+-- * Gold: exact copper
+-- * FFA (FREE) & WRITE_OFF OUT: 100% AH value on member
+-- * % of AH OUT: rounded member price (chargedTotalPrice); remainder goes dynamically to GUILD (Member)
+function Ledger:GetTransactionValue(tx, useHistorical, priceMode)
+    if not tx then return 0 end
+    if tx.isDerived and tx.derivedValue ~= nil then
+        return tx.derivedValue
+    end
+    if tx.voided or tx.netValue == 0 or tx.tag == "[RETURNED]" then
+        return 0
+    end
+    if tx.itemID == 0 or tx.itemLink == "GOLD" then
+        return (tx.unitPriceAtTime or 0) * (tx.count or 1)
+    end
+
+    local isFFA = (tx.isFFA == true) or (tx.priceMode == "FREE")
+    if tx.type == "OUT" and not isFFA and tx.source ~= "WRITE_OFF" then
+        if tx.chargedTotalPrice ~= nil and tx.chargedTotalPrice >= 0 then
+            return tx.chargedTotalPrice
+        elseif tx.chargedUnitPrice ~= nil and tx.chargedUnitPrice >= 0 then
+            return tx.chargedUnitPrice * (tx.count or 1)
+        elseif tx.priceMode == "PERCENT" then
+            local base = (tx.unitPriceAtTime and tx.unitPriceAtTime > 0) and tx.unitPriceAtTime or (VM:GetEffectiveLivePrice(tx.itemID, tx.itemLink, tx.unitPriceAtTime) or 0)
+            return VM:CalculateMemberTotalPrice(base, tx.count or 1, { mode = "PERCENT", percent = tx.pricePercent or 50 })
+        end
+    end
+
+    return self:GetFullItemValue(tx, useHistorical, priceMode)
+end
+
+-- Computes dynamic zero-sum GUILD adjustment for discounted (% of AH) member withdrawals:
+-- Positive = Guild subsidy (OUT on GUILD); Negative = 1g min rounding surplus (IN on GUILD)
+function Ledger:GetGuildSubsidyDelta(tx, useHistorical, priceMode)
+    if not tx or tx.deleted or tx.voided or tx.netValue == 0 or tx.tag == "[RETURNED]" then return 0 end
+    if tx.type ~= "OUT" or tx.type == "SUMMARY" or tx.isDerived then return 0 end
+    if tx.itemID == 0 or tx.itemLink == "GOLD" then return 0 end
+    if tx.source == "WRITE_OFF" then return 0 end
+
+    local pNorm = VM:NormalizeName(tx.player)
+    if pNorm == "GUILD" then return 0 end
+
+    local isFFA = (tx.isFFA == true) or (tx.priceMode == "FREE")
+    if isFFA then return 0 end
+
+    local isDiscounted = (tx.priceMode == "PERCENT")
+        or (tx.chargedTotalPrice ~= nil and tx.chargedTotalPrice >= 0)
+        or (tx.chargedUnitPrice ~= nil and tx.chargedUnitPrice > 0)
+    if not isDiscounted then return 0 end
+
+    local fullAH = self:GetFullItemValue(tx, useHistorical, priceMode)
+    if fullAH <= 0 then return 0 end
+
+    local memberVal = self:GetTransactionValue(tx, useHistorical, priceMode)
+    return fullAH - memberVal
 end
 
 local function MatchesPeriod(txTimestamp, period)
@@ -333,13 +577,32 @@ local function MatchesPeriod(txTimestamp, period)
     return true
 end
 
+local function EnsureGroup(groups, key)
+    if not groups[key] then
+        groups[key] = {
+            mainName = key,
+            isLegacy = VM:IsLegacyMember(key),
+            totalOutValue = 0,
+            totalInValue = 0,
+            totalGoldIn = 0,
+            totalGoldOut = 0,
+            totalItemsIn = 0,
+            totalCharged = 0,
+            transactions = {},
+            latestDonationTimestamp = 0
+        }
+    end
+    return groups[key]
+end
+
 function Ledger:GetAggregatedByMain(useHistorical, periodFilter, priceMode)
     local groups = {}
     local includeFFA = (VM.db and VM.db.uiPrefs and VM.db.uiPrefs.includeFFA ~= false)
 
     for _, tx in pairs(VM.db.ledger) do
         local isGold = (tx.itemID == 0 or tx.itemLink == "GOLD")
-        if not tx.deleted and (includeFFA or not tx.isFFA or isGold) and MatchesPeriod(tx.timestamp, periodFilter) then
+        local isFFA = (tx.isFFA == true) or (tx.priceMode == "FREE")
+        if not tx.deleted and (includeFFA or not isFFA or isGold) and MatchesPeriod(tx.timestamp, periodFilter) then
             local pNorm = VM:NormalizeName(tx.player)
             local key
             if pNorm == "UNATTRIBUTED" or pNorm == "GUILD" then
@@ -348,47 +611,86 @@ function Ledger:GetAggregatedByMain(useHistorical, periodFilter, priceMode)
                 key = VM:GetMainFor(pNorm)
             end
 
-            if not groups[key] then
-                groups[key] = {
-                    mainName = key,
-                    isLegacy = VM:IsLegacyMember(key),
-                    totalOutValue = 0,
-                    totalInValue = 0,
-                    totalGoldIn = 0,
-                    totalGoldOut = 0,
-                    totalItemsIn = 0,
-                    totalCharged = 0,
-                    transactions = {},
-                    latestDonationTimestamp = 0
-                }
-            end
-
+            local grp = EnsureGroup(groups, key)
             local val = self:GetTransactionValue(tx, useHistorical, priceMode)
+
             if tx.type == "SUMMARY" then
-                groups[key].totalInValue = groups[key].totalInValue + (tx.contributed or 0)
-                groups[key].totalOutValue = groups[key].totalOutValue + (tx.received or 0)
-                groups[key].totalGoldIn = groups[key].totalGoldIn + (tx.goldIn or 0)
-                groups[key].totalGoldOut = (groups[key].totalGoldOut or 0) + (tx.goldOut or 0)
-                groups[key].totalItemsIn = groups[key].totalItemsIn + (tx.itemsIn or 0)
-                groups[key].latestDonationTimestamp = math.max(groups[key].latestDonationTimestamp, tx.timestamp or 0)
+                grp.totalInValue = grp.totalInValue + (tx.contributed or 0)
+                grp.totalOutValue = grp.totalOutValue + (tx.received or 0)
+                grp.totalGoldIn = grp.totalGoldIn + (tx.goldIn or 0)
+                grp.totalGoldOut = (grp.totalGoldOut or 0) + (tx.goldOut or 0)
+                grp.totalItemsIn = grp.totalItemsIn + (tx.itemsIn or 0)
+                grp.latestDonationTimestamp = math.max(grp.latestDonationTimestamp, tx.timestamp or 0)
             elseif tx.type == "OUT" then
-                groups[key].totalOutValue = groups[key].totalOutValue + val
+                grp.totalOutValue = grp.totalOutValue + val
                 local chargedAmt = (tx.chargedTotalPrice ~= nil) and tx.chargedTotalPrice or ((tx.chargedUnitPrice or 0) * (tx.count or 0))
-                groups[key].totalCharged = groups[key].totalCharged + chargedAmt
-                if tx.itemID == 0 or tx.itemLink == "GOLD" then
-                    groups[key].totalGoldOut = (groups[key].totalGoldOut or 0) + val
+                grp.totalCharged = grp.totalCharged + chargedAmt
+                if isGold then
+                    grp.totalGoldOut = (grp.totalGoldOut or 0) + val
                 end
             else
-                groups[key].totalInValue = groups[key].totalInValue + val
-                groups[key].latestDonationTimestamp = math.max(groups[key].latestDonationTimestamp, tx.timestamp or 0)
-                if tx.itemID == 0 or tx.itemLink == "GOLD" then
-                    groups[key].totalGoldIn = groups[key].totalGoldIn + val
+                grp.totalInValue = grp.totalInValue + val
+                grp.latestDonationTimestamp = math.max(grp.latestDonationTimestamp, tx.timestamp or 0)
+                if isGold then
+                    grp.totalGoldIn = grp.totalGoldIn + val
                 else
-                    groups[key].totalItemsIn = groups[key].totalItemsIn + val
+                    grp.totalItemsIn = grp.totalItemsIn + val
                 end
             end
 
-            table.insert(groups[key].transactions, tx)
+            table.insert(grp.transactions, tx)
+
+            -- Zero-sum dynamic GUILD entry for % of AH member subsidy or 1g-minimum rounding surplus
+            local delta = self:GetGuildSubsidyDelta(tx, useHistorical, priceMode)
+            if delta ~= 0 then
+                local guildGrp = EnsureGroup(groups, "GUILD")
+                if delta > 0 then
+                    local subTx = {
+                        id = "DERIVED_SUB_" .. tostring(tx.id),
+                        type = "OUT",
+                        player = "GUILD",
+                        rawSender = pNorm,
+                        attributedTo = "GUILD",
+                        guildCategory = "MEMBER",
+                        itemID = tx.itemID,
+                        itemLink = tx.itemLink,
+                        itemName = tx.itemName,
+                        count = tx.count or 1,
+                        unitPriceAtTime = tx.unitPriceAtTime,
+                        derivedValue = delta,
+                        isDerived = true,
+                        derivedKind = "SUBSIDY",
+                        note = string.format("Member subsidy (%d%% AH)", tx.pricePercent or 50),
+                        timestamp = tx.timestamp or 0,
+                        source = "DERIVED_SUBSIDY",
+                    }
+                    guildGrp.totalOutValue = guildGrp.totalOutValue + delta
+                    table.insert(guildGrp.transactions, subTx)
+                else
+                    local surplus = -delta
+                    local surTx = {
+                        id = "DERIVED_SUR_" .. tostring(tx.id),
+                        type = "IN",
+                        player = "GUILD",
+                        rawSender = pNorm,
+                        attributedTo = "GUILD",
+                        guildCategory = "MEMBER",
+                        itemID = tx.itemID,
+                        itemLink = tx.itemLink,
+                        itemName = tx.itemName,
+                        count = tx.count or 1,
+                        unitPriceAtTime = tx.unitPriceAtTime,
+                        derivedValue = surplus,
+                        isDerived = true,
+                        derivedKind = "SURPLUS",
+                        note = "Rounding surplus (1g min)",
+                        timestamp = tx.timestamp or 0,
+                        source = "DERIVED_SURPLUS",
+                    }
+                    guildGrp.totalInValue = guildGrp.totalInValue + surplus
+                    table.insert(guildGrp.transactions, surTx)
+                end
+            end
         end
     end
 
@@ -475,6 +777,7 @@ function Ledger:CompactMonthlyHistory()
     local cutoff = now - (60 * 86400)
     local tombstoneCutoff = now - (90 * 86400)
     local groups = {}
+    local guildSubsidyByMonth = {}
     local purgedTombstones = 0
 
     for id, tx in pairs(VM.db.ledger) do
@@ -516,12 +819,26 @@ function Ledger:CompactMonthlyHistory()
                     groups[key].totalItemsIn = groups[key].totalItemsIn + val
                 end
             end
+
+            -- Preserve derived GUILD subsidy/surplus if this member transaction gets compacted
+            local delta = self:GetGuildSubsidyDelta(tx, true)
+            if delta ~= 0 then
+                guildSubsidyByMonth[ym] = guildSubsidyByMonth[ym] or { inVal = 0, outVal = 0, ts = tx.timestamp or 0, sourceKeys = {} }
+                if delta > 0 then
+                    guildSubsidyByMonth[ym].outVal = guildSubsidyByMonth[ym].outVal + delta
+                else
+                    guildSubsidyByMonth[ym].inVal = guildSubsidyByMonth[ym].inVal + (-delta)
+                end
+                guildSubsidyByMonth[ym].sourceKeys[key] = true
+            end
+
             table.insert(groups[key].txs, id)
         end
     end
 
+    local compactedKeys = {}
     local compactedCount = 0
-    for _, g in pairs(groups) do
+    for key, g in pairs(groups) do
         local summaryID = string.format("SUM_%s_%s", g.main, g.ym)
         local existingSum = VM.db.ledger[summaryID]
         if #g.txs > 1 or (existingSum and not existingSum.deleted and existingSum.type == "SUMMARY") then
@@ -562,7 +879,45 @@ function Ledger:CompactMonthlyHistory()
             end
 
             VM.db.ledger[summaryID] = summaryTx
+            compactedKeys[key] = true
             compactedCount = compactedCount + 1
+        end
+    end
+
+    -- Roll preserved subsidy/surplus into GUILD's monthly summary for any compacted member groups
+    for ym, sub in pairs(guildSubsidyByMonth) do
+        local anyCompacted = false
+        for sKey in pairs(sub.sourceKeys) do
+            if compactedKeys[sKey] then anyCompacted = true; break end
+        end
+        if anyCompacted and (sub.inVal > 0 or sub.outVal > 0) then
+            local gSumID = "SUM_GUILD_" .. ym
+            local existing = VM.db.ledger[gSumID]
+            local totalIn = ((existing and existing.contributed) or 0) + sub.inVal
+            local totalOut = ((existing and existing.received) or 0) + sub.outVal
+            VM.db.ledger[gSumID] = {
+                id = gSumID,
+                type = "SUMMARY",
+                player = "GUILD",
+                itemName = string.format("%s Monthly Summary", ym),
+                itemLink = "SUMMARY",
+                itemID = 0,
+                isManual = false,
+                isCompacted = true,
+                contributed = totalIn,
+                received = totalOut,
+                goldIn = (existing and existing.goldIn) or 0,
+                goldOut = (existing and existing.goldOut) or 0,
+                itemsIn = (existing and existing.itemsIn) or 0,
+                unitPriceAtTime = totalIn - totalOut,
+                chargedUnitPrice = 0,
+                count = 1,
+                timestamp = (existing and existing.timestamp) or sub.ts,
+                updatedAt = now,
+                officer = VM:GetPlayerName(),
+                source = "COMPACTED",
+                deleted = false
+            }
         end
     end
 
@@ -583,6 +938,9 @@ function Ledger:CleanupDuplicates()
         GOLD_REQUEST = true,
         RETURN = true,
         COMPACTED = true,
+        WRITE_OFF = true,
+        TAB_PURCHASE = true,
+        GUILD_EXPENSE = true,
     }
 
     local groups = {}
@@ -605,7 +963,7 @@ function Ledger:CleanupDuplicates()
         end
     end
 
-    local WINDOW_48H = 172800 -- 48 hours rolling window for bank-log duplicates
+    local WINDOW_48H = 172800
     local removedCount = 0
 
     for _, entries in pairs(groups) do

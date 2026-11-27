@@ -3,10 +3,14 @@ VM.UI = {}
 local UI = VM.UI
 
 local mainFrame
-local popupFrame
+local mailPanelFrame
+local tradePromptFrame
+local relogReminderFrame
+local requestsHelpFrame
 local rosterPickerFrame
 local qtyPickerFrame
 local goldReqModalFrame
+local guildExpenseModalFrame
 local exportModalFrame
 local assignModalFrame
 local rankingPeriodDropdownFrame
@@ -21,6 +25,7 @@ local STATE = {
     requestSectionExpanded = {
         PENDING = true,
         APPROVED = true,
+        PREPARED = true,
         HISTORY = false,
     },
     ledgerSearchQuery = "",
@@ -33,9 +38,11 @@ local STATE = {
     rosterUnlinkedOnly = false,
     rosterSearchFilter = "",
     selectedAssignRecipient = "",
+    selectedAssignGuildCat = nil,
     selectedAssignItem = nil,
     selectedAssignTab = 1,
     manualLedgerDonor = "",
+    manualLedgerGuildCat = nil,
 }
 
 local THEME = {
@@ -51,10 +58,29 @@ local THEME = {
     accent = { 0.15, 0.65, 0.95, 1.0 },
     green = { 0.25, 0.80, 0.45, 1.0 },
     red = { 0.85, 0.30, 0.30, 1.0 },
+    gold = { 0.90, 0.72, 0.20, 1.0 },
     btnBg = { 0.16, 0.18, 0.23, 1.0 },
     btnHover = { 0.22, 0.26, 0.34, 1.0 },
     btnDisabled = { 0.10, 0.11, 0.13, 0.6 },
 }
+
+if StaticPopupDialogs then
+    StaticPopupDialogs["VAULTMANAGER_WRITEOFF"] = {
+        text = "Write off this prepared request?\n\n%s\n\n100%% of the value will be charged to departed officer %s (Legacy Member).",
+        button1 = "Write Off",
+        button2 = "Cancel",
+        OnAccept = function(self, data)
+            local d = data or self.data
+            if d and d.reqID and VM.Fulfillment and VM.Fulfillment.WriteOffRequest then
+                VM.Fulfillment:WriteOffRequest(d.reqID)
+            end
+        end,
+        timeout = 0,
+        whileDead = true,
+        hideOnEscape = true,
+        preferredIndex = 3,
+    }
+end
 
 local function ApplyModernBackdrop(frame, bgColor, borderColor)
     if not frame.SetBackdrop then
@@ -111,6 +137,7 @@ local function GetUIPrefs()
         rankingSortDir = "desc",
         enableChatNotifications = true,
         notifyNewerVersion = true,
+        autoOpenAtBank = true,
     }
     for k, v in pairs(defaults) do
         if VM.db.uiPrefs[k] == nil then
@@ -205,7 +232,8 @@ local function CreateModernButton(parent, width, height, text, accentColor)
     end)
     btn:SetScript("OnLeave", function(self)
         if self:IsEnabled() then
-            self:SetBackdropColor(THEME.btnBg[1], THEME.btnBg[2], THEME.btnBg[3], 1)
+            local bg = self.customBg or THEME.btnBg
+            self:SetBackdropColor(bg[1], bg[2], bg[3], bg[4] or 1)
             local bd = self.accentColor or THEME.border
             self:SetBackdropBorderColor(bd[1], bd[2], bd[3], 0.85)
         end
@@ -215,7 +243,8 @@ local function CreateModernButton(parent, width, height, text, accentColor)
     btn.SetModernEnabled = function(self, enabled)
         if enabled then
             self:Enable()
-            self:SetBackdropColor(THEME.btnBg[1], THEME.btnBg[2], THEME.btnBg[3], 1)
+            local bg = self.customBg or THEME.btnBg
+            self:SetBackdropColor(bg[1], bg[2], bg[3], bg[4] or 1)
             local bd = self.accentColor or THEME.border
             self:SetBackdropBorderColor(bd[1], bd[2], bd[3], 0.85)
             self.label:SetTextColor(1, 1, 1)
@@ -278,6 +307,8 @@ local function HideAllPopups()
     if rosterPickerFrame then rosterPickerFrame:Hide() end
     if qtyPickerFrame then qtyPickerFrame:Hide() end
     if goldReqModalFrame then goldReqModalFrame:Hide() end
+    if guildExpenseModalFrame then guildExpenseModalFrame:Hide() end
+    if requestsHelpFrame then requestsHelpFrame:Hide() end
     if exportModalFrame then exportModalFrame:Hide() end
     if assignModalFrame then assignModalFrame:Hide() end
     if rankingPeriodDropdownFrame then rankingPeriodDropdownFrame:Hide() end
@@ -286,10 +317,14 @@ end
 
 function UI:Init()
     self:CreateMainFrame()
-    self:CreateOfficerPopupFrame()
+    self:CreateMailFulfillmentPanel()
+    self:CreateTradeFulfillmentPrompt()
+    self:CreateRelogReminderFrame()
+    self:CreateRequestsHelpModal()
     self:CreateRosterPickerFrame()
     self:CreateQtyPickerFrame()
     self:CreateGoldRequestModal()
+    self:CreateGuildExpenseModal()
     self:CreateExportModal()
     self:CreateAssignModal()
     self:CreateRankingPeriodPickerFrame()
@@ -317,19 +352,36 @@ function UI:Toggle()
     end
 end
 
+function UI:OpenToRequestsTab()
+    if not mainFrame then self:CreateMainFrame() end
+    if VM.SwitchGuildContext then
+        VM:SwitchGuildContext("UI_OPEN_REQUESTS")
+    end
+    if VM.UpdateRosterCache then
+        VM:UpdateRosterCache()
+    end
+    STATE.currentTab = 2
+    HideAllPopups()
+    mainFrame:Show()
+    self:RefreshAll()
+end
+
 function UI:UpdateRequestsTabBadge()
     if not mainFrame or not mainFrame.navButtons or not mainFrame.navButtons[2] then return end
     local openCount = 0
     if VM.Minimap and VM.Minimap.GetOpenRequestCounts then
-        local pendingCount, approvedCount = VM.Minimap:GetOpenRequestCounts()
-        openCount = (pendingCount or 0) + (approvedCount or 0)
+        local pendingCount, approvedCount, preparedCount = VM.Minimap:GetOpenRequestCounts()
+        openCount = (pendingCount or 0) + (approvedCount or 0) + (preparedCount or 0)
     elseif VM.db and VM.db.requests and not VM.isUnguilded then
         local isOff = VM:IsOfficer()
+        local meLower = VM:GetPlayerName():lower()
         local myMain = VM:GetMainFor(VM:GetPlayerName())
         for _, req in pairs(VM.db.requests) do
-            if req.status == "PENDING" or req.status == "APPROVED" then
+            if req.status == "PENDING" or req.status == "APPROVED" or req.status == "PREPARED" then
                 if isOff then
-                    openCount = openCount + 1
+                    if req.status ~= "PREPARED" or (req.preparedBy and VM:NormalizeName(req.preparedBy):lower() == meLower) then
+                        openCount = openCount + 1
+                    end
                 else
                     local reqMain = VM:GetMainFor(req.requester or "")
                     if reqMain ~= "" and myMain ~= "" and reqMain:lower() == myMain:lower() then
@@ -449,11 +501,69 @@ function UI:OpenQtyPicker(anchor, maxQty, currentQty, onSelect)
 end
 
 --------------------------------------------------------------------------------
--- GOLD REQUEST MODAL
+-- REQUESTS HELP MODAL
+--------------------------------------------------------------------------------
+function UI:CreateRequestsHelpModal()
+    requestsHelpFrame = CreateFrame("Frame", "VaultManagerRequestsHelpModal", UIParent, "BackdropTemplate")
+    requestsHelpFrame:SetSize(450, 325)
+    requestsHelpFrame:SetPoint("CENTER")
+    requestsHelpFrame:SetFrameStrata("FULLSCREEN_DIALOG")
+    requestsHelpFrame:SetFrameLevel(210)
+    requestsHelpFrame:SetClampedToScreen(true)
+    requestsHelpFrame:SetMovable(true)
+    requestsHelpFrame:EnableMouse(true)
+    requestsHelpFrame:RegisterForDrag("LeftButton")
+    requestsHelpFrame:SetScript("OnDragStart", requestsHelpFrame.StartMoving)
+    requestsHelpFrame:SetScript("OnDragStop", requestsHelpFrame.StopMovingOrSizing)
+    ApplyModernBackdrop(requestsHelpFrame, THEME.bg, THEME.accent)
+    requestsHelpFrame:Hide()
+    table.insert(UISpecialFrames, "VaultManagerRequestsHelpModal")
+
+    local title = requestsHelpFrame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    title:SetPoint("TOPLEFT", 14, -12)
+    title:SetText("|cff26a6f2Requests — Quick Reference|r")
+
+    local closeBtn = CreateModernButton(requestsHelpFrame, 22, 22, "X", THEME.red)
+    closeBtn:SetPoint("TOPRIGHT", -10, -10)
+    closeBtn:SetScript("OnClick", function() requestsHelpFrame:Hide() end)
+
+    local body = requestsHelpFrame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    body:SetPoint("TOPLEFT", 14, -38)
+    body:SetPoint("BOTTOMRIGHT", -14, 14)
+    body:SetJustifyH("LEFT")
+    body:SetJustifyV("TOP")
+    body:SetText(
+        "|cff26a6f2Statuses|r\n" ..
+        "• |cffffcc33PENDING|r — Waiting for officer approval. Stock is not yet reserved.\n" ..
+        "• |cff26a6f2APPROVED|r — Accepted. Items are soft-locked in the Vault until withdrawn.\n" ..
+        "• |cff44dd77PREPARED|r — Withdrawn by an officer and awaiting Mail or Trade delivery.\n" ..
+        "• |cff999999HISTORY|r — Fulfilled, rejected, cancelled, or written off (pruned after 30 days).\n\n" ..
+        "|cff26a6f2Officer Actions|r\n" ..
+        "• |cff44dd77Approve|r — Accepts a pending request and reserves Vault stock.\n" ..
+        "• |cffff5555Reject|r — Declines a pending request without logging to the Ledger.\n" ..
+        "• |cff26a6f2Prepare|r — Withdraws items/gold from the open Guild Bank into your bags and assigns delivery to you. Open Mail or Trade with the member to fill automatically.\n" ..
+        "• |cff44dd77Complete|r — Marks the request delivered and logs it to the Ledger. (Mail, Trade, and direct Guild Bank withdrawals also auto-complete.)\n" ..
+        "• |cffccccccRelease|r — Returns a prepared order back to APPROVED if you put items back.\n" ..
+        "• |cffff5555Cancel|r — Cancels an approved/prepared request and releases stock.\n" ..
+        "• |cffff5555Write Off|r — Available if the officer holding a prepared order left the guild; charges 100% value to the departed officer."
+    )
+end
+
+function UI:ToggleRequestsHelpModal()
+    if not requestsHelpFrame then self:CreateRequestsHelpModal() end
+    if requestsHelpFrame:IsShown() then
+        requestsHelpFrame:Hide()
+    else
+        requestsHelpFrame:Show()
+    end
+end
+
+--------------------------------------------------------------------------------
+-- GOLD REQUEST MODAL (WITH GUILD EXPENSE CATEGORY)
 --------------------------------------------------------------------------------
 function UI:CreateGoldRequestModal()
     goldReqModalFrame = CreateFrame("Frame", "VaultManagerGoldRequestModal", UIParent, "BackdropTemplate")
-    goldReqModalFrame:SetSize(380, 210)
+    goldReqModalFrame:SetSize(380, 245)
     goldReqModalFrame:SetPoint("CENTER")
     goldReqModalFrame:SetFrameStrata("FULLSCREEN_DIALOG")
     goldReqModalFrame:SetFrameLevel(200)
@@ -481,12 +591,52 @@ function UI:CreateGoldRequestModal()
     desc:SetJustifyH("LEFT")
     desc:SetText("For purchases or expenses made on behalf of the guild bank. Charged to GUILD (not your personal balance).")
 
+    local catLbl = goldReqModalFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    catLbl:SetPoint("TOPLEFT", 14, -74)
+    catLbl:SetText("Category:")
+
+    goldReqModalFrame.selectedCat = "RAID"
+    goldReqModalFrame.catButtons = {}
+    local catDefs = {
+        { key = "RAID", label = "Raid" },
+        { key = "MEMBER", label = "Member" },
+        { key = "TABS", label = "Tabs" },
+    }
+    local function UpdateGoldCatButtons()
+        for _, cBtn in ipairs(goldReqModalFrame.catButtons) do
+            if cBtn.catKey == goldReqModalFrame.selectedCat then
+                cBtn.customBg = { 0.15, 0.28, 0.42, 1 }
+                cBtn:SetBackdropColor(0.15, 0.28, 0.42, 1)
+                SetButtonAccent(cBtn, THEME.accent)
+                cBtn.label:SetTextColor(1, 0.85, 0.2)
+            else
+                cBtn.customBg = nil
+                cBtn:SetBackdropColor(THEME.btnBg[1], THEME.btnBg[2], THEME.btnBg[3], 1)
+                SetButtonAccent(cBtn, THEME.border)
+                cBtn.label:SetTextColor(0.75, 0.75, 0.75)
+            end
+        end
+    end
+    goldReqModalFrame.UpdateCatButtons = UpdateGoldCatButtons
+
+    for i, c in ipairs(catDefs) do
+        local b = CreateModernButton(goldReqModalFrame, 72, 22, c.label)
+        b:SetPoint("TOPLEFT", 80 + (i - 1) * 78, -70)
+        b.catKey = c.key
+        b:SetScript("OnClick", function(selfBtn)
+            goldReqModalFrame.selectedCat = selfBtn.catKey
+            UpdateGoldCatButtons()
+        end)
+        goldReqModalFrame.catButtons[i] = b
+    end
+    UpdateGoldCatButtons()
+
     local amtLbl = goldReqModalFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    amtLbl:SetPoint("TOPLEFT", 14, -74)
+    amtLbl:SetPoint("TOPLEFT", 14, -108)
     amtLbl:SetText("Amount:")
 
     local goldBox = CreateModernEditBox(goldReqModalFrame, 74, 24, true)
-    goldBox:SetPoint("TOPLEFT", 80, -70)
+    goldBox:SetPoint("TOPLEFT", 80, -104)
     goldReqModalFrame.goldBox = goldBox
 
     local goldUnit = goldReqModalFrame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
@@ -503,11 +653,11 @@ function UI:CreateGoldRequestModal()
     silverUnit:SetText("|cffc0c0c0Silver|r")
 
     local reasonLbl = goldReqModalFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    reasonLbl:SetPoint("TOPLEFT", 14, -110)
+    reasonLbl:SetPoint("TOPLEFT", 14, -144)
     reasonLbl:SetText("Reason:")
 
     local reasonBox = CreateModernEditBox(goldReqModalFrame, 280, 24, false)
-    reasonBox:SetPoint("TOPLEFT", 80, -106)
+    reasonBox:SetPoint("TOPLEFT", 80, -140)
     reasonBox:SetMaxLetters(100)
     reasonBox.placeholder = reasonBox:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
     reasonBox.placeholder:SetPoint("LEFT", 6, 0)
@@ -533,7 +683,7 @@ function UI:CreateGoldRequestModal()
             VM:Print("|cffff4444Please enter a reason for the guild expense.|r")
             return
         end
-        VM.Fulfillment:CreateGoldRequest(copper, reason)
+        VM.Fulfillment:CreateGoldRequest(copper, reason, goldReqModalFrame.selectedCat)
         goldReqModalFrame:Hide()
     end)
 
@@ -544,12 +694,160 @@ end
 
 function UI:OpenGoldRequestModal()
     if not goldReqModalFrame then self:CreateGoldRequestModal() end
+    goldReqModalFrame.selectedCat = "RAID"
+    if goldReqModalFrame.UpdateCatButtons then goldReqModalFrame.UpdateCatButtons() end
     goldReqModalFrame.goldBox:SetText("")
     goldReqModalFrame.silverBox:SetText("")
     goldReqModalFrame.reasonBox:SetText("")
     goldReqModalFrame.reasonBox.placeholder:Show()
     goldReqModalFrame:Show()
     goldReqModalFrame.goldBox:SetFocus()
+end
+
+--------------------------------------------------------------------------------
+-- GUILD EXPENSE / OFFICER WRITE-OFF MODAL (LEDGER)
+--------------------------------------------------------------------------------
+function UI:CreateGuildExpenseModal()
+    guildExpenseModalFrame = CreateFrame("Frame", "VaultManagerGuildExpenseModal", UIParent, "BackdropTemplate")
+    guildExpenseModalFrame:SetSize(380, 245)
+    guildExpenseModalFrame:SetPoint("CENTER")
+    guildExpenseModalFrame:SetFrameStrata("FULLSCREEN_DIALOG")
+    guildExpenseModalFrame:SetFrameLevel(200)
+    guildExpenseModalFrame:SetClampedToScreen(true)
+    guildExpenseModalFrame:SetMovable(true)
+    guildExpenseModalFrame:EnableMouse(true)
+    guildExpenseModalFrame:RegisterForDrag("LeftButton")
+    guildExpenseModalFrame:SetScript("OnDragStart", guildExpenseModalFrame.StartMoving)
+    guildExpenseModalFrame:SetScript("OnDragStop", guildExpenseModalFrame.StopMovingOrSizing)
+    ApplyModernBackdrop(guildExpenseModalFrame, THEME.bg, THEME.accent)
+    guildExpenseModalFrame:Hide()
+    table.insert(UISpecialFrames, "VaultManagerGuildExpenseModal")
+
+    local title = guildExpenseModalFrame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    title:SetPoint("TOPLEFT", 14, -12)
+    title:SetText("|cff26a6f2Log Guild Expense / Write-Off|r")
+
+    local closeBtn = CreateModernButton(guildExpenseModalFrame, 22, 22, "X", THEME.red)
+    closeBtn:SetPoint("TOPRIGHT", -10, -10)
+    closeBtn:SetScript("OnClick", function() guildExpenseModalFrame:Hide() end)
+
+    local desc = guildExpenseModalFrame:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+    desc:SetPoint("TOPLEFT", 14, -34)
+    desc:SetWidth(350)
+    desc:SetJustifyH("LEFT")
+    desc:SetText("Records a guild-level expense or adjustment directly under GUILD BANK / OPERATIONS.")
+
+    local catLbl = guildExpenseModalFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    catLbl:SetPoint("TOPLEFT", 14, -74)
+    catLbl:SetText("Category:")
+
+    guildExpenseModalFrame.selectedCat = "MEMBER"
+    guildExpenseModalFrame.catButtons = {}
+    local catDefs = {
+        { key = "RAID", label = "Raid" },
+        { key = "MEMBER", label = "Member" },
+        { key = "TABS", label = "Tabs" },
+    }
+    local function UpdateExpCatButtons()
+        for _, cBtn in ipairs(guildExpenseModalFrame.catButtons) do
+            if cBtn.catKey == guildExpenseModalFrame.selectedCat then
+                cBtn.customBg = { 0.15, 0.28, 0.42, 1 }
+                cBtn:SetBackdropColor(0.15, 0.28, 0.42, 1)
+                SetButtonAccent(cBtn, THEME.accent)
+                cBtn.label:SetTextColor(1, 0.85, 0.2)
+            else
+                cBtn.customBg = nil
+                cBtn:SetBackdropColor(THEME.btnBg[1], THEME.btnBg[2], THEME.btnBg[3], 1)
+                SetButtonAccent(cBtn, THEME.border)
+                cBtn.label:SetTextColor(0.75, 0.75, 0.75)
+            end
+        end
+    end
+    guildExpenseModalFrame.UpdateCatButtons = UpdateExpCatButtons
+
+    for i, c in ipairs(catDefs) do
+        local b = CreateModernButton(guildExpenseModalFrame, 72, 22, c.label)
+        b:SetPoint("TOPLEFT", 80 + (i - 1) * 78, -70)
+        b.catKey = c.key
+        b:SetScript("OnClick", function(selfBtn)
+            guildExpenseModalFrame.selectedCat = selfBtn.catKey
+            UpdateExpCatButtons()
+        end)
+        guildExpenseModalFrame.catButtons[i] = b
+    end
+    UpdateExpCatButtons()
+
+    local amtLbl = guildExpenseModalFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    amtLbl:SetPoint("TOPLEFT", 14, -108)
+    amtLbl:SetText("Amount:")
+
+    local goldBox = CreateModernEditBox(guildExpenseModalFrame, 74, 24, true)
+    goldBox:SetPoint("TOPLEFT", 80, -104)
+    guildExpenseModalFrame.goldBox = goldBox
+
+    local goldUnit = guildExpenseModalFrame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    goldUnit:SetPoint("LEFT", goldBox, "RIGHT", 6, 0)
+    goldUnit:SetText("|cffffd700Gold|r")
+
+    local silverBox = CreateModernEditBox(guildExpenseModalFrame, 46, 24, true)
+    silverBox:SetPoint("LEFT", goldUnit, "RIGHT", 14, 0)
+    silverBox:SetMaxLetters(2)
+    guildExpenseModalFrame.silverBox = silverBox
+
+    local silverUnit = guildExpenseModalFrame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    silverUnit:SetPoint("LEFT", silverBox, "RIGHT", 6, 0)
+    silverUnit:SetText("|cffc0c0c0Silver|r")
+
+    local noteLbl = guildExpenseModalFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    noteLbl:SetPoint("TOPLEFT", 14, -144)
+    noteLbl:SetText("Note:")
+
+    local noteBox = CreateModernEditBox(guildExpenseModalFrame, 280, 24, false)
+    noteBox:SetPoint("TOPLEFT", 80, -140)
+    noteBox:SetMaxLetters(100)
+    noteBox.placeholder = noteBox:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+    noteBox.placeholder:SetPoint("LEFT", 6, 0)
+    noteBox.placeholder:SetText("Reason or description...")
+    noteBox:SetScript("OnTextChanged", function(eb)
+        if eb:GetText() == "" then eb.placeholder:Show() else eb.placeholder:Hide() end
+    end)
+    guildExpenseModalFrame.noteBox = noteBox
+
+    local saveBtn = CreateModernButton(guildExpenseModalFrame, 130, 26, "Record Expense", THEME.accent)
+    saveBtn:SetPoint("BOTTOMRIGHT", -14, 12)
+    saveBtn:SetScript("OnClick", function()
+        if not VM:IsOfficer() then return end
+        local g = tonumber(goldBox:GetText()) or 0
+        local s = tonumber(silverBox:GetText()) or 0
+        if s > 99 then s = 99 end
+        local copper = (g * 10000) + (s * 100)
+        local note = strtrim(noteBox:GetText() or "")
+        if copper <= 0 then
+            VM:Print("|cffff4444Please enter an amount greater than 0.|r")
+            return
+        end
+        VM.Ledger:RecordGuildExpense(copper, guildExpenseModalFrame.selectedCat, note)
+        VM:Print(string.format("Logged %s under GUILD (%s).",
+            VM:FormatMoney(copper), VM.Ledger:GetGuildCategoryLabel(guildExpenseModalFrame.selectedCat) or "Member"))
+        guildExpenseModalFrame:Hide()
+    end)
+
+    local cancelBtn = CreateModernButton(guildExpenseModalFrame, 84, 26, "Cancel")
+    cancelBtn:SetPoint("RIGHT", saveBtn, "LEFT", -8, 0)
+    cancelBtn:SetScript("OnClick", function() guildExpenseModalFrame:Hide() end)
+end
+
+function UI:OpenGuildExpenseModal()
+    if not VM:IsOfficer() then return end
+    if not guildExpenseModalFrame then self:CreateGuildExpenseModal() end
+    guildExpenseModalFrame.selectedCat = "MEMBER"
+    if guildExpenseModalFrame.UpdateCatButtons then guildExpenseModalFrame.UpdateCatButtons() end
+    guildExpenseModalFrame.goldBox:SetText("")
+    guildExpenseModalFrame.silverBox:SetText("")
+    guildExpenseModalFrame.noteBox:SetText("")
+    guildExpenseModalFrame.noteBox.placeholder:Show()
+    guildExpenseModalFrame:Show()
+    guildExpenseModalFrame.goldBox:SetFocus()
 end
 
 --------------------------------------------------------------------------------
@@ -591,9 +889,15 @@ function UI:CreateAssignModal()
     local recBtn = CreateModernDropdown(assignModalFrame, 200, 24, "Select Member...")
     recBtn:SetPoint("TOPLEFT", 92, -68)
     recBtn:SetScript("OnClick", function(btn)
-        UI:OpenRosterPicker(btn, true, function(chosen)
+        UI:OpenRosterPicker(btn, true, function(chosen, guildCat)
             STATE.selectedAssignRecipient = chosen
-            recBtn:SetText(chosen == "GUILD" and "|cff26a6f2[Guild Bank / Guild]|r" or chosen)
+            STATE.selectedAssignGuildCat = guildCat
+            if chosen == "GUILD" then
+                local catLbl = (VM.Ledger and VM.Ledger:GetGuildCategoryLabel(guildCat)) or "Member"
+                recBtn:SetText("|cff26a6f2[Guild — " .. catLbl .. "]|r")
+            else
+                recBtn:SetText(chosen)
+            end
         end, true)
     end)
     assignModalFrame.recBtn = recBtn
@@ -669,6 +973,7 @@ function UI:CreateAssignModal()
             player = VM:NormalizeName(mainName),
             rawSender = recipNorm,
             attributedTo = VM:NormalizeName(mainName),
+            guildCategory = (recipNorm == "GUILD") and (STATE.selectedAssignGuildCat or "MEMBER") or nil,
             recipient = recipNorm,
             itemID = item.itemID,
             itemLink = item.itemLink or item.link,
@@ -710,6 +1015,7 @@ function UI:OpenAssignModal(item, tabIndex)
     STATE.selectedAssignItem = item
     STATE.selectedAssignTab = tabIndex
     STATE.selectedAssignRecipient = ""
+    STATE.selectedAssignGuildCat = nil
     assignModalFrame.recBtn:SetText("Select Member...")
 
     assignModalFrame.itemLbl:SetText(string.format("Item: %s (Stock: %d)", item.link or item.name, item.count))
@@ -852,7 +1158,7 @@ function UI:RefreshExportContent()
 end
 
 --------------------------------------------------------------------------------
--- CUSTOM SEARCHABLE ROSTER DROPDOWN (WITH OPTIONAL "GUILD" ENTRY)
+-- CUSTOM SEARCHABLE ROSTER DROPDOWN (WITH CATEGORIZED "GUILD" ENTRIES)
 --------------------------------------------------------------------------------
 function UI:CreateRosterPickerFrame()
     rosterPickerFrame = CreateFrame("Frame", "VaultManagerRosterPicker", UIParent, "BackdropTemplate")
@@ -936,9 +1242,10 @@ function UI:RefreshRosterPicker(filter)
             end)
             row:SetScript("OnClick", function(selfRow)
                 local chosen = selfRow.entryName
+                local chosenCat = selfRow.guildCategory
                 local cb = rosterPickerFrame.onSelect
                 rosterPickerFrame:Hide()
-                if cb and chosen then cb(chosen) end
+                if cb and chosen then cb(chosen, chosenCat) end
             end)
             rosterPickerFrame.scroll.rows[idx] = row
         end
@@ -946,16 +1253,24 @@ function UI:RefreshRosterPicker(filter)
     end
 
     if rosterPickerFrame.includeGuildOption then
-        if filter == "" or ("guild bank / guild"):find(filter, 1, true) then
-            local gRow = AcquirePickerRow()
-            gRow.entryName = "GUILD"
-            gRow.baseBg = THEME.rowSpecial
-            gRow:SetBackdropColor(gRow.baseBg[1], gRow.baseBg[2], gRow.baseBg[3], gRow.baseBg[4])
-            gRow:ClearAllPoints()
-            gRow:SetPoint("TOPLEFT", 0, -y)
-            gRow.label:SetText("|cff26a6f2[Guild Bank / Guild]|r")
-            gRow:Show()
-            y = y + 24
+        local guildOpts = {
+            { cat = "RAID", label = "|cff26a6f2[Guild — Raid]|r", searchKey = "guild bank raid" },
+            { cat = "MEMBER", label = "|cff26a6f2[Guild — Member]|r", searchKey = "guild bank member" },
+            { cat = "TABS", label = "|cff26a6f2[Guild — Tabs]|r", searchKey = "guild bank tabs" },
+        }
+        for _, gOpt in ipairs(guildOpts) do
+            if filter == "" or gOpt.searchKey:find(filter, 1, true) then
+                local gRow = AcquirePickerRow()
+                gRow.entryName = "GUILD"
+                gRow.guildCategory = gOpt.cat
+                gRow.baseBg = THEME.rowSpecial
+                gRow:SetBackdropColor(gRow.baseBg[1], gRow.baseBg[2], gRow.baseBg[3], gRow.baseBg[4])
+                gRow:ClearAllPoints()
+                gRow:SetPoint("TOPLEFT", 0, -y)
+                gRow.label:SetText(gOpt.label)
+                gRow:Show()
+                y = y + 23
+            end
         end
     end
 
@@ -963,6 +1278,7 @@ function UI:RefreshRosterPicker(filter)
         if filter == "" or name:lower():find(filter, 1, true) then
             local row = AcquirePickerRow()
             row.entryName = name
+            row.guildCategory = nil
             row.baseBg = (idx % 2 == 0) and THEME.rowEven or THEME.rowOdd
             row:SetBackdropColor(row.baseBg[1], row.baseBg[2], row.baseBg[3], row.baseBg[4])
             row:ClearAllPoints()
@@ -1156,6 +1472,10 @@ function UI:CreateMainFrame()
                 qtyPickerFrame:Hide()
             elseif goldReqModalFrame and goldReqModalFrame:IsShown() then
                 goldReqModalFrame:Hide()
+            elseif guildExpenseModalFrame and guildExpenseModalFrame:IsShown() then
+                guildExpenseModalFrame:Hide()
+            elseif requestsHelpFrame and requestsHelpFrame:IsShown() then
+                requestsHelpFrame:Hide()
             elseif assignModalFrame and assignModalFrame:IsShown() then
                 assignModalFrame:Hide()
             elseif exportModalFrame and exportModalFrame:IsShown() then
@@ -1192,6 +1512,10 @@ function UI:CreateMainFrame()
                         qtyPickerFrame:Hide()
                     elseif goldReqModalFrame and goldReqModalFrame:IsShown() then
                         goldReqModalFrame:Hide()
+                    elseif guildExpenseModalFrame and guildExpenseModalFrame:IsShown() then
+                        guildExpenseModalFrame:Hide()
+                    elseif requestsHelpFrame and requestsHelpFrame:IsShown() then
+                        requestsHelpFrame:Hide()
                     elseif assignModalFrame and assignModalFrame:IsShown() then
                         assignModalFrame:Hide()
                     elseif exportModalFrame and exportModalFrame:IsShown() then
@@ -1232,13 +1556,31 @@ function UI:CreateMainFrame()
 
     local title = headerBar:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
     title:SetPoint("LEFT", 14, 0)
-    local ver = "v" .. (VM.GetAddonVersion and VM:GetAddonVersion() or "1.4.4")
+    local ver = "v" .. (VM.GetAddonVersion and VM:GetAddonVersion() or "1.4.3")
     title:SetText(string.format("|cff26a6f2VAULT|r |cffffffffMANAGER|r |cff8899aa%s|r", ver))
 
-    mainFrame.scanStatusBtn = CreateModernButton(headerBar, 110, 22, "Scan Bank", { 0.25, 0.55, 0.85, 1 })
+    -- Topbar Guild Sync status button (replaces duplicate Scan Bank button)
+    mainFrame.scanStatusBtn = CreateModernButton(headerBar, 114, 22, "Data Synced", THEME.accent)
     mainFrame.scanStatusBtn:SetPoint("LEFT", title, "RIGHT", 14, 0)
     mainFrame.scanStatusBtn:SetScript("OnClick", function()
-        VM.BankScanner:ForceScan()
+        if VM.Comms and VM.Comms.RequestManualSync then
+            local ok, waitSec = VM.Comms:RequestManualSync()
+            if ok then
+                VM:Print("Checked online guild members for newer vault data.")
+            elseif waitSec and waitSec > 0 then
+                VM:Print(string.format("Sync already checked. Please wait %ds.", waitSec))
+            end
+        end
+    end)
+    mainFrame.scanStatusBtn:HookScript("OnEnter", function(selfBtn)
+        if selfBtn.tooltipText and selfBtn.tooltipText ~= "" then
+            GameTooltip:SetOwner(selfBtn, "ANCHOR_BOTTOM")
+            GameTooltip:SetText(selfBtn.tooltipText, 1, 1, 1, 1, true)
+            GameTooltip:Show()
+        end
+    end)
+    mainFrame.scanStatusBtn:HookScript("OnLeave", function()
+        GameTooltip:Hide()
     end)
 
     local closeBtn = CreateModernButton(headerBar, 24, 24, "X", THEME.red)
@@ -1393,14 +1735,15 @@ function UI:BuildInventoryPanel(panel)
     local toggleAllBtn = CreateModernButton(filterStrip, 84, 22, "Expand All")
     toggleAllBtn:SetPoint("RIGHT", searchBox, "LEFT", -6, 0)
     toggleAllBtn:SetScript("OnClick", function()
+        local list = (panel.visibleCategories and #panel.visibleCategories > 0) and panel.visibleCategories or CAT_ORDER
         local anyCollapsed = false
-        for _, catName in ipairs(CAT_ORDER) do
+        for _, catName in ipairs(list) do
             if not STATE.vaultCategoryExpanded[catName] then
                 anyCollapsed = true
                 break
             end
         end
-        for _, catName in ipairs(CAT_ORDER) do
+        for _, catName in ipairs(list) do
             STATE.vaultCategoryExpanded[catName] = anyCollapsed
         end
         UI:RefreshInventory()
@@ -1461,7 +1804,6 @@ end
 local function GetItemCategory(item)
     if not item then return "Other" end
 
-    -- Fast-path: use cached category for all 6 valid categories (including Crafting Reagents & Other)
     if item.cachedCategory and VALID_CACHED_CATEGORIES[item.cachedCategory] then
         return item.cachedCategory
     end
@@ -1724,7 +2066,6 @@ function UI:RefreshInventory()
         end
     end
 
-    -- Show only purchased bank tabs & ensure selectedBankTab points to a purchased tab
     local firstPurchasedTab = nil
     local selectedIsValid = false
     local visibleSlot = 0
@@ -1753,11 +2094,13 @@ function UI:RefreshInventory()
         local btn = panel.bankTabButtons[i]
         if btn:IsShown() then
             if i == STATE.selectedBankTab then
+                btn.customBg = { 0.15, 0.28, 0.42, 1 }
                 btn:SetBackdropColor(0.15, 0.28, 0.42, 1)
-                btn:SetBackdropBorderColor(THEME.accent[1], THEME.accent[2], THEME.accent[3], 1)
+                SetButtonAccent(btn, THEME.accent)
             else
+                btn.customBg = nil
                 btn:SetBackdropColor(THEME.btnBg[1], THEME.btnBg[2], THEME.btnBg[3], 1)
-                btn:SetBackdropBorderColor(THEME.border[1], THEME.border[2], THEME.border[3], 1)
+                SetButtonAccent(btn, THEME.border)
             end
         end
     end
@@ -1767,9 +2110,9 @@ function UI:RefreshInventory()
         if rule.mode == "LOCKED" then
             panel.ruleBannerBtn.text:SetText("|cffff5555LOCKED TAB|r  |cff999999— Requests disabled|r")
         elseif rule.mode == "PERCENT" then
-            panel.ruleBannerBtn.text:SetText(string.format("|cffffcc33MEMBER PRICE: %d%% OF AH (rounded, min 1g)|r  |cff999999— Paid on delivery|r", rule.percent or 50))
+            panel.ruleBannerBtn.text:SetText(string.format("|cffffcc33MEMBER PRICE: %d%% OF AH (min 1g)|r  |cff999999— Remainder booked to GUILD|r", rule.percent or 50))
         else
-            panel.ruleBannerBtn.text:SetText("|cff44dd77FREE-FOR-ALL|r  |cff999999— Free withdrawal (AH value tracked in ledger)|r")
+            panel.ruleBannerBtn.text:SetText("|cff44dd77FREE-FOR-ALL|r  |cff999999— Free withdrawal (100% AH value tracked in ledger)|r")
         end
     end
 
@@ -1780,6 +2123,7 @@ function UI:RefreshInventory()
 
     local tabData = inv.tabs[STATE.selectedBankTab]
     if not tabData or tabData.isPurchased == false then
+        panel.visibleCategories = {}
         content:SetHeight(1)
         return
     end
@@ -1800,14 +2144,19 @@ function UI:RefreshInventory()
             table.insert(cats[cat], item)
         end
     end
+
+    panel.visibleCategories = {}
     for _, catName in ipairs(CAT_ORDER) do
         table.sort(cats[catName], function(a, b) return (a.name or "") < (b.name or "") end)
+        if #cats[catName] > 0 then
+            table.insert(panel.visibleCategories, catName)
+        end
     end
 
     if panel.toggleAllBtn then
         local anyCollapsed = false
-        for _, catName in ipairs(CAT_ORDER) do
-            if #cats[catName] > 0 and not STATE.vaultCategoryExpanded[catName] then
+        for _, catName in ipairs(panel.visibleCategories) do
+            if not STATE.vaultCategoryExpanded[catName] then
                 anyCollapsed = true
                 break
             end
@@ -1930,25 +2279,75 @@ end
 --------------------------------------------------------------------------------
 -- TAB 2: REQUESTS
 --------------------------------------------------------------------------------
+local REQ_SECTIONS = {
+    { key = "PENDING", title = "Pending Approval", color = "|cffffcc33" },
+    { key = "APPROVED", title = "Approved — Ready for Bank Withdrawal", color = "|cff26a6f2" },
+    { key = "PREPARED", title = "Prepared — Withdrawn & Awaiting Delivery", color = "|cff44dd77" },
+    { key = "HISTORY", title = "History — Fulfilled, Rejected & Written Off", color = "|cff999999" },
+}
+
 function UI:BuildRequestsPanel(panel)
     local topBar = CreateFrame("Frame", nil, panel)
     topBar:SetHeight(30)
     topBar:SetPoint("TOPLEFT", 10, -8)
     topBar:SetPoint("TOPRIGHT", -10, -8)
 
-    local reqGoldBtn = CreateModernButton(topBar, 120, 24, "+ Request Gold", { 0.90, 0.72, 0.20, 1 })
+    local reqGoldBtn = CreateModernButton(topBar, 114, 24, "+ Request Gold", THEME.gold)
     reqGoldBtn:SetPoint("LEFT", 0, 0)
     reqGoldBtn:SetScript("OnClick", function()
         UI:OpenGoldRequestModal()
     end)
     panel.reqGoldBtn = reqGoldBtn
 
+    local helpBtn = CreateModernButton(topBar, 60, 24, "? Help", THEME.accent)
+    helpBtn:SetPoint("LEFT", reqGoldBtn, "RIGHT", 6, 0)
+    helpBtn:SetScript("OnClick", function()
+        UI:ToggleRequestsHelpModal()
+    end)
+    helpBtn:HookScript("OnEnter", function(selfBtn)
+        GameTooltip:SetOwner(selfBtn, "ANCHOR_BOTTOM")
+        GameTooltip:SetText("Open quick reference for request statuses and officer buttons")
+        GameTooltip:Show()
+    end)
+    helpBtn:HookScript("OnLeave", function() GameTooltip:Hide() end)
+    panel.helpBtn = helpBtn
+
+    local toggleAllBtn = CreateModernButton(topBar, 84, 24, "Expand All")
+    toggleAllBtn:SetPoint("RIGHT", 0, 0)
+    toggleAllBtn:SetScript("OnClick", function()
+        local keys = (panel.visibleSections and #panel.visibleSections > 0) and panel.visibleSections or { "PENDING", "APPROVED", "PREPARED", "HISTORY" }
+        local anyCollapsed = false
+        for _, k in ipairs(keys) do
+            if not STATE.requestSectionExpanded[k] then
+                anyCollapsed = true
+                break
+            end
+        end
+        for _, k in ipairs(keys) do
+            STATE.requestSectionExpanded[k] = anyCollapsed
+        end
+        UI:RefreshRequests()
+    end)
+    panel.toggleAllBtn = toggleAllBtn
+
     local summaryText = topBar:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    summaryText:SetPoint("RIGHT", 0, 0)
+    summaryText:SetPoint("RIGHT", toggleAllBtn, "LEFT", -10, 0)
+    summaryText:SetPoint("LEFT", helpBtn, "RIGHT", 8, 0)
     summaryText:SetJustifyH("RIGHT")
     panel.summaryText = summaryText
 
     panel.scroll = CreateScrollArea(panel, -42, 8)
+end
+
+local function IsSameOfficerName(nameA, nameB)
+    local a = VM:NormalizeName(nameA)
+    local b = VM:NormalizeName(nameB)
+    if a == "" or b == "" then return false end
+    local la, lb = a:lower(), b:lower()
+    if la == lb then return true end
+    if not la:find("%s") and lb:sub(1, #la + 1) == (la .. " ") then return true end
+    if not lb:find("%s") and la:sub(1, #lb + 1) == (lb .. " ") then return true end
+    return false
 end
 
 local function CreateRequestRow(content)
@@ -1967,14 +2366,31 @@ local function CreateRequestRow(content)
     row.meta:SetWidth(472)
     row.meta:SetJustifyH("LEFT")
 
-    row.btn1 = CreateModernButton(row, 76, 22, "", THEME.green)
+    -- Right-aligned 3-column action buttons (no gap on 2-button rows)
+    row.btn1 = CreateModernButton(row, 76, 22, "", THEME.accent)
     row.btn1:SetPoint("LEFT", 490, 0)
 
-    row.btn2 = CreateModernButton(row, 76, 22, "", THEME.accent)
+    row.btn2 = CreateModernButton(row, 76, 22, "", THEME.green)
     row.btn2:SetPoint("LEFT", 572, 0)
 
     row.btn3 = CreateModernButton(row, 70, 22, "", THEME.red)
     row.btn3:SetPoint("LEFT", 654, 0)
+
+    local function AttachBtnTooltip(btn)
+        btn:HookScript("OnEnter", function(selfBtn)
+            if selfBtn.tooltipText and selfBtn.tooltipText ~= "" then
+                GameTooltip:SetOwner(selfBtn, "ANCHOR_TOP")
+                GameTooltip:SetText(selfBtn.tooltipText, 1, 1, 1, 1, true)
+                GameTooltip:Show()
+            end
+        end)
+        btn:HookScript("OnLeave", function()
+            GameTooltip:Hide()
+        end)
+    end
+    AttachBtnTooltip(row.btn1)
+    AttachBtnTooltip(row.btn2)
+    AttachBtnTooltip(row.btn3)
 
     row:SetScript("OnEnter", function(selfRow)
         selfRow:SetBackdropColor(THEME.rowHover[1], THEME.rowHover[2], THEME.rowHover[3], 1)
@@ -1989,36 +2405,40 @@ local function CreateRequestRow(content)
         HideItemTooltip()
     end)
 
-    row.btn1:SetScript("OnClick", function()
-        local r = row.reqData
-        if not r then return end
-        if r.status == "PENDING" then
-            VM.Fulfillment:ApproveRequest(r.id)
-        elseif r.status == "APPROVED" then
-            VM.Fulfillment.activeOrder = r
-            if r.isGoldRequest then
-                VM:Print(string.format("Prepared gold request (%s) for |cffffff00%s|r. Open Mail or Trade to auto-fill!",
-                    VM:FormatMoney(r.goldAmount or r.quotedTotalPrice or 0), r.requester))
+    local function ExecuteAction(actionKey, req)
+        if not req or not actionKey then return end
+        if actionKey == "APPROVE" then
+            VM.Fulfillment:ApproveRequest(req.id)
+        elseif actionKey == "REJECT" or actionKey == "CANCEL" then
+            VM.Fulfillment:RejectRequest(req.id)
+        elseif actionKey == "PREPARE" then
+            VM.Fulfillment:PrepareRequest(req.id)
+        elseif actionKey == "COMPLETE" then
+            VM.Fulfillment:CompleteRequest(req.id)
+        elseif actionKey == "RELEASE" then
+            VM.Fulfillment:ReleasePreparedRequest(req.id)
+        elseif actionKey == "WRITEOFF" then
+            local desc
+            if req.isGoldRequest then
+                desc = string.format("Gold Request: %s (for %s)",
+                    VM:FormatMoneyPlain(req.goldAmount or req.quotedTotalPrice or 0), req.requester or "?")
             else
-                VM:Print(string.format("Prepared %dx %s for |cffffff00%s|r. Open Mail or Trade to auto-fill!",
-                    r.count or 1, r.itemLink or r.itemName or "Item", r.requester))
+                desc = string.format("%dx %s (for %s)",
+                    req.count or 1, req.itemName or "Item", req.requester or "?")
+            end
+            local departed = VM:NormalizeName(req.preparedBy or "?")
+            local dlg = StaticPopup_Show and StaticPopup_Show("VAULTMANAGER_WRITEOFF", desc, departed)
+            if dlg then
+                dlg.data = { reqID = req.id }
+            else
+                VM.Fulfillment:WriteOffRequest(req.id)
             end
         end
-    end)
+    end
 
-    row.btn2:SetScript("OnClick", function()
-        local r = row.reqData
-        if r and r.status == "APPROVED" then
-            VM.Fulfillment:CompleteRequest(r.id)
-        end
-    end)
-
-    row.btn3:SetScript("OnClick", function()
-        local r = row.reqData
-        if r and (r.status == "PENDING" or r.status == "APPROVED") then
-            VM.Fulfillment:RejectRequest(r.id)
-        end
-    end)
+    row.btn1:SetScript("OnClick", function(selfBtn) ExecuteAction(selfBtn.actionKey, row.reqData) end)
+    row.btn2:SetScript("OnClick", function(selfBtn) ExecuteAction(selfBtn.actionKey, row.reqData) end)
+    row.btn3:SetScript("OnClick", function(selfBtn) ExecuteAction(selfBtn.actionKey, row.reqData) end)
 
     return row
 end
@@ -2027,6 +2447,7 @@ local METHOD_LABELS = {
     BANK = " (Bank)",
     MAIL = " (Mail)",
     TRADE = " (Trade)",
+    WRITEOFF = " (Write-Off)",
 }
 
 function UI:RefreshRequests()
@@ -2036,6 +2457,7 @@ function UI:RefreshRequests()
     local content = panel.scroll.content
     if not content then return end
 
+    if VM.UpdateRosterCache then VM:UpdateRosterCache() end
     self:UpdateRequestsTabBadge()
 
     for _, r in ipairs(panel.scroll.rows) do r:Hide() end
@@ -2045,6 +2467,7 @@ function UI:RefreshRequests()
     local buckets = {
         PENDING = {},
         APPROVED = {},
+        PREPARED = {},
         HISTORY = {},
     }
 
@@ -2053,6 +2476,8 @@ function UI:RefreshRequests()
             table.insert(buckets.PENDING, req)
         elseif req.status == "APPROVED" then
             table.insert(buckets.APPROVED, req)
+        elseif req.status == "PREPARED" then
+            table.insert(buckets.PREPARED, req)
         else
             table.insert(buckets.HISTORY, req)
         end
@@ -2063,33 +2488,51 @@ function UI:RefreshRequests()
     end
     table.sort(buckets.PENDING, SortNewest)
     table.sort(buckets.APPROVED, SortNewest)
+    table.sort(buckets.PREPARED, function(a, b)
+        return (a.preparedAt or a.createdAt or 0) > (b.preparedAt or b.createdAt or 0)
+    end)
     table.sort(buckets.HISTORY, function(a, b)
         return (a.completedAt or a.updatedAt or a.createdAt or 0) > (b.completedAt or b.updatedAt or b.createdAt or 0)
     end)
 
     if panel.summaryText then
-        panel.summaryText:SetText(string.format("|cffffcc33Pending: %d|r  |  |cff26a6f2Approved: %d|r  |  |cff888888History: %d|r",
-            #buckets.PENDING, #buckets.APPROVED, #buckets.HISTORY))
+        panel.summaryText:SetText(string.format("|cffffcc33Pending: %d|r  |  |cff26a6f2Approved: %d|r  |  |cff44dd77Prepared: %d|r  |  |cff888888History: %d|r",
+            #buckets.PENDING, #buckets.APPROVED, #buckets.PREPARED, #buckets.HISTORY))
     end
 
-    local sections = {
-        { key = "PENDING", title = "Pending Approval", color = "|cffffcc33" },
-        { key = "APPROVED", title = "Approved — Ready for Delivery", color = "|cff26a6f2" },
-        { key = "HISTORY", title = "History — Fulfilled & Rejected", color = "|cff999999" },
-    }
+    panel.visibleSections = {}
+    for _, sec in ipairs(REQ_SECTIONS) do
+        if #buckets[sec.key] > 0 then
+            table.insert(panel.visibleSections, sec.key)
+        end
+    end
+
+    if panel.toggleAllBtn then
+        local anyCollapsed = false
+        for _, k in ipairs(panel.visibleSections) do
+            if not STATE.requestSectionExpanded[k] then
+                anyCollapsed = true
+                break
+            end
+        end
+        panel.toggleAllBtn:SetText(anyCollapsed and "Expand All" or "Collapse All")
+    end
 
     local statusColors = {
         PENDING = "|cffffcc33PENDING|r",
         APPROVED = "|cff26a6f2APPROVED|r",
+        PREPARED = "|cff44dd77PREPARED|r",
         FULFILLED = "|cff44dd77FULFILLED|r",
         REJECTED = "|cffff5555REJECTED|r",
+        WRITTEN_OFF = "|cffff5555WRITTEN OFF|r",
     }
 
     local isOff = VM:IsOfficer()
+    local me = VM:GetPlayerName()
     local y = 0
     local rowIdx = 0
 
-    for _, sec in ipairs(sections) do
+    for _, sec in ipairs(REQ_SECTIONS) do
         local list = buckets[sec.key]
         if #list > 0 then
             local isExpanded = STATE.requestSectionExpanded[sec.key] == true
@@ -2131,15 +2574,19 @@ function UI:RefreshRequests()
                     row:SetPoint("TOPLEFT", 4, -y)
                     row:Show()
 
+                    local prepLeftGuild = (req.status == "PREPARED" and req.preparedBy and req.preparedBy ~= "" and VM:IsLegacyMember(req.preparedBy))
+
                     -- Line 1: Main info
                     if req.isGoldRequest then
                         local gAmt = tonumber(req.goldAmount or req.quotedTotalPrice or req.quotedUnitPrice) or 0
                         local reasonTxt = (req.reason and req.reason ~= "") and (" — " .. req.reason) or ""
-                        row.info:SetText(string.format("[%s]  %s  —  |cffffd700Gold Request:|r %s|cffcccccc%s|r",
+                        local leftTag = prepLeftGuild and " |cffff4444[OFFICER LEFT]|r" or ""
+                        row.info:SetText(string.format("[%s]  %s  —  |cffffd700Gold Request:|r %s|cffcccccc%s|r%s",
                             statusColors[req.status] or req.status,
                             VM:ColorizeName(req.requester),
                             VM:FormatMoney(gAmt),
-                            reasonTxt))
+                            reasonTxt,
+                            leftTag))
                     else
                         local liveUnit = VM:GetEffectiveLivePrice(req.itemID, req.itemLink, req.priceAtRequest or req.quotedUnitPrice)
                         local reqRule = { mode = req.priceMode or "FREE", percent = req.pricePercent or 50 }
@@ -2155,12 +2602,14 @@ function UI:RefreshRequests()
                             priceNote = string.format("  |cffaaaaaa(%s)|r", VM:FormatMoney(reqTotal))
                         end
 
-                        row.info:SetText(string.format("[%s]  %s  —  %dx %s%s",
+                        local leftTag = prepLeftGuild and " |cffff4444[OFFICER LEFT]|r" or ""
+                        row.info:SetText(string.format("[%s]  %s  —  %dx %s%s%s",
                             statusColors[req.status] or req.status,
                             VM:ColorizeName(req.requester),
                             req.count or 1,
                             req.itemLink or req.itemName or "Item",
-                            priceNote))
+                            priceNote,
+                            leftTag))
                     end
 
                     -- Line 2: Timestamps & Officer metadata
@@ -2177,6 +2626,10 @@ function UI:RefreshRequests()
                     elseif req.approvedBy and req.approvedBy ~= "" then
                         table.insert(metaParts, "Approved by: " .. VM:ColorizeName(req.approvedBy))
                     end
+                    if req.preparedBy and req.preparedBy ~= "" and (req.status == "PREPARED" or req.status == "WRITTEN_OFF") then
+                        local prepTime = (req.preparedAt and req.preparedAt > 0) and (" " .. date("%d/%m %H:%M", req.preparedAt)) or ""
+                        table.insert(metaParts, string.format("Withdrawn by: %s%s", VM:ColorizeName(req.preparedBy, prepLeftGuild and "ff6666" or nil), prepTime))
+                    end
                     if req.status == "FULFILLED" then
                         local hasCompTime = (req.completedAt and req.completedAt > 0)
                         local hasCompBy = (req.fulfilledBy and req.fulfilledBy ~= "")
@@ -2191,37 +2644,98 @@ function UI:RefreshRequests()
                             end
                             table.insert(metaParts, compStr .. methodTag)
                         end
+                    elseif req.status == "WRITTEN_OFF" then
+                        local woTime = (req.completedAt and req.completedAt > 0) and (" " .. date("%d/%m %H:%M", req.completedAt)) or ""
+                        local woBy = (req.fulfilledBy and req.fulfilledBy ~= "") and (" by " .. VM:ColorizeName(req.fulfilledBy)) or ""
+                        table.insert(metaParts, "Written off" .. woTime .. woBy)
                     end
                     row.meta:SetText("|cff999999" .. table.concat(metaParts, "  |  ") .. "|r")
 
-                    -- Action buttons (Officers only)
+                    -- Right-aligned action buttons (Officers only)
                     row.btn1:Hide()
                     row.btn2:Hide()
                     row.btn3:Hide()
+                    row.btn1.actionKey = nil
+                    row.btn2.actionKey = nil
+                    row.btn3.actionKey = nil
+                    row.btn1.tooltipText = nil
+                    row.btn2.tooltipText = nil
+                    row.btn3.tooltipText = nil
+
+                    local textWidth = 710
 
                     if isOff then
                         if req.status == "PENDING" then
-                            SetButtonAccent(row.btn1, THEME.green)
-                            row.btn1:SetText("Approve")
-                            row.btn1:Show()
+                            SetButtonAccent(row.btn2, THEME.green)
+                            row.btn2:SetText("Approve")
+                            row.btn2.actionKey = "APPROVE"
+                            row.btn2.tooltipText = "Approve request and reserve stock in the Vault."
+                            row.btn2:Show()
 
                             SetButtonAccent(row.btn3, THEME.red)
                             row.btn3:SetText("Reject")
+                            row.btn3.actionKey = "REJECT"
+                            row.btn3.tooltipText = "Decline this pending request without logging to the Ledger."
                             row.btn3:Show()
+                            textWidth = 554
                         elseif req.status == "APPROVED" then
                             SetButtonAccent(row.btn1, THEME.accent)
                             row.btn1:SetText("Prepare")
+                            row.btn1.actionKey = "PREPARE"
+                            row.btn1.tooltipText = "Withdraw items/gold from the open Guild Bank and assign delivery to you."
                             row.btn1:Show()
 
                             SetButtonAccent(row.btn2, THEME.green)
                             row.btn2:SetText("Complete")
+                            row.btn2.actionKey = "COMPLETE"
+                            row.btn2.tooltipText = "Mark delivered manually and log to the Ledger."
                             row.btn2:Show()
 
                             SetButtonAccent(row.btn3, THEME.red)
                             row.btn3:SetText("Cancel")
+                            row.btn3.actionKey = "CANCEL"
+                            row.btn3.tooltipText = "Cancel this approved request and release reserved stock."
                             row.btn3:Show()
+                            textWidth = 472
+                        elseif req.status == "PREPARED" then
+                            if prepLeftGuild then
+                                SetButtonAccent(row.btn2, THEME.red)
+                                row.btn2:SetText("Write Off")
+                                row.btn2.actionKey = "WRITEOFF"
+                                row.btn2.tooltipText = "Officer left the guild. Write off and charge 100% value to the departed officer."
+                                row.btn2:Show()
+
+                                SetButtonAccent(row.btn3, THEME.border)
+                                row.btn3:SetText("Release")
+                                row.btn3.actionKey = "RELEASE"
+                                row.btn3.tooltipText = "Return this order to APPROVED (if items were returned to the bank)."
+                                row.btn3:Show()
+                                textWidth = 554
+                            elseif IsSameOfficerName(req.preparedBy, me) then
+                                SetButtonAccent(row.btn1, THEME.green)
+                                row.btn1:SetText("Complete")
+                                row.btn1.actionKey = "COMPLETE"
+                                row.btn1.tooltipText = "Mark delivered manually and log to the Ledger."
+                                row.btn1:Show()
+
+                                SetButtonAccent(row.btn2, THEME.border)
+                                row.btn2:SetText("Release")
+                                row.btn2.actionKey = "RELEASE"
+                                row.btn2.tooltipText = "Return order to APPROVED if you put the items/gold back in the bank."
+                                row.btn2:Show()
+
+                                SetButtonAccent(row.btn3, THEME.red)
+                                row.btn3:SetText("Cancel")
+                                row.btn3.actionKey = "CANCEL"
+                                row.btn3.tooltipText = "Cancel this prepared request."
+                                row.btn3:Show()
+                                textWidth = 472
+                            end
                         end
                     end
+
+                    row.info:SetWidth(textWidth)
+                    row.meta:SetWidth(textWidth)
 
                     y = y + 46
                 end
@@ -2239,17 +2753,17 @@ end
 function UI:BuildLedgerPanel(panel)
     local uiPrefs = GetUIPrefs()
 
-    -- Row 1: Search, Export & Officer Quick Gold Log
+    -- Row 1: Search, Export & Officer Quick Tools
     local topBar = CreateFrame("Frame", nil, panel)
     topBar:SetHeight(30)
     topBar:SetPoint("TOPLEFT", 10, -6)
     topBar:SetPoint("TOPRIGHT", -10, -6)
 
-    local searchBox = CreateModernEditBox(topBar, 190, 22, false)
+    local searchBox = CreateModernEditBox(topBar, 165, 22, false)
     searchBox:SetPoint("LEFT", 0, 0)
     searchBox.placeholder = searchBox:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
     searchBox.placeholder:SetPoint("LEFT", 6, 0)
-    searchBox.placeholder:SetText("Filter member, item or note...")
+    searchBox.placeholder:SetText("Filter member, item or tag...")
 
     local debouncedLedgerSearch = CreateDebouncer(0.15, function()
         if mainFrame and mainFrame:IsShown() and STATE.currentTab == 3 then
@@ -2265,29 +2779,47 @@ function UI:BuildLedgerPanel(panel)
     end)
     panel.searchBox = searchBox
 
-    local exportBtn = CreateModernButton(topBar, 70, 22, "Export", THEME.accent)
-    exportBtn:SetPoint("LEFT", searchBox, "RIGHT", 8, 0)
+    local exportBtn = CreateModernButton(topBar, 58, 22, "Export", THEME.accent)
+    exportBtn:SetPoint("LEFT", searchBox, "RIGHT", 6, 0)
     exportBtn:SetScript("OnClick", function()
         UI:OpenExportModal()
     end)
     panel.exportBtn = exportBtn
 
-    -- Officer manual gold container (shown/hidden dynamically in RefreshLedger)
+    -- Officer tools container (shown/hidden dynamically in RefreshLedger)
     local officerBar = CreateFrame("Frame", nil, topBar)
-    officerBar:SetSize(272, 24)
+    officerBar:SetSize(344, 24)
     officerBar:SetPoint("RIGHT", 0, 0)
 
-    local memberBtn = CreateModernDropdown(officerBar, 128, 22, "Donor...")
-    memberBtn:SetPoint("LEFT", 0, 0)
+    local expenseBtn = CreateModernButton(officerBar, 76, 22, "+ Expense", THEME.gold)
+    expenseBtn:SetPoint("LEFT", 0, 0)
+    expenseBtn:SetScript("OnClick", function()
+        UI:OpenGuildExpenseModal()
+    end)
+    expenseBtn:HookScript("OnEnter", function(selfBtn)
+        GameTooltip:SetOwner(selfBtn, "ANCHOR_TOP")
+        GameTooltip:SetText("Log a guild expense or write-off under GUILD (Raid / Member / Tabs)")
+        GameTooltip:Show()
+    end)
+    expenseBtn:HookScript("OnLeave", function() GameTooltip:Hide() end)
+
+    local memberBtn = CreateModernDropdown(officerBar, 126, 22, "Donor...")
+    memberBtn:SetPoint("LEFT", expenseBtn, "RIGHT", 6, 0)
     memberBtn:SetScript("OnClick", function(btn)
-        UI:OpenRosterPicker(btn, false, function(chosen)
+        UI:OpenRosterPicker(btn, false, function(chosen, guildCat)
             STATE.manualLedgerDonor = chosen
-            btn:SetText(chosen == "GUILD" and "|cff26a6f2[Guild]|r" or chosen)
+            STATE.manualLedgerGuildCat = guildCat
+            if chosen == "GUILD" then
+                local catLbl = (VM.Ledger and VM.Ledger:GetGuildCategoryLabel(guildCat)) or "Member"
+                btn:SetText("|cff26a6f2[Guild-" .. catLbl .. "]|r")
+            else
+                btn:SetText(chosen)
+            end
         end, true)
     end)
     panel.donorBtn = memberBtn
 
-    local goldBox = CreateModernEditBox(officerBar, 52, 22, true)
+    local goldBox = CreateModernEditBox(officerBar, 48, 22, true)
     goldBox:SetPoint("LEFT", memberBtn, "RIGHT", 4, 0)
     goldBox.placeholder = goldBox:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
     goldBox.placeholder:SetPoint("LEFT", 6, 0)
@@ -2297,16 +2829,17 @@ function UI:BuildLedgerPanel(panel)
     end)
     panel.goldBox = goldBox
 
-    local addGoldBtn = CreateModernButton(officerBar, 82, 22, "+ Log Gold", THEME.green)
+    local addGoldBtn = CreateModernButton(officerBar, 80, 22, "+ Log Gold", THEME.green)
     addGoldBtn:SetPoint("LEFT", goldBox, "RIGHT", 4, 0)
     addGoldBtn:SetScript("OnClick", function()
         if not VM:IsOfficer() then return end
         local g = tonumber(goldBox:GetText()) or 0
         if STATE.manualLedgerDonor ~= "" and g > 0 then
-            VM.Ledger:RecordGoldDeposit(STATE.manualLedgerDonor, g * 10000, "MANUAL_GOLD")
+            VM.Ledger:RecordGoldDeposit(STATE.manualLedgerDonor, g * 10000, "MANUAL_GOLD", nil, nil, nil, nil, STATE.manualLedgerGuildCat)
             VM:Print(string.format("Logged %dg donated by |cffffff00%s|r.", g, STATE.manualLedgerDonor))
             goldBox:SetText("")
             STATE.manualLedgerDonor = ""
+            STATE.manualLedgerGuildCat = nil
             memberBtn:SetText("Donor...")
             UI:RefreshLedger()
         end
@@ -2391,7 +2924,6 @@ local function CreateLedgerRow(content)
     row.expandBtn = CreateModernButton(row, 20, 20, "+")
     row.expandBtn:SetPoint("LEFT", 6, 0)
 
-    -- Header columns (fixed width for vertical scanning)
     row.nameText = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     row.nameText:SetPoint("LEFT", 32, 0)
     row.nameText:SetWidth(295)
@@ -2407,7 +2939,6 @@ local function CreateLedgerRow(content)
     row.receivedText:SetWidth(192)
     row.receivedText:SetJustifyH("LEFT")
 
-    -- Sub-row single text line
     row.subText = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     row.subText:SetPoint("LEFT", 36, 0)
     row.subText:SetWidth(545)
@@ -2444,21 +2975,21 @@ local function CreateLedgerRow(content)
 
     row.actionBtn:SetScript("OnClick", function(selfBtn)
         local tx = row.txData
-        if not tx then return end
+        if not tx or tx.isDerived then return end
         if row.actionMode == "ASSIGN_UNATTRIBUTED" then
-            UI:OpenRosterPicker(selfBtn, false, function(chosenName)
-                VM.Ledger:AssignUnattributed(tx.id, chosenName)
+            UI:OpenRosterPicker(selfBtn, false, function(chosenName, guildCat)
+                VM.Ledger:AssignUnattributed(tx.id, chosenName, guildCat)
             end, true)
         elseif row.actionMode == "REASSIGN" then
-            UI:OpenRosterPicker(selfBtn, false, function(chosenName)
-                VM.Ledger:ReassignTransaction(tx.id, chosenName)
+            UI:OpenRosterPicker(selfBtn, false, function(chosenName, guildCat)
+                VM.Ledger:ReassignTransaction(tx.id, chosenName, guildCat)
             end, true)
         end
     end)
 
     row.deleteBtn:SetScript("OnClick", function()
         local tx = row.txData
-        if tx then
+        if tx and not tx.isDerived then
             VM.Ledger:DeleteTransaction(tx.id)
         end
     end)
@@ -2466,15 +2997,26 @@ local function CreateLedgerRow(content)
     return row
 end
 
+local function LedgerTxMatchesSearch(tx, q)
+    if q == "" then return true end
+    if (tx.itemName and tx.itemName:lower():find(q, 1, true))
+        or (tx.player and tx.player:lower():find(q, 1, true))
+        or (tx.rawSender and tx.rawSender:lower():find(q, 1, true))
+        or (tx.note and tx.note:lower():find(q, 1, true))
+        or (tx.guildCategory and tx.guildCategory:lower():find(q, 1, true))
+        or (tx.derivedKind and tx.derivedKind:lower():find(q, 1, true))
+        or (tx.source == "WRITE_OFF" and ("write-off writeoff"):find(q, 1, true)) then
+        return true
+    end
+    return false
+end
+
 local function LedgerGroupMatchesSearch(grp, q)
     if q == "" then return true end
     if grp.mainName and grp.mainName:lower():find(q, 1, true) then return true end
     if grp.mainName == "GUILD" and ("guild bank guild operations"):find(q, 1, true) then return true end
     for _, tx in ipairs(grp.transactions or {}) do
-        if (tx.itemName and tx.itemName:lower():find(q, 1, true))
-            or (tx.player and tx.player:lower():find(q, 1, true))
-            or (tx.rawSender and tx.rawSender:lower():find(q, 1, true))
-            or (tx.note and tx.note:lower():find(q, 1, true)) then
+        if LedgerTxMatchesSearch(tx, q) then
             return true
         end
     end
@@ -2487,6 +3029,8 @@ function UI:RefreshLedger()
     if not panel or not panel.scroll then return end
     local content = panel.scroll.content
     if not content then return end
+
+    if VM.UpdateRosterCache then VM:UpdateRosterCache() end
 
     local isOff = VM:IsOfficer()
     if panel.officerBar then
@@ -2602,20 +3146,12 @@ function UI:RefreshLedger()
                 or (grp.mainName == "GUILD" and ("guild bank guild operations"):find(q, 1, true))
 
             for _, tx in ipairs(grp.transactions) do
-                local showTx = true
-                if not headerMatchesQuery then
-                    showTx = (tx.itemName and tx.itemName:lower():find(q, 1, true))
-                        or (tx.player and tx.player:lower():find(q, 1, true))
-                        or (tx.rawSender and tx.rawSender:lower():find(q, 1, true))
-                        or (tx.note and tx.note:lower():find(q, 1, true))
-                        or false
-                end
-
-                if showTx then
+                if headerMatchesQuery or LedgerTxMatchesSearch(tx, q) then
                     local sub = AcquireRow()
                     local subBg = THEME.rowOdd
                     local isSummary = (tx.type == "SUMMARY" or tx.itemLink == "SUMMARY")
-                    local isGold = (not isSummary) and (tx.itemID == 0 or tx.itemLink == "GOLD")
+                    local isDerived = (tx.isDerived == true)
+                    local isGold = (not isSummary) and (not isDerived) and (tx.itemID == 0 or tx.itemLink == "GOLD")
                     local isItemTx = (not isSummary) and (not isGold)
 
                     sub.baseBg = subBg
@@ -2640,6 +3176,10 @@ function UI:RefreshLedger()
                     local dir
                     if isSummary then
                         dir = "|cff8899aaSUMMARY|r"
+                    elseif isDerived then
+                        dir = (tx.derivedKind == "SURPLUS") and "|cff44dd77SURPLUS|r" or "|cff26a6f2SUBSIDY|r"
+                    elseif tx.source == "WRITE_OFF" then
+                        dir = "|cffff4444WRITE-OFF|r"
                     elseif tx.type == "OUT" then
                         dir = isGold and "|cffff6666GOLD OUT|r" or "|cffff6666OUT|r"
                     else
@@ -2651,16 +3191,25 @@ function UI:RefreshLedger()
                     local charTag = (tx.player ~= grp.mainName and tx.player ~= "UNATTRIBUTED" and tx.player ~= "GUILD")
                         and (" (" .. VM:ColorizeName(tx.player, grp.isLegacy and "808080" or nil) .. ")") or ""
 
+                    local catLabel = (grp.mainName == "GUILD" and tx.guildCategory and VM.Ledger.GetGuildCategoryLabel)
+                        and VM.Ledger:GetGuildCategoryLabel(tx.guildCategory) or nil
+                    local catTag = catLabel and string.format(" |cff26a6f2[%s]|r", catLabel) or ""
+
                     local rawTag = ""
                     if tx.rawSender and tx.rawSender ~= "" and tx.rawSender ~= tx.player and tx.rawSender ~= "UNATTRIBUTED" then
-                        local verb = (tx.type == "OUT") and "by" or "from"
+                        local verb
+                        if isDerived then
+                            verb = (tx.derivedKind == "SURPLUS") and "from" or "for"
+                        else
+                            verb = (tx.type == "OUT") and "by" or "from"
+                        end
                         rawTag = string.format(" |cffaaaaaa(%s %s)|r", verb, VM:ColorizeName(tx.rawSender))
                     end
 
                     local noteTag = (tx.note and tx.note ~= "") and (" |cffcccccc— " .. tx.note .. "|r") or ""
 
                     local ruleTag = ""
-                    if tx.type == "OUT" and not isGold and not isSummary then
+                    if tx.type == "OUT" and not isGold and not isSummary and not isDerived and tx.source ~= "WRITE_OFF" then
                         if tx.isFFA or tx.priceMode == "FREE" then
                             ruleTag = " |cff44dd77(FFA)|r"
                         elseif tx.priceMode == "PERCENT" or (tx.chargedUnitPrice ~= nil and tx.unitPriceAtTime and tx.chargedUnitPrice < tx.unitPriceAtTime and tx.chargedUnitPrice > 0) then
@@ -2673,21 +3222,25 @@ function UI:RefreshLedger()
                         sub.subText:SetText(string.format("|cff999999%s|r [%s] %s — In: %s | Out: %s",
                             dateStr, dir, tx.itemName or "Monthly Summary",
                             VM:FormatMoney(tx.contributed or 0), VM:FormatMoney(tx.received or 0)))
+                    elseif isDerived then
+                        sub.subText:SetText(string.format("|cff999999%s|r [%s]%s%s: %dx %s — %s%s",
+                            dateStr, dir, catTag, rawTag, tx.count or 1, tx.itemLink or tx.itemName or "Item", VM:FormatMoney(val), noteTag))
                     elseif isGold then
-                        sub.subText:SetText(string.format("|cff999999%s|r [%s]%s%s: %s%s",
-                            dateStr, dir, charTag, rawTag, VM:FormatMoney(val), noteTag))
+                        sub.subText:SetText(string.format("|cff999999%s|r [%s]%s%s%s: %s%s",
+                            dateStr, dir, catTag, charTag, rawTag, VM:FormatMoney(val), noteTag))
                     elseif grp.isLegacy then
-                        sub.subText:SetText(string.format("|cff808080%s [%s]%s: %dx %s — %s%s|r",
-                            dateStr, tx.type == "OUT" and "OUT" or "IN", charTag, tx.count or 1, tx.itemName or "Item", VM:FormatMoney(val), ruleTag))
+                        sub.subText:SetText(string.format("|cff808080%s [%s]%s: %dx %s — %s%s%s|r",
+                            dateStr, tx.source == "WRITE_OFF" and "WRITE-OFF" or (tx.type == "OUT" and "OUT" or "IN"),
+                            charTag, tx.count or 1, tx.itemName or "Item", VM:FormatMoney(val), ruleTag, noteTag))
                     else
-                        sub.subText:SetText(string.format("|cff999999%s|r [%s]%s%s: %dx %s — %s%s%s",
-                            dateStr, dir, charTag, rawTag, tx.count or 1, tx.itemLink or tx.itemName or "Item", VM:FormatMoney(val), ruleTag, noteTag))
+                        sub.subText:SetText(string.format("|cff999999%s|r [%s]%s%s%s: %dx %s — %s%s%s",
+                            dateStr, dir, catTag, charTag, rawTag, tx.count or 1, tx.itemLink or tx.itemName or "Item", VM:FormatMoney(val), ruleTag, noteTag))
                     end
 
-                    local showDelete = isOff and (tx.isManual == true)
+                    local showDelete = isOff and (tx.isManual == true) and (not isDerived)
                     local showAction = false
 
-                    if isOff and not isSummary then
+                    if isOff and not isSummary and not isDerived then
                         if grp.mainName == "UNATTRIBUTED" then
                             sub.actionMode = "ASSIGN_UNATTRIBUTED"
                             sub.actionBtn:SetText("Assign Member")
@@ -2721,7 +3274,6 @@ function UI:RefreshLedger()
         RenderGroup(grp)
     end
 
-    -- Collapsible Legacy Members section at bottom
     if #legacyGroups > 0 then
         local legExpanded = (q ~= "") or STATE.ledgerLegacyExpanded
         local legHdr = panel.scroll.legacyHeader
@@ -2790,18 +3342,22 @@ function UI:BuildRankingPanel(panel)
     local function UpdateBasisButtons()
         local mode = GetUIPrefs().rankingPriceMode or "live"
         if mode == "locked" then
+            histBtn.customBg = { 0.15, 0.28, 0.42, 1 }
             histBtn:SetBackdropColor(0.15, 0.28, 0.42, 1)
-            histBtn:SetBackdropBorderColor(THEME.accent[1], THEME.accent[2], THEME.accent[3], 1)
+            SetButtonAccent(histBtn, THEME.accent)
             histBtn.label:SetTextColor(1, 0.82, 0)
+            liveBtn.customBg = nil
             liveBtn:SetBackdropColor(THEME.btnBg[1], THEME.btnBg[2], THEME.btnBg[3], 1)
-            liveBtn:SetBackdropBorderColor(THEME.border[1], THEME.border[2], THEME.border[3], 1)
+            SetButtonAccent(liveBtn, THEME.border)
             liveBtn.label:SetTextColor(0.6, 0.6, 0.6)
         else
+            liveBtn.customBg = { 0.15, 0.28, 0.42, 1 }
             liveBtn:SetBackdropColor(0.15, 0.28, 0.42, 1)
-            liveBtn:SetBackdropBorderColor(THEME.accent[1], THEME.accent[2], THEME.accent[3], 1)
+            SetButtonAccent(liveBtn, THEME.accent)
             liveBtn.label:SetTextColor(1, 0.82, 0)
+            histBtn.customBg = nil
             histBtn:SetBackdropColor(THEME.btnBg[1], THEME.btnBg[2], THEME.btnBg[3], 1)
-            histBtn:SetBackdropBorderColor(THEME.border[1], THEME.border[2], THEME.border[3], 1)
+            SetButtonAccent(histBtn, THEME.border)
             histBtn.label:SetTextColor(0.6, 0.6, 0.6)
         end
     end
@@ -2836,7 +3392,7 @@ function UI:BuildRankingPanel(panel)
 
     local hideOfficersCb = CreateFrame("CheckButton", nil, filterStrip, "UICheckButtonTemplate")
     hideOfficersCb:SetSize(20, 20)
-    hideOfficersCb:SetPoint("LEFT", 185, 0)
+    hideOfficersCb:SetPoint("LEFT", 180, 0)
     hideOfficersCb.label = hideOfficersCb:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     hideOfficersCb.label:SetPoint("LEFT", hideOfficersCb, "RIGHT", 4, 0)
     hideOfficersCb.label:SetText("Hide Officers")
@@ -2848,8 +3404,8 @@ function UI:BuildRankingPanel(panel)
     end)
     panel.hideOfficersCb = hideOfficersCb
 
-    local periodBtn = CreateModernDropdown(filterStrip, 114, 22, "All-Time")
-    periodBtn:SetPoint("LEFT", 300, 0)
+    local periodBtn = CreateModernDropdown(filterStrip, 112, 22, "All-Time")
+    periodBtn:SetPoint("LEFT", 294, 0)
     periodBtn:SetScript("OnClick", function(btn)
         if rankingPeriodDropdownFrame and rankingPeriodDropdownFrame:IsShown() then
             rankingPeriodDropdownFrame:Hide()
@@ -2861,7 +3417,7 @@ function UI:BuildRankingPanel(panel)
 
     local ffaRankCb = CreateFrame("CheckButton", nil, filterStrip, "UICheckButtonTemplate")
     ffaRankCb:SetSize(20, 20)
-    ffaRankCb:SetPoint("LEFT", 425, 0)
+    ffaRankCb:SetPoint("LEFT", 414, 0)
     ffaRankCb.label = ffaRankCb:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     ffaRankCb.label:SetPoint("LEFT", ffaRankCb, "RIGHT", 4, 0)
     ffaRankCb.label:SetText("Include Free-for-All")
@@ -2872,6 +3428,23 @@ function UI:BuildRankingPanel(panel)
         UI:RefreshRanking()
     end)
     panel.ffaRankCb = ffaRankCb
+
+    local toggleAllBtn = CreateModernButton(filterStrip, 84, 22, "Expand All")
+    toggleAllBtn:SetPoint("RIGHT", -6, 0)
+    toggleAllBtn:SetScript("OnClick", function()
+        local anyCollapsed = false
+        for _, mainKey in ipairs(panel.visibleRankingMains or {}) do
+            if not STATE.expandedRankingMains[mainKey] then
+                anyCollapsed = true
+                break
+            end
+        end
+        for _, mainKey in ipairs(panel.visibleRankingMains or {}) do
+            STATE.expandedRankingMains[mainKey] = anyCollapsed
+        end
+        UI:RefreshRanking()
+    end)
+    panel.toggleAllBtn = toggleAllBtn
 
     local colHeader = CreateFrame("Frame", nil, panel, "BackdropTemplate")
     colHeader:SetSize(744, 24)
@@ -2986,6 +3559,8 @@ function UI:RefreshRanking()
     local content = panel.scroll.content
     if not content then return end
 
+    if VM.UpdateRosterCache then VM:UpdateRosterCache() end
+
     local uiPrefs = GetUIPrefs()
     if panel.UpdateBasisButtons then panel.UpdateBasisButtons() end
     if panel.showLegacyCb then panel.showLegacyCb:SetChecked(uiPrefs.showLegacyRanking ~= false) end
@@ -3019,6 +3594,22 @@ function UI:RefreshRanking()
     local showLeg = uiPrefs.showLegacyRanking ~= false
 
     local ranked = VM.Ranking:GetRankingData(sortBy, sortDir, priceMode, period, hideOff, showLeg)
+
+    panel.visibleRankingMains = {}
+    for _, grp in ipairs(ranked) do
+        table.insert(panel.visibleRankingMains, grp.mainName)
+    end
+
+    if panel.toggleAllBtn then
+        local anyCollapsed = false
+        for _, k in ipairs(panel.visibleRankingMains) do
+            if not STATE.expandedRankingMains[k] then
+                anyCollapsed = true
+                break
+            end
+        end
+        panel.toggleAllBtn:SetText(anyCollapsed and "Expand All" or "Collapse All")
+    end
 
     local rowIdx = 0
     local function AcquireRow()
@@ -3122,8 +3713,14 @@ function UI:RefreshRanking()
                         VM:FormatMoney(tx.contributed or 0),
                         VM:FormatMoney(tx.received or 0)))
                 else
-                    local dir = (tx.type == "OUT") and (isGold and "|cffff6666[GOLD OUT]|r" or "|cffff6666[OUT]|r")
-                        or (isGold and "|cffffd700[GOLD IN]|r" or "|cff44dd77[IN]|r")
+                    local dir
+                    if tx.source == "WRITE_OFF" then
+                        dir = "|cffff4444[WRITE-OFF]|r"
+                    elseif tx.type == "OUT" then
+                        dir = isGold and "|cffff6666[GOLD OUT]|r" or "|cffff6666[OUT]|r"
+                    else
+                        dir = isGold and "|cffffd700[GOLD IN]|r" or "|cff44dd77[IN]|r"
+                    end
                     local itemDisplay = isGold and "Gold" or (tx.itemLink or tx.itemName or "Item")
                     local lockedVal = VM.Ranking:GetTransactionValuation(tx, "locked")
                     local liveVal = VM.Ranking:GetTransactionValuation(tx, "live")
@@ -3226,8 +3823,19 @@ function UI:BuildRosterPanel(panel)
                 break
             end
         end
+        if not anyCollapsed then
+            for _, mKey in ipairs(panel.visibleMainTreeKeys or {}) do
+                if not STATE.expandedTreeMains[mKey] then
+                    anyCollapsed = true
+                    break
+                end
+            end
+        end
         for _, rk in ipairs(panel.visibleRankKeys or {}) do
             STATE.rosterRankExpanded[rk] = anyCollapsed
+        end
+        for _, mKey in ipairs(panel.visibleMainTreeKeys or {}) do
+            STATE.expandedTreeMains[mKey] = anyCollapsed
         end
         UI:RefreshRoster()
     end)
@@ -3333,6 +3941,7 @@ function UI:RefreshRoster()
     local rankBuckets = {}
     local rankOrder = {}
     local legacyEntries = {}
+    panel.visibleMainTreeKeys = {}
 
     for _, entry in ipairs(hierarchy) do
         local alts = entry.alts or {}
@@ -3364,6 +3973,9 @@ function UI:RefreshRoster()
                 end
                 table.insert(rankBuckets[rIdx].mains, entry)
                 rankBuckets[rIdx].totalAlts = rankBuckets[rIdx].totalAlts + #alts
+                if #alts > 0 then
+                    table.insert(panel.visibleMainTreeKeys, entry.name)
+                end
             end
         end
     end
@@ -3375,6 +3987,11 @@ function UI:RefreshRoster()
         local anyCollapsed = false
         for _, rk in ipairs(rankOrder) do
             if not STATE.rosterRankExpanded[rk] then anyCollapsed = true; break end
+        end
+        if not anyCollapsed then
+            for _, mKey in ipairs(panel.visibleMainTreeKeys) do
+                if not STATE.expandedTreeMains[mKey] then anyCollapsed = true; break end
+            end
         end
         panel.toggleAllBtn:SetText(anyCollapsed and "Expand All" or "Collapse All")
     end
@@ -3655,9 +4272,9 @@ function UI:BuildSettingsPanel(panel)
     unpurchasedNote:Hide()
     panel.unpurchasedNote = unpurchasedNote
 
-    -- Dynamic container for Sections 2, 3, and 4 (moves up when fewer bank tabs are purchased)
+    -- Dynamic container for Sections 2, 3, and 4
     local lower = CreateFrame("Frame", nil, panel)
-    lower:SetSize(744, 215)
+    lower:SetSize(744, 220)
     lower:SetPoint("TOPLEFT", 10, -100)
     panel.lowerSections = lower
 
@@ -3708,8 +4325,6 @@ function UI:BuildSettingsPanel(panel)
         if VM.Minimap and VM.Minimap.SetHidden then
             VM.Minimap:SetHidden(not show)
         end
-        local prefs = GetUIPrefs()
-        prefs.showMinimap = show
     end)
     panel.minimapCb = minimapCb
 
@@ -3750,18 +4365,22 @@ function UI:BuildSettingsPanel(panel)
     panel.UpdateBasisButtons = function()
         local mode = GetUIPrefs().rankingPriceMode or "live"
         if mode == "locked" then
+            basisHistBtn.customBg = { 0.15, 0.28, 0.42, 1 }
             basisHistBtn:SetBackdropColor(0.15, 0.28, 0.42, 1)
-            basisHistBtn:SetBackdropBorderColor(THEME.accent[1], THEME.accent[2], THEME.accent[3], 1)
+            SetButtonAccent(basisHistBtn, THEME.accent)
             basisHistBtn.label:SetTextColor(1, 0.82, 0)
+            basisCurrentBtn.customBg = nil
             basisCurrentBtn:SetBackdropColor(THEME.btnBg[1], THEME.btnBg[2], THEME.btnBg[3], 1)
-            basisCurrentBtn:SetBackdropBorderColor(THEME.border[1], THEME.border[2], THEME.border[3], 1)
+            SetButtonAccent(basisCurrentBtn, THEME.border)
             basisCurrentBtn.label:SetTextColor(0.6, 0.6, 0.6)
         else
+            basisCurrentBtn.customBg = { 0.15, 0.28, 0.42, 1 }
             basisCurrentBtn:SetBackdropColor(0.15, 0.28, 0.42, 1)
-            basisCurrentBtn:SetBackdropBorderColor(THEME.accent[1], THEME.accent[2], THEME.accent[3], 1)
+            SetButtonAccent(basisCurrentBtn, THEME.accent)
             basisCurrentBtn.label:SetTextColor(1, 0.82, 0)
+            basisHistBtn.customBg = nil
             basisHistBtn:SetBackdropColor(THEME.btnBg[1], THEME.btnBg[2], THEME.btnBg[3], 1)
-            basisHistBtn:SetBackdropBorderColor(THEME.border[1], THEME.border[2], THEME.border[3], 1)
+            SetButtonAccent(basisHistBtn, THEME.border)
             basisHistBtn.label:SetTextColor(0.6, 0.6, 0.6)
         end
     end
@@ -3790,6 +4409,18 @@ function UI:BuildSettingsPanel(panel)
     end)
     panel.legacyFilterCb = legacyFilterCb
 
+    local autoOpenBankCb = CreateFrame("CheckButton", nil, lower, "UICheckButtonTemplate")
+    autoOpenBankCb:SetSize(20, 20)
+    autoOpenBankCb:SetPoint("TOPLEFT", 316, -78)
+    autoOpenBankCb.label = autoOpenBankCb:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    autoOpenBankCb.label:SetPoint("LEFT", autoOpenBankCb, "RIGHT", 4, 0)
+    autoOpenBankCb.label:SetText("Auto-open Requests at Guild Bank (Officers)")
+    autoOpenBankCb:SetScript("OnClick", function(cb)
+        local prefs = GetUIPrefs()
+        prefs.autoOpenAtBank = cb:GetChecked() and true or false
+    end)
+    panel.autoOpenBankCb = autoOpenBankCb
+
     -- Section 3: Sync & Diagnostics
     local diagTitle = lower:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     diagTitle:SetPoint("TOPLEFT", 0, -108)
@@ -3804,13 +4435,17 @@ function UI:BuildSettingsPanel(panel)
     local requestSyncBtn = CreateModernButton(lower, 140, 24, "Request Guild Sync", THEME.accent)
     requestSyncBtn:SetPoint("TOPRIGHT", 0, -126)
     requestSyncBtn:SetScript("OnClick", function()
-        if VM.Comms and VM.Comms.SendHello then
-            VM.Comms:SendHello()
+        if VM.Comms and VM.Comms.RequestManualSync then
+            local ok, waitSec = VM.Comms:RequestManualSync()
+            if ok then
+                VM:Print("Requested guild sync from online members.")
+            elseif waitSec and waitSec > 0 then
+                VM:Print(string.format("Sync already checked. Please wait %ds.", waitSec))
+            end
         end
         if VM.BankScanner and VM.BankScanner.ForceScan and GuildBankFrame and GuildBankFrame:IsVisible() then
             VM.BankScanner:ForceScan()
         end
-        VM:Print("Requested guild sync from online members.")
     end)
     panel.requestSyncBtn = requestSyncBtn
 
@@ -3828,7 +4463,10 @@ function UI:BuildSettingsPanel(panel)
         end
         local prefs = GetUIPrefs()
         prefs.windowPos = nil
-        VM:Print("Window position reset to center.")
+        if VM.Minimap and VM.Minimap.ResetPosition then
+            VM.Minimap:ResetPosition()
+        end
+        VM:Print("Window and minimap button positions reset.")
     end)
     panel.resetPosBtn = resetPosBtn
 
@@ -3843,6 +4481,10 @@ function UI:BuildSettingsPanel(panel)
             VM.db.requests = {}
             VM.db.fulfillments = VM.db.requests
             VM.pendingTradePayments = {}
+        end
+        if VM.Comms then
+            VM.Comms.peerHasNewerData = false
+            VM.Comms.isSyncingUntil = 0
         end
         if VM.Minimap and VM.Minimap.UpdateBadge then VM.Minimap:UpdateBadge() end
         VM:Print("Local cache cleared (ledger, roster, and tab rules preserved).")
@@ -3877,17 +4519,17 @@ function UI:RefreshSettings()
     if panel.UpdateScaleButtons then panel.UpdateScaleButtons() end
     if panel.minimapCb then
         local showMM = not (VM.db and VM.db.minimap and VM.db.minimap.hide == true)
-        if uiPrefs.showMinimap ~= nil then showMM = uiPrefs.showMinimap end
         panel.minimapCb:SetChecked(showMM)
     end
     if panel.UpdateBasisButtons then panel.UpdateBasisButtons() end
     if panel.legacyFilterCb then panel.legacyFilterCb:SetChecked(uiPrefs.showLegacyRanking ~= false) end
+    if panel.autoOpenBankCb then panel.autoOpenBankCb:SetChecked(uiPrefs.autoOpenAtBank ~= false) end
     if panel.chatNotifCb then panel.chatNotifCb:SetChecked(uiPrefs.enableChatNotifications ~= false) end
     if panel.newerVerNotifCb then panel.newerVerNotifCb:SetChecked(uiPrefs.notifyNewerVersion ~= false) end
 
     if panel.diagInfo then
         local gKey = VM:GetActiveGuildKey() or "None"
-        local protoVer = VM.VERSION or 6
+        local protoVer = VM.VERSION or 7
         local addonVer = VM:GetAddonVersion()
         local inv = VM.db and VM.db.inventory
         local lastScan = inv and inv.lastScan or 0
@@ -3900,19 +4542,22 @@ function UI:RefreshSettings()
 
     local function StyleButton(btn, isActive, activeBg, activeBorder, activeText)
         if not isOff then
+            btn.customBg = nil
             btn:Disable()
             btn:SetBackdropColor(THEME.btnDisabled[1], THEME.btnDisabled[2], THEME.btnDisabled[3], 0.4)
             btn:SetBackdropBorderColor(THEME.border[1], THEME.border[2], THEME.border[3], 0.4)
             btn.label:SetTextColor(0.4, 0.4, 0.4)
         elseif isActive then
+            btn.customBg = activeBg
             btn:Enable()
             btn:SetBackdropColor(activeBg[1], activeBg[2], activeBg[3], 1)
-            btn:SetBackdropBorderColor(activeBorder[1], activeBorder[2], activeBorder[3], 1)
+            SetButtonAccent(btn, activeBorder)
             btn.label:SetTextColor(activeText[1], activeText[2], activeText[3])
         else
+            btn.customBg = nil
             btn:Enable()
             btn:SetBackdropColor(THEME.btnBg[1], THEME.btnBg[2], THEME.btnBg[3], 1)
-            btn:SetBackdropBorderColor(THEME.border[1], THEME.border[2], THEME.border[3], 0.8)
+            SetButtonAccent(btn, THEME.border)
             btn.label:SetTextColor(0.6, 0.6, 0.6)
         end
     end
@@ -3958,14 +4603,16 @@ function UI:RefreshSettings()
             StyleButton(r.lockBtn, selMode == "LOCKED", { 0.32, 0.12, 0.12, 1 }, { 0.90, 0.30, 0.30, 1 }, { 1, 0.4, 0.4 })
 
             if not isOff then
+                r.saveBtn.customBg = nil
                 r.saveBtn:Disable()
                 r.saveBtn:SetBackdropColor(THEME.btnDisabled[1], THEME.btnDisabled[2], THEME.btnDisabled[3], 0.4)
                 r.saveBtn:SetBackdropBorderColor(THEME.border[1], THEME.border[2], THEME.border[3], 0.4)
                 r.saveBtn.label:SetTextColor(0.4, 0.4, 0.4)
             else
+                r.saveBtn.customBg = THEME.accent
                 r.saveBtn:Enable()
                 r.saveBtn:SetBackdropColor(THEME.accent[1], THEME.accent[2], THEME.accent[3], 1)
-                r.saveBtn:SetBackdropBorderColor(THEME.accent[1], THEME.accent[2], THEME.accent[3], 1)
+                SetButtonAccent(r.saveBtn, THEME.accent)
                 r.saveBtn.label:SetTextColor(1, 1, 1)
             end
 
@@ -4002,117 +4649,363 @@ function UI:RefreshSettings()
 end
 
 --------------------------------------------------------------------------------
--- OFFICER BANK POPUP
+-- MAIL FULFILLMENT SELECTOR PANEL (OFFICER PREPARED QUEUE)
 --------------------------------------------------------------------------------
-function UI:CreateOfficerPopupFrame()
-    popupFrame = CreateFrame("Frame", "VaultManagerOfficerPopup", UIParent, "BackdropTemplate")
-    popupFrame:SetSize(480, 270)
-    popupFrame:SetPoint("TOP", 0, -110)
-    popupFrame:SetFrameStrata("FULLSCREEN_DIALOG")
-    popupFrame:SetFrameLevel(200)
-    popupFrame:SetClampedToScreen(true)
-    popupFrame:SetMovable(true)
-    popupFrame:EnableMouse(true)
-    popupFrame:RegisterForDrag("LeftButton")
-    popupFrame:SetScript("OnDragStart", popupFrame.StartMoving)
-    popupFrame:SetScript("OnDragStop", popupFrame.StopMovingOrSizing)
-    ApplyModernBackdrop(popupFrame, THEME.bg, THEME.accent)
-    popupFrame:Hide()
+function UI:CreateMailFulfillmentPanel()
+    mailPanelFrame = CreateFrame("Frame", "VaultManagerMailPanel", UIParent, "BackdropTemplate")
+    mailPanelFrame:SetSize(330, 250)
+    mailPanelFrame:SetPoint("CENTER")
+    mailPanelFrame:SetFrameStrata("DIALOG")
+    mailPanelFrame:SetFrameLevel(180)
+    mailPanelFrame:SetClampedToScreen(true)
+    mailPanelFrame:SetMovable(true)
+    mailPanelFrame:EnableMouse(true)
+    mailPanelFrame:RegisterForDrag("LeftButton")
+    mailPanelFrame:SetScript("OnDragStart", mailPanelFrame.StartMoving)
+    mailPanelFrame:SetScript("OnDragStop", mailPanelFrame.StopMovingOrSizing)
+    ApplyModernBackdrop(mailPanelFrame, THEME.bg, THEME.accent)
+    mailPanelFrame:Hide()
 
-    local title = popupFrame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    title:SetPoint("TOPLEFT", 14, -12)
-    title:SetText("|cff26a6f2APPROVED GUILD BANK REQUESTS|r")
+    local title = mailPanelFrame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    title:SetPoint("TOPLEFT", 12, -10)
+    title:SetText("|cff26a6f2Prepared Requests — Mail|r")
 
-    local closeBtn = CreateModernButton(popupFrame, 22, 22, "X", THEME.red)
+    local closeBtn = CreateModernButton(mailPanelFrame, 20, 20, "X", THEME.red)
     closeBtn:SetPoint("TOPRIGHT", -8, -8)
-    closeBtn:SetScript("OnClick", function() popupFrame:Hide() end)
+    closeBtn:SetScript("OnClick", function() mailPanelFrame:Hide() end)
 
-    popupFrame.scroll = CreateScrollArea(popupFrame, -38, 10)
-    popupFrame.scroll.content:SetSize(440, 1)
+    local sub = mailPanelFrame:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+    sub:SetPoint("TOPLEFT", 12, -28)
+    sub:SetText("Click Fill Mail to populate Send Mail, then click Send.")
+
+    mailPanelFrame.scroll = CreateScrollArea(mailPanelFrame, -46, 8)
+    mailPanelFrame.scroll.content:SetSize(292, 1)
 end
 
-function UI:ShowOfficerBankPopup(orders)
-    if not popupFrame then self:CreateOfficerPopupFrame() end
-    if not popupFrame or not popupFrame.scroll then return end
-    local content = popupFrame.scroll.content
-    if not content then return end
-    popupFrame:Show()
-    for _, r in ipairs(popupFrame.scroll.rows) do r:Hide() end
+function UI:ShowMailFulfillmentPanel(orders)
+    if not mailPanelFrame then self:CreateMailFulfillmentPanel() end
+    if not orders or #orders == 0 then
+        mailPanelFrame:Hide()
+        return
+    end
+
+    mailPanelFrame:ClearAllPoints()
+    if MailFrame and MailFrame:IsVisible() then
+        mailPanelFrame:SetPoint("TOPLEFT", MailFrame, "TOPRIGHT", 6, 0)
+    else
+        mailPanelFrame:SetPoint("CENTER", 220, 40)
+    end
+
+    local content = mailPanelFrame.scroll.content
+    for _, r in ipairs(mailPanelFrame.scroll.rows) do r:Hide() end
 
     local y = 0
     for idx, req in ipairs(orders) do
-        local row = popupFrame.scroll.rows[idx]
+        local row = mailPanelFrame.scroll.rows[idx]
         if not row then
             row = CreateFrame("Frame", nil, content, "BackdropTemplate")
-            row:SetSize(440, 28)
+            row:SetSize(292, 38)
             ApplyModernBackdrop(row, THEME.rowOdd, { 0, 0, 0, 0 })
 
-            row.label = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-            row.label:SetPoint("LEFT", 8, 0)
-            row.label:SetWidth(260)
-            row.label:SetJustifyH("LEFT")
+            row.line1 = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+            row.line1:SetPoint("TOPLEFT", 6, -4)
+            row.line1:SetWidth(190)
+            row.line1:SetJustifyH("LEFT")
 
-            row.prepBtn = CreateModernButton(row, 76, 22, "Prepare", THEME.accent)
-            row.prepBtn:SetPoint("LEFT", 275, 0)
-            row.prepBtn:SetScript("OnClick", function()
+            row.line2 = row:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+            row.line2:SetPoint("TOPLEFT", 6, -20)
+            row.line2:SetWidth(190)
+            row.line2:SetJustifyH("LEFT")
+
+            row.fillBtn = CreateModernButton(row, 62, 22, "Fill Mail", THEME.accent)
+            row.fillBtn:SetPoint("RIGHT", -28, 0)
+            row.fillBtn:SetScript("OnClick", function()
                 local r = row.reqData
-                if not r then return end
-                VM.Fulfillment.activeOrder = r
-                if r.isGoldRequest then
-                    VM:Print(string.format("Withdraw %s for |cffffff00%s|r (%s), then open Mail or Trade.",
-                        VM:FormatMoney(r.goldAmount or r.quotedTotalPrice or 0), r.requester, r.reason or "Guild expense"))
-                else
-                    VM:Print(string.format("Withdraw %dx %s from Tab %d, then open Mail or Trade with %s.",
-                        r.count or 1, r.itemName or "Item", r.tab or 1, r.requester))
+                if r and VM.Fulfillment then
+                    VM.Fulfillment:PopulateMail(r)
                 end
             end)
 
-            row.doneBtn = CreateModernButton(row, 76, 22, "Complete", THEME.green)
-            row.doneBtn:SetPoint("LEFT", 356, 0)
-            row.doneBtn:SetScript("OnClick", function()
+            row.releaseBtn = CreateModernButton(row, 20, 22, "X", THEME.red)
+            row.releaseBtn:SetPoint("RIGHT", -4, 0)
+            row.releaseBtn:SetScript("OnClick", function()
                 local r = row.reqData
-                if not r then return end
-                VM.Fulfillment:CompleteRequest(r.id)
-                local remaining = VM.Fulfillment:GetApprovedOrders()
-                if #remaining == 0 then
-                    popupFrame:Hide()
-                else
-                    UI:ShowOfficerBankPopup(remaining)
+                if r and VM.Fulfillment then
+                    VM.Fulfillment:ReleasePreparedRequest(r.id)
+                    local rem = VM.Fulfillment:GetMyPreparedOrders()
+                    UI:ShowMailFulfillmentPanel(rem)
                 end
             end)
+            row.releaseBtn:HookScript("OnEnter", function(selfBtn)
+                GameTooltip:SetOwner(selfBtn, "ANCHOR_TOP")
+                GameTooltip:SetText("Release order back to APPROVED")
+                GameTooltip:Show()
+            end)
+            row.releaseBtn:HookScript("OnLeave", function() GameTooltip:Hide() end)
 
-            popupFrame.scroll.rows[idx] = row
+            mailPanelFrame.scroll.rows[idx] = row
         end
 
         local bg = (idx % 2 == 0) and THEME.rowEven or THEME.rowOdd
         row.reqData = req
         row:SetBackdropColor(bg[1], bg[2], bg[3], bg[4])
         row:ClearAllPoints()
-        row:SetPoint("TOPLEFT", 2, -y)
+        row:SetPoint("TOPLEFT", 0, -y)
         row:Show()
 
         if req.isGoldRequest then
             local gAmt = tonumber(req.goldAmount or req.quotedTotalPrice or req.quotedUnitPrice) or 0
-            row.label:SetText(string.format("%s: |cffffd700Gold (%s)|r",
-                VM:ColorizeName(req.requester), VM:FormatMoneyShort(gAmt)))
+            row.line1:SetText(string.format("%s — |cffffd700%s|r", VM:ColorizeName(req.requester), VM:FormatMoneyShort(gAmt)))
+            row.line2:SetText("Send Money: " .. (req.reason or "Guild expense"))
         else
-            row.label:SetText(string.format("%s: %dx %s (Tab %d)",
-                VM:ColorizeName(req.requester), req.count or 1, req.itemLink or req.itemName or "Item", req.tab or 1))
+            local cod = VM.Fulfillment and VM.Fulfillment:GetExpectedMemberPayment(req) or 0
+            row.line1:SetText(string.format("%s — %dx %s", VM:ColorizeName(req.requester), req.count or 1, req.itemLink or req.itemName or "Item"))
+            row.line2:SetText(cod > 0 and ("CoD: " .. VM:FormatMoneyShort(cod)) or "Free-for-All (No CoD)")
         end
 
-        y = y + 30
+        y = y + 40
     end
+
     content:SetHeight(math.max(1, y))
+    mailPanelFrame:SetHeight(math.min(260, math.max(100, y + 60)))
+    mailPanelFrame:Show()
+end
+
+function UI:HideMailFulfillmentPanel()
+    if mailPanelFrame then mailPanelFrame:Hide() end
+end
+
+--------------------------------------------------------------------------------
+-- TRADE FULFILLMENT PROMPT (AUTO-SHOWN ON MATCHING PREPARED REQUEST)
+--------------------------------------------------------------------------------
+function UI:CreateTradeFulfillmentPrompt()
+    tradePromptFrame = CreateFrame("Frame", "VaultManagerTradePrompt", UIParent, "BackdropTemplate")
+    tradePromptFrame:SetSize(350, 150)
+    tradePromptFrame:SetPoint("CENTER")
+    tradePromptFrame:SetFrameStrata("DIALOG")
+    tradePromptFrame:SetFrameLevel(190)
+    tradePromptFrame:SetClampedToScreen(true)
+    tradePromptFrame:SetMovable(true)
+    tradePromptFrame:EnableMouse(true)
+    tradePromptFrame:RegisterForDrag("LeftButton")
+    tradePromptFrame:SetScript("OnDragStart", tradePromptFrame.StartMoving)
+    tradePromptFrame:SetScript("OnDragStop", tradePromptFrame.StopMovingOrSizing)
+    ApplyModernBackdrop(tradePromptFrame, THEME.bg, THEME.green)
+    tradePromptFrame:Hide()
+
+    local title = tradePromptFrame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    title:SetPoint("TOPLEFT", 12, -10)
+    title:SetText("|cff44dd77Prepared Request Ready|r")
+
+    local closeBtn = CreateModernButton(tradePromptFrame, 20, 20, "X", THEME.red)
+    closeBtn:SetPoint("TOPRIGHT", -8, -8)
+    closeBtn:SetScript("OnClick", function() tradePromptFrame:Hide() end)
+
+    local promptText = tradePromptFrame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    promptText:SetPoint("TOPLEFT", 12, -30)
+    promptText:SetWidth(326)
+    promptText:SetJustifyH("LEFT")
+    tradePromptFrame.promptText = promptText
+
+    tradePromptFrame.scroll = CreateScrollArea(tradePromptFrame, -62, 8)
+    tradePromptFrame.scroll.content:SetSize(312, 1)
+end
+
+function UI:ShowTradeFulfillmentPrompt(targetName, orders)
+    if not tradePromptFrame then self:CreateTradeFulfillmentPrompt() end
+    if not orders or #orders == 0 then
+        tradePromptFrame:Hide()
+        return
+    end
+
+    tradePromptFrame:ClearAllPoints()
+    if TradeFrame and TradeFrame:IsVisible() then
+        tradePromptFrame:SetPoint("TOPLEFT", TradeFrame, "TOPRIGHT", 6, 0)
+    else
+        tradePromptFrame:SetPoint("TOP", 0, -140)
+    end
+
+    local countWord = (#orders == 1) and "a prepared request" or string.format("%d prepared requests", #orders)
+    tradePromptFrame.promptText:SetText(string.format("%s has %s in your inventory. Fulfill now?",
+        VM:ColorizeName(targetName), countWord))
+
+    local content = tradePromptFrame.scroll.content
+    for _, r in ipairs(tradePromptFrame.scroll.rows) do r:Hide() end
+
+    local y = 0
+    for idx, req in ipairs(orders) do
+        local row = tradePromptFrame.scroll.rows[idx]
+        if not row then
+            row = CreateFrame("Frame", nil, content, "BackdropTemplate")
+            row:SetSize(312, 36)
+            ApplyModernBackdrop(row, THEME.rowOdd, { 0, 0, 0, 0 })
+
+            row.line1 = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+            row.line1:SetPoint("TOPLEFT", 6, -4)
+            row.line1:SetWidth(220)
+            row.line1:SetJustifyH("LEFT")
+
+            row.line2 = row:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+            row.line2:SetPoint("TOPLEFT", 6, -19)
+            row.line2:SetWidth(220)
+            row.line2:SetJustifyH("LEFT")
+
+            row.fillBtn = CreateModernButton(row, 74, 22, "Fill Trade", THEME.green)
+            row.fillBtn:SetPoint("RIGHT", -4, 0)
+            row.fillBtn:SetScript("OnClick", function()
+                local r = row.reqData
+                if r and VM.Fulfillment then
+                    VM.Fulfillment:PopulateTrade(r)
+                end
+            end)
+            row.fillBtn:HookScript("OnEnter", function(selfBtn)
+                GameTooltip:SetOwner(selfBtn, "ANCHOR_TOP")
+                GameTooltip:SetText("Place items/gold in Trade window and whisper member the amount due")
+                GameTooltip:Show()
+            end)
+            row.fillBtn:HookScript("OnLeave", function() GameTooltip:Hide() end)
+
+            tradePromptFrame.scroll.rows[idx] = row
+        end
+
+        local bg = (idx % 2 == 0) and THEME.rowEven or THEME.rowOdd
+        row.reqData = req
+        row:SetBackdropColor(bg[1], bg[2], bg[3], bg[4])
+        row:ClearAllPoints()
+        row:SetPoint("TOPLEFT", 0, -y)
+        row:Show()
+
+        if req.isGoldRequest then
+            local gAmt = tonumber(req.goldAmount or req.quotedTotalPrice or req.quotedUnitPrice) or 0
+            row.line1:SetText(string.format("|cffffd700Gold Request:|r %s", VM:FormatMoney(gAmt)))
+            row.line2:SetText(req.reason or "Guild expense")
+        else
+            local due = VM.Fulfillment and VM.Fulfillment:GetExpectedMemberPayment(req) or 0
+            row.line1:SetText(string.format("%dx %s", req.count or 1, req.itemLink or req.itemName or "Item"))
+            row.line2:SetText(due > 0 and ("Member pays: " .. VM:FormatMoneyShort(due)) or "Free-for-All (No payment)")
+        end
+
+        y = y + 38
+    end
+
+    content:SetHeight(math.max(1, y))
+    tradePromptFrame:SetHeight(math.min(250, math.max(115, y + 76)))
+    tradePromptFrame:Show()
+end
+
+function UI:HideTradeFulfillmentPrompt()
+    if tradePromptFrame then tradePromptFrame:Hide() end
+end
+
+--------------------------------------------------------------------------------
+-- RELOG REMINDER POPUP (UNFULFILLED PREPARED REQUESTS)
+--------------------------------------------------------------------------------
+function UI:CreateRelogReminderFrame()
+    relogReminderFrame = CreateFrame("Frame", "VaultManagerRelogReminder", UIParent, "BackdropTemplate")
+    relogReminderFrame:SetSize(400, 220)
+    relogReminderFrame:SetPoint("TOP", 0, -130)
+    relogReminderFrame:SetFrameStrata("DIALOG")
+    relogReminderFrame:SetFrameLevel(195)
+    relogReminderFrame:SetClampedToScreen(true)
+    relogReminderFrame:SetMovable(true)
+    relogReminderFrame:EnableMouse(true)
+    relogReminderFrame:RegisterForDrag("LeftButton")
+    relogReminderFrame:SetScript("OnDragStart", relogReminderFrame.StartMoving)
+    relogReminderFrame:SetScript("OnDragStop", relogReminderFrame.StopMovingOrSizing)
+    ApplyModernBackdrop(relogReminderFrame, THEME.bg, THEME.gold)
+    relogReminderFrame:Hide()
+    table.insert(UISpecialFrames, "VaultManagerRelogReminder")
+
+    local title = relogReminderFrame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    title:SetPoint("TOPLEFT", 14, -12)
+    title:SetText("|cffffcc33Vault Manager — Unfulfilled Prepared Requests|r")
+
+    local closeBtn = CreateModernButton(relogReminderFrame, 20, 20, "X", THEME.red)
+    closeBtn:SetPoint("TOPRIGHT", -8, -8)
+    closeBtn:SetScript("OnClick", function() relogReminderFrame:Hide() end)
+
+    local sub = relogReminderFrame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    sub:SetPoint("TOPLEFT", 14, -34)
+    sub:SetWidth(372)
+    sub:SetJustifyH("LEFT")
+    sub:SetText("You still have Guild Bank items/gold withdrawn for delivery:")
+
+    relogReminderFrame.scroll = CreateScrollArea(relogReminderFrame, -54, 42)
+    relogReminderFrame.scroll.content:SetSize(362, 1)
+
+    local openBtn = CreateModernButton(relogReminderFrame, 120, 24, "Open Requests", THEME.accent)
+    openBtn:SetPoint("BOTTOMRIGHT", -12, 10)
+    openBtn:SetScript("OnClick", function()
+        relogReminderFrame:Hide()
+        UI:OpenToRequestsTab()
+    end)
+
+    local dismissBtn = CreateModernButton(relogReminderFrame, 80, 24, "Dismiss")
+    dismissBtn:SetPoint("RIGHT", openBtn, "LEFT", -8, 0)
+    dismissBtn:SetScript("OnClick", function() relogReminderFrame:Hide() end)
+end
+
+function UI:ShowRelogPreparedReminder(orders)
+    if not relogReminderFrame then self:CreateRelogReminderFrame() end
+    if not orders or #orders == 0 then return end
+
+    local content = relogReminderFrame.scroll.content
+    for _, r in ipairs(relogReminderFrame.scroll.rows) do r:Hide() end
+
+    local y = 0
+    for idx, req in ipairs(orders) do
+        local row = relogReminderFrame.scroll.rows[idx]
+        if not row then
+            row = CreateFrame("Frame", nil, content, "BackdropTemplate")
+            row:SetSize(362, 24)
+            ApplyModernBackdrop(row, THEME.rowOdd, { 0, 0, 0, 0 })
+            row.label = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+            row.label:SetPoint("LEFT", 6, 0)
+            row.label:SetPoint("RIGHT", -6, 0)
+            row.label:SetJustifyH("LEFT")
+            relogReminderFrame.scroll.rows[idx] = row
+        end
+        local bg = (idx % 2 == 0) and THEME.rowEven or THEME.rowOdd
+        row:SetBackdropColor(bg[1], bg[2], bg[3], bg[4])
+        row:ClearAllPoints()
+        row:SetPoint("TOPLEFT", 0, -y)
+        row:Show()
+
+        if req.isGoldRequest then
+            local gAmt = tonumber(req.goldAmount or req.quotedTotalPrice or req.quotedUnitPrice) or 0
+            row.label:SetText(string.format("%s — |cffffd700Gold (%s)|r (%s)",
+                VM:ColorizeName(req.requester), VM:FormatMoneyShort(gAmt), req.reason or "Guild expense"))
+        else
+            row.label:SetText(string.format("%s — %dx %s",
+                VM:ColorizeName(req.requester), req.count or 1, req.itemLink or req.itemName or "Item"))
+        end
+        y = y + 26
+    end
+
+    content:SetHeight(math.max(1, y))
+    relogReminderFrame:SetHeight(math.min(250, math.max(150, y + 106)))
+    relogReminderFrame:Show()
 end
 
 --------------------------------------------------------------------------------
 -- NAVIGATION & MASTER REFRESH
 --------------------------------------------------------------------------------
 function UI:UpdateScanStatusButton()
-    if not mainFrame or not mainFrame.scanStatusBtn or not VM.BankScanner then return end
-    local _, text, color = VM.BankScanner:GetScanStatus()
-    mainFrame.scanStatusBtn:SetText(text)
-    mainFrame.scanStatusBtn:SetBackdropColor(color[1], color[2], color[3], color[4] or 1)
+    if not mainFrame or not mainFrame.scanStatusBtn then return end
+    local btn = mainFrame.scanStatusBtn
+    if VM.Comms and VM.Comms.GetSyncButtonStatus then
+        local _, text, color, tooltip = VM.Comms:GetSyncButtonStatus()
+        btn:SetText(text)
+        btn.customBg = color
+        btn:SetBackdropColor(color[1], color[2], color[3], color[4] or 1)
+        SetButtonAccent(btn, color)
+        btn.tooltipText = tooltip
+    elseif VM.BankScanner then
+        local _, text, color = VM.BankScanner:GetScanStatus()
+        btn:SetText(text)
+        btn.customBg = color
+        btn:SetBackdropColor(color[1], color[2], color[3], color[4] or 1)
+    end
 end
 
 function UI:RefreshAllTabs()
@@ -4138,15 +5031,21 @@ function UI:RefreshAll()
     end
     self:UpdateRequestsTabBadge()
 
+    if mailPanelFrame and mailPanelFrame:IsShown() and VM.Fulfillment then
+        local mine = VM.Fulfillment:GetMyPreparedOrders()
+        if #mine > 0 and MailFrame and MailFrame:IsVisible() then
+            self:ShowMailFulfillmentPanel(mine)
+        else
+            mailPanelFrame:Hide()
+        end
+    end
+
     if not mainFrame or not mainFrame:IsShown() then return end
     if not mainFrame.navButtons or not mainFrame.panels or not mainFrame.scanInfo then return end
 
     if VM.isUnguilded then
         mainFrame.scanInfo:SetText("Not in a guild")
-        if mainFrame.scanStatusBtn then
-            mainFrame.scanStatusBtn:SetText("No Guild")
-            mainFrame.scanStatusBtn:SetBackdropColor(0.4, 0.4, 0.4, 1)
-        end
+        self:UpdateScanStatusButton()
         for i = 1, 6 do
             if mainFrame.panels[i] then
                 mainFrame.panels[i]:Hide()
@@ -4188,13 +5087,15 @@ function UI:RefreshAll()
         if btn and panel then
             if i == STATE.currentTab then
                 if btn.activeBar then btn.activeBar:Show() end
+                btn.customBg = { 0.14, 0.20, 0.28, 1 }
                 btn:SetBackdropColor(0.14, 0.20, 0.28, 1)
-                btn:SetBackdropBorderColor(THEME.accent[1], THEME.accent[2], THEME.accent[3], 1)
+                SetButtonAccent(btn, THEME.accent)
                 panel:Show()
             else
                 if btn.activeBar then btn.activeBar:Hide() end
+                btn.customBg = nil
                 btn:SetBackdropColor(THEME.btnBg[1], THEME.btnBg[2], THEME.btnBg[3], 1)
-                btn:SetBackdropBorderColor(THEME.border[1], THEME.border[2], THEME.border[3], 1)
+                SetButtonAccent(btn, THEME.border)
                 panel:Hide()
             end
         end

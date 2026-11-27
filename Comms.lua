@@ -1037,7 +1037,7 @@ function Comms:BroadcastRequest(req)
     local numItemID = tonumber(req.itemID) or 0
 
     local function BuildReqPayload(linkStr, reasonStr)
-        return string.format("REQ|%s|%s|%s|%d|%d|%s|%d|%d|%s|%s|%d|%s|%d|%s|%s|%d|%d|%s|%d|%s|%s|%s|%d",
+        return string.format("REQ|%s|%s|%s|%d|%d|%s|%d|%d|%s|%s|%d|%s|%d|%s|%s|%d|%d|%s|%d|%s|%s|%s|%d|%s",
             EscapeStr(req.id),
             EscapeStr(req.requester),
             EscapeStr(tostring(req.itemID or 0)),
@@ -1060,7 +1060,8 @@ function Comms:BroadcastRequest(req)
             EscapeStr(reasonStr),
             EscapeStr(req.completedMethod or ""),
             EscapeStr(req.preparedBy or ""),
-            math.floor(tonumber(req.preparedAt) or 0))
+            math.floor(tonumber(req.preparedAt) or 0),
+            EscapeStr(req.guildCategory or ""))
     end
 
     local linkStr = req.itemLink or ""

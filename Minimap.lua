@@ -18,40 +18,92 @@ end
 local function CountOpenRequests()
     local pendingCount = 0
     local approvedCount = 0
+    local preparedMineCount = 0
     if not VM.db or not VM.db.requests or VM.isUnguilded then
-        return 0, 0
+        return 0, 0, 0
     end
 
     local isOff = VM:IsOfficer()
+    local me = VM:GetPlayerName()
+    local meLower = me:lower()
+
     if isOff then
         for _, req in pairs(VM.db.requests) do
             if req.status == "PENDING" then
                 pendingCount = pendingCount + 1
             elseif req.status == "APPROVED" then
                 approvedCount = approvedCount + 1
+            elseif req.status == "PREPARED" then
+                local prepBy = VM:NormalizeName(req.preparedBy or "")
+                if prepBy ~= "" and prepBy:lower() == meLower then
+                    preparedMineCount = preparedMineCount + 1
+                end
             end
         end
     else
-        local myMain = VM:GetMainFor(VM:GetPlayerName())
+        local myMain = VM:GetMainFor(me)
         for _, req in pairs(VM.db.requests) do
-            if req.status == "PENDING" or req.status == "APPROVED" then
+            if req.status == "PENDING" or req.status == "APPROVED" or req.status == "PREPARED" then
                 local reqMain = VM:GetMainFor(req.requester or "")
                 if reqMain ~= "" and myMain ~= "" and reqMain:lower() == myMain:lower() then
                     if req.status == "PENDING" then
                         pendingCount = pendingCount + 1
-                    else
+                    elseif req.status == "APPROVED" then
                         approvedCount = approvedCount + 1
+                    else
+                        preparedMineCount = preparedMineCount + 1
                     end
                 end
             end
         end
     end
 
-    return pendingCount, approvedCount
+    return pendingCount, approvedCount, preparedMineCount
 end
 
 function MM:GetOpenRequestCounts()
     return CountOpenRequests()
+end
+
+function MM:SyncVisibility()
+    if not VM.db then return end
+    VM.db.minimap = VM.db.minimap or { angle = 220, hide = false }
+    if VM.db.minimap.angle == nil then VM.db.minimap.angle = 220 end
+    if VM.db.minimap.hide == nil then VM.db.minimap.hide = false end
+
+    -- minimap.hide is the single source of truth
+    local hide = (VM.db.minimap.hide == true)
+    if VM.db.uiPrefs then
+        VM.db.uiPrefs.showMinimap = not hide
+    end
+
+    if minimapBtn then
+        UpdatePosition(VM.db.minimap.angle)
+        local level = math.max(15, (Minimap and Minimap.GetFrameLevel and Minimap:GetFrameLevel() or 0) + 10)
+        minimapBtn:SetFrameLevel(level)
+        if hide then
+            minimapBtn:Hide()
+        else
+            minimapBtn:Show()
+            self:UpdateBadge()
+        end
+    end
+end
+
+function MM:ResetPosition()
+    if VM.db then
+        VM.db.minimap = VM.db.minimap or {}
+        VM.db.minimap.angle = 220
+        VM.db.minimap.hide = false
+        if VM.db.uiPrefs then
+            VM.db.uiPrefs.showMinimap = true
+        end
+    end
+    if not minimapBtn then
+        self:Create()
+    else
+        self:SyncVisibility()
+    end
 end
 
 function MM:UpdateBadge()
@@ -61,20 +113,22 @@ function MM:UpdateBadge()
         return
     end
 
-    local pendingCount, approvedCount = CountOpenRequests()
-    local total = pendingCount + approvedCount
+    local pendingCount, approvedCount, preparedCount = CountOpenRequests()
+    local total = pendingCount + approvedCount + preparedCount
 
     if total > 0 then
         local isOff = VM:IsOfficer()
         if isOff then
             if pendingCount > 0 then
                 minimapBtn.badge:SetBackdropColor(0.85, 0.18, 0.18, 1) -- Red: needs approval
+            elseif preparedCount > 0 then
+                minimapBtn.badge:SetBackdropColor(0.20, 0.72, 0.35, 1) -- Green: prepared in your bags ready to deliver
             else
-                minimapBtn.badge:SetBackdropColor(0.15, 0.55, 0.90, 1) -- Blue: approved ready for delivery
+                minimapBtn.badge:SetBackdropColor(0.15, 0.55, 0.90, 1) -- Blue: approved ready to withdraw
             end
         else
-            if approvedCount > 0 then
-                minimapBtn.badge:SetBackdropColor(0.20, 0.72, 0.35, 1) -- Green: own request approved
+            if approvedCount > 0 or preparedCount > 0 then
+                minimapBtn.badge:SetBackdropColor(0.20, 0.72, 0.35, 1) -- Green: own request approved/prepared
             else
                 minimapBtn.badge:SetBackdropColor(0.85, 0.65, 0.15, 1) -- Yellow: own request pending
             end
@@ -106,42 +160,40 @@ function MM:SetHidden(hideArg)
         end
     end
 
+    if not minimapBtn and not hide then
+        self:Create()
+        return
+    end
+
     if minimapBtn then
         if hide then
             minimapBtn:Hide()
         else
             minimapBtn:Show()
-            MM:UpdateBadge()
+            self:SyncVisibility()
         end
     end
 end
 
 function MM:Create()
     if minimapBtn then
-        self:UpdateBadge()
+        self:SyncVisibility()
         return
     end
 
     VM.db = VM.db or {}
     VM.db.minimap = VM.db.minimap or { angle = 220, hide = false }
-    local shouldHide = VM.db.minimap.hide == true
-    if VM.db.uiPrefs and VM.db.uiPrefs.showMinimap == false then
-        shouldHide = true
-    end
+    if VM.db.minimap.angle == nil then VM.db.minimap.angle = 220 end
+    if VM.db.minimap.hide == nil then VM.db.minimap.hide = false end
 
     minimapBtn = CreateFrame("Button", "VaultManagerMinimapButton", Minimap)
     minimapBtn:SetSize(31, 31)
     minimapBtn:SetFrameStrata("MEDIUM")
-    minimapBtn:SetFrameLevel(8)
+    local level = math.max(15, (Minimap and Minimap.GetFrameLevel and Minimap:GetFrameLevel() or 0) + 10)
+    minimapBtn:SetFrameLevel(level)
     minimapBtn:EnableMouse(true)
     minimapBtn:RegisterForClicks("LeftButtonUp", "RightButtonUp")
     minimapBtn:RegisterForDrag("LeftButton")
-
-    if shouldHide then
-        minimapBtn:Hide()
-    else
-        minimapBtn:Show()
-    end
 
     -- Standard circular minimap border
     local overlay = minimapBtn:CreateTexture(nil, "OVERLAY")
@@ -171,6 +223,7 @@ function MM:Create()
     local badge = CreateFrame("Frame", nil, minimapBtn, "BackdropTemplate")
     badge:SetSize(16, 16)
     badge:SetPoint("BOTTOMRIGHT", 2, -2)
+    badge:SetFrameLevel(level + 2)
     if not badge.SetBackdrop then Mixin(badge, BackdropTemplateMixin) end
     badge:SetBackdrop({
         bgFile = "Interface\\ChatFrame\\ChatFrameBackground",
@@ -239,9 +292,9 @@ function MM:Create()
                 GameTooltip:AddLine("A newer version is available on CurseForge!", 1, 0.8, 0.2)
             end
 
-            local pendingCount, approvedCount = CountOpenRequests()
+            local pendingCount, approvedCount, preparedCount = CountOpenRequests()
             local isOff = VM:IsOfficer()
-            if pendingCount > 0 or approvedCount > 0 then
+            if pendingCount > 0 or approvedCount > 0 or preparedCount > 0 then
                 GameTooltip:AddLine(" ")
                 local reqHeader = isOff and "Open Guild Requests:" or "Your Open Requests:"
                 GameTooltip:AddLine(reqHeader, 0.9, 0.9, 0.9)
@@ -250,6 +303,10 @@ function MM:Create()
                 end
                 if approvedCount > 0 then
                     GameTooltip:AddLine(string.format("  |cff26a6f2%d Approved|r", approvedCount))
+                end
+                if preparedCount > 0 then
+                    local prepLabel = isOff and "Prepared by you (ready to deliver)" or "Prepared for delivery"
+                    GameTooltip:AddLine(string.format("  |cff44dd77%d %s|r", preparedCount, prepLabel))
                 end
             else
                 GameTooltip:AddLine("No open requests", 0.6, 0.6, 0.6)
@@ -279,8 +336,7 @@ function MM:Create()
         GameTooltip:Hide()
     end)
 
-    UpdatePosition(VM.db.minimap.angle)
-    self:UpdateBadge()
+    self:SyncVisibility()
 end
 
 -- Event-driven creation and badge refresh (no polling ticker)
@@ -297,7 +353,7 @@ f:SetScript("OnEvent", function(_, event)
         end
     else
         if minimapBtn then
-            MM:UpdateBadge()
+            MM:SyncVisibility()
         end
     end
 end)

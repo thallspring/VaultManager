@@ -16,7 +16,7 @@ function Ranking:GetTransactionValuation(tx, priceMode)
     if tx.type == "OUT" and not isFFA and tx.source ~= "WRITE_OFF" then
         if tx.chargedTotalPrice ~= nil and tx.chargedTotalPrice >= 0 then
             return tx.chargedTotalPrice
-        elseif tx.chargedUnitPrice ~= nil and tx.chargedUnitPrice >= 0 then
+        elseif tx.chargedUnitPrice ~= nil and tx.chargedUnitPrice > 0 then
             return tx.chargedUnitPrice * (tx.count or 1)
         elseif tx.priceMode == "PERCENT" then
             local base = (tx.unitPriceAtTime and tx.unitPriceAtTime > 0) and tx.unitPriceAtTime or (VM:GetEffectiveLivePrice(tx.itemID, tx.itemLink, tx.unitPriceAtTime) or 0)

@@ -4,6 +4,8 @@ local Fulfillment = VM.Fulfillment
 
 Fulfillment.activeOrder = nil
 Fulfillment.isWithdrawing = false
+Fulfillment.isMailOpen = false
+Fulfillment.isTradeOpen = false
 
 local MAX_SLOTS_PER_TAB = 98
 local currentTradeTargetMoney = 0
@@ -12,6 +14,13 @@ local pendingMailSnapshot = nil
 local lastAcceptedTrade = nil
 local sendMailHooked = false
 local whisperedInCurrentTrade = {}
+
+local function IsBankCurrentlyOpen()
+    if VM.BankScanner and VM.BankScanner.IsBankOpen then
+        return VM.BankScanner:IsBankOpen()
+    end
+    return GuildBankFrame and GuildBankFrame:IsVisible() and true or false
+end
 
 local function CleanItemName(str)
     if type(str) ~= "string" or str == "" then return "" end
@@ -474,6 +483,7 @@ function Fulfillment:Init()
         if event == "GUILDBANKFRAME_CLOSED" then
             self.isWithdrawing = false
         elseif event == "MAIL_SHOW" then
+            self.isMailOpen = true
             pendingMailSnapshot = nil
             if VM:IsOfficer() then
                 local mine = self:GetMyPreparedOrders()
@@ -482,6 +492,7 @@ function Fulfillment:Init()
                 end
             end
         elseif event == "MAIL_CLOSED" then
+            self.isMailOpen = false
             if VM.UI and VM.UI.HideMailFulfillmentPanel then
                 VM.UI:HideMailFulfillmentPanel()
             end
@@ -495,7 +506,7 @@ function Fulfillment:Init()
                 if done > 0 then
                     VM:Print(string.format("Mail sent — auto-completed %d request(s).", done))
                 end
-                if VM.UI and VM.UI.ShowMailFulfillmentPanel and MailFrame and MailFrame:IsShown() then
+                if VM.UI and VM.UI.ShowMailFulfillmentPanel and self.isMailOpen then
                     local remaining = self:GetMyPreparedOrders()
                     if #remaining > 0 then
                         VM.UI:ShowMailFulfillmentPanel(remaining)
@@ -505,6 +516,7 @@ function Fulfillment:Init()
                 end
             end
         elseif event == "TRADE_SHOW" then
+            self.isTradeOpen = true
             currentTradeTargetMoney = 0
             currentTradeTargetName = VM:NormalizeName(UnitName("NPC") or "")
             lastAcceptedTrade = nil
@@ -546,6 +558,7 @@ function Fulfillment:Init()
                 end
             end
         elseif event == "TRADE_CLOSED" then
+            self.isTradeOpen = false
             currentTradeTargetMoney = 0
             currentTradeTargetName = ""
             whisperedInCurrentTrade = {}
@@ -740,7 +753,7 @@ function Fulfillment:ExecuteBankWithdrawSteps(req, tab, steps)
             return
         end
 
-        if not (GuildBankFrame and GuildBankFrame:IsVisible()) then
+        if not IsBankCurrentlyOpen() then
             self.isWithdrawing = false
             VM:Print("|cffff4444Guild Bank closed before withdrawal finished.|r")
             return
@@ -777,7 +790,7 @@ function Fulfillment:ExecuteBankWithdrawSteps(req, tab, steps)
     RunStep(1)
 end
 
--- Prepare request: requires open Guild Bank to prevent accidental fulfillment from personal bags/gold
+-- Prepare request: requires open Guild Bank (event-based check so Bagnon/ElvUI/custom frames work)
 function Fulfillment:PrepareRequest(reqID)
     if not VM:IsOfficer() then return end
     local req = VM.db.requests[reqID]
@@ -788,7 +801,7 @@ function Fulfillment:PrepareRequest(reqID)
         return
     end
 
-    if not (GuildBankFrame and GuildBankFrame:IsVisible()) then
+    if not IsBankCurrentlyOpen() then
         VM:Print("|cffff4444Open the Guild Bank to prepare and withdraw this request.|r")
         return
     end
@@ -827,8 +840,8 @@ function Fulfillment:PrepareRequest(reqID)
     local targetTab = tonumber(req.tab) or 1
     self.isWithdrawing = true
 
-    local function ScanAndWithdrawFromTab()
-        if not (GuildBankFrame and GuildBankFrame:IsVisible()) then
+    local function ScanAndWithdrawFromTab(attempt)
+        if not IsBankCurrentlyOpen() then
             self.isWithdrawing = false
             return
         end
@@ -849,6 +862,12 @@ function Fulfillment:PrepareRequest(reqID)
         end
 
         if totalAvailable < needed then
+            if attempt < 2 and C_Timer and C_Timer.After then
+                if SetCurrentGuildBankTab then SetCurrentGuildBankTab(targetTab) end
+                if QueryGuildBankTab then QueryGuildBankTab(targetTab) end
+                C_Timer.After(0.45, function() ScanAndWithdrawFromTab(attempt + 1) end)
+                return
+            end
             self.isWithdrawing = false
             VM:Print(string.format("|cffff4444Only %d of %d %s found in Tab %d. Try again after the tab loads.|r",
                 totalAvailable, needed, req.itemLink or req.itemName or "Item", targetTab))
@@ -895,12 +914,12 @@ function Fulfillment:PrepareRequest(reqID)
         if SetCurrentGuildBankTab then SetCurrentGuildBankTab(targetTab) end
         if QueryGuildBankTab then QueryGuildBankTab(targetTab) end
         if C_Timer and C_Timer.After then
-            C_Timer.After(0.35, ScanAndWithdrawFromTab)
+            C_Timer.After(0.40, function() ScanAndWithdrawFromTab(1) end)
         else
-            ScanAndWithdrawFromTab()
+            ScanAndWithdrawFromTab(1)
         end
     else
-        ScanAndWithdrawFromTab()
+        ScanAndWithdrawFromTab(1)
     end
 end
 
@@ -1021,13 +1040,24 @@ function Fulfillment:GetApprovedOrders()
     return list
 end
 
--- Auto-opens main window on Requests tab when an officer opens Guild Bank with PENDING or APPROVED requests
+-- Auto-opens VM when Guild Bank opens: Requests tab if officer has open orders, otherwise Vault & Requests
 function Fulfillment:OnGuildBankOpened()
+    if not IsBankCurrentlyOpen() then return end
     local prefs = VM.db and VM.db.uiPrefs
     if prefs and prefs.autoOpenAtBank == false then return end
 
-    local pendingCount, approvedCount = self:GetPendingAndApprovedCounts()
-    if (pendingCount > 0 or approvedCount > 0) and VM.UI and VM.UI.OpenToRequestsTab then
+    if VM:IsOfficer() then
+        local pendingCount, approvedCount = self:GetPendingAndApprovedCounts()
+        local myPrepared = self:GetMyPreparedOrders()
+        if (pendingCount > 0 or approvedCount > 0 or #myPrepared > 0) and VM.UI and VM.UI.OpenToRequestsTab then
+            VM.UI:OpenToRequestsTab()
+            return
+        end
+    end
+
+    if VM.UI and VM.UI.OpenToVaultTab then
+        VM.UI:OpenToVaultTab()
+    elseif VM.UI and VM.UI.OpenToRequestsTab then
         VM.UI:OpenToRequestsTab()
     end
 end

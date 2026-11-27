@@ -522,7 +522,7 @@ function Ledger:GetTransactionValue(tx, useHistorical, priceMode)
     if tx.type == "OUT" and not isFFA and tx.source ~= "WRITE_OFF" then
         if tx.chargedTotalPrice ~= nil and tx.chargedTotalPrice >= 0 then
             return tx.chargedTotalPrice
-        elseif tx.chargedUnitPrice ~= nil and tx.chargedUnitPrice >= 0 then
+        elseif tx.chargedUnitPrice ~= nil and tx.chargedUnitPrice > 0 then
             return tx.chargedUnitPrice * (tx.count or 1)
         elseif tx.priceMode == "PERCENT" then
             local base = (tx.unitPriceAtTime and tx.unitPriceAtTime > 0) and tx.unitPriceAtTime or (VM:GetEffectiveLivePrice(tx.itemID, tx.itemLink, tx.unitPriceAtTime) or 0)
@@ -777,7 +777,6 @@ function Ledger:CompactMonthlyHistory()
     local cutoff = now - (60 * 86400)
     local tombstoneCutoff = now - (90 * 86400)
     local groups = {}
-    local guildSubsidyByMonth = {}
     local purgedTombstones = 0
 
     for id, tx in pairs(VM.db.ledger) do
@@ -799,6 +798,8 @@ function Ledger:CompactMonthlyHistory()
                     totalGoldIn = 0,
                     totalGoldOut = 0,
                     totalItemsIn = 0,
+                    subsidyIn = 0,
+                    subsidyOut = 0,
                     main = main,
                     ym = ym,
                     ts = tx.timestamp or 0
@@ -820,25 +821,21 @@ function Ledger:CompactMonthlyHistory()
                 end
             end
 
-            -- Preserve derived GUILD subsidy/surplus if this member transaction gets compacted
+            -- Track per-group subsidy/surplus so it is ONLY rolled into GUILD if this group is actually compacted
             local delta = self:GetGuildSubsidyDelta(tx, true)
-            if delta ~= 0 then
-                guildSubsidyByMonth[ym] = guildSubsidyByMonth[ym] or { inVal = 0, outVal = 0, ts = tx.timestamp or 0, sourceKeys = {} }
-                if delta > 0 then
-                    guildSubsidyByMonth[ym].outVal = guildSubsidyByMonth[ym].outVal + delta
-                else
-                    guildSubsidyByMonth[ym].inVal = guildSubsidyByMonth[ym].inVal + (-delta)
-                end
-                guildSubsidyByMonth[ym].sourceKeys[key] = true
+            if delta > 0 then
+                groups[key].subsidyOut = groups[key].subsidyOut + delta
+            elseif delta < 0 then
+                groups[key].subsidyIn = groups[key].subsidyIn + (-delta)
             end
 
             table.insert(groups[key].txs, id)
         end
     end
 
-    local compactedKeys = {}
+    local compactedGuildSubsidy = {}
     local compactedCount = 0
-    for key, g in pairs(groups) do
+    for _, g in pairs(groups) do
         local summaryID = string.format("SUM_%s_%s", g.main, g.ym)
         local existingSum = VM.db.ledger[summaryID]
         if #g.txs > 1 or (existingSum and not existingSum.deleted and existingSum.type == "SUMMARY") then
@@ -879,18 +876,23 @@ function Ledger:CompactMonthlyHistory()
             end
 
             VM.db.ledger[summaryID] = summaryTx
-            compactedKeys[key] = true
             compactedCount = compactedCount + 1
+
+            if g.subsidyIn > 0 or g.subsidyOut > 0 then
+                local bucket = compactedGuildSubsidy[g.ym]
+                if not bucket then
+                    bucket = { inVal = 0, outVal = 0, ts = g.ts }
+                    compactedGuildSubsidy[g.ym] = bucket
+                end
+                bucket.inVal = bucket.inVal + g.subsidyIn
+                bucket.outVal = bucket.outVal + g.subsidyOut
+            end
         end
     end
 
-    -- Roll preserved subsidy/surplus into GUILD's monthly summary for any compacted member groups
-    for ym, sub in pairs(guildSubsidyByMonth) do
-        local anyCompacted = false
-        for sKey in pairs(sub.sourceKeys) do
-            if compactedKeys[sKey] then anyCompacted = true; break end
-        end
-        if anyCompacted and (sub.inVal > 0 or sub.outVal > 0) then
+    -- Roll preserved subsidy/surplus into GUILD's monthly summary strictly for compacted & deleted member rows
+    for ym, sub in pairs(compactedGuildSubsidy) do
+        if sub.inVal > 0 or sub.outVal > 0 then
             local gSumID = "SUM_GUILD_" .. ym
             local existing = VM.db.ledger[gSumID]
             local totalIn = ((existing and existing.contributed) or 0) + sub.inVal

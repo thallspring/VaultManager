@@ -653,8 +653,13 @@ function Comms:OnMessageReceived(msg, sender)
         local isGoldRequest = (#parts >= 20) and (tonumber(parts[20]) == 1) or false
         local reason = (#parts >= 21) and UnescapeStr(parts[21]) or ""
         local completedMethod = (#parts >= 22) and UnescapeStr(parts[22]) or ""
-        local preparedBy = (#parts >= 23) and UnescapeStr(parts[23]) or ""
+       local preparedBy = (#parts >= 23) and UnescapeStr(parts[23]) or ""
         local preparedAt = (#parts >= 24) and (tonumber(parts[24]) or 0) or 0
+        local guildCategory = nil
+        if #parts >= 25 and parts[25] ~= "" then
+            local rawCat = UnescapeStr(parts[25])
+            guildCategory = (VM.Ledger and VM.Ledger.NormalizeGuildCategory) and VM.Ledger:NormalizeGuildCategory(rawCat) or rawCat
+        end
 
         local rawItemID = UnescapeStr(parts[4])
         local parsedItemID = isGoldRequest and 0 or (tonumber(rawItemID) or rawItemID)
@@ -666,6 +671,7 @@ function Comms:OnMessageReceived(msg, sender)
             id = UnescapeStr(parts[2]),
             requester = UnescapeStr(parts[3]),
             isGoldRequest = isGoldRequest,
+            guildCategory = guildCategory,
             itemID = parsedItemID,
             count = tonumber(parts[5]) or 1,
             tab = tonumber(parts[6]) or 0,

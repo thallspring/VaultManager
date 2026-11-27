@@ -4,6 +4,54 @@
 
 All notable changes to **Vault Manager** will be documented in this file.
 
+## [1.5.0] - Unreleased
+
+### Added
+- **Prepared Requests with Officer Ownership:** Officers can now *Prepare* an approved request, which withdraws the exact items (splitting stacks into free bag slots when needed) or gold from the open Guild Bank and assigns the delivery to that officer. Officers are never asked to deliver another officer's prepared orders.
+- **Verified Guild Bank Withdrawals:** *Prepare* only marks a request as prepared (or fulfilled, for your own request) after the items have actually arrived in your bags or the gold in your purse. Failed withdrawals leave the request approved and explain why (daily withdrawal limit, missing permission, missing stock, no free bag slots).
+- **Release & Write Off:** Prepared orders can be released back to *Approved*, and orders held by an officer who has left the guild can be written off and charged to that officer.
+- **Mail Side Panel:** Opening a mailbox shows your prepared orders with a *Fill Mail* button that fills in recipient, subject, items and Cash on Delivery or gold. It refuses to fill if Send Mail already holds attachments or gold. Sending the mail completes the request automatically.
+- **Trade Prompt:** Trading a member with a prepared order offers *Fill Trade*, which places the items or gold in the trade window and whispers the amount due in plain text. Only one gold request can be filled per trade. Completing the trade completes the request automatically.
+- **Relog Reminder:** After logging in, officers are reminded about prepared orders that are still waiting for delivery.
+- **Auto-Open at Guild Bank:** Vault Manager opens automatically at the Guild Bank (on *Requests* when orders are waiting, otherwise on *Vault & Requests*). This can be turned off in *Settings*.
+- **Gold Requests:** Members can request gold from the Guild Bank with an expense category (*Raid*, *Member* or *Tabs*).
+- **Guild Expenses:** New *+ Expense* window in the *Ledger* for logging guild expenses and write-offs under the guild account.
+- **Guild Bank Tab Purchases:** Buying a new Guild Bank tab is recorded automatically as a guild expense (*Tabs*).
+- **Member Payments:** Cash on Delivery and trade payments for requests are credited to the paying member when the order is delivered. When the officer later deposits that gold in the Guild Bank, the deposit is booked as a transfer and does not count as the officer's personal donation.
+- **Delete Any Ledger Entry:** Officers can delete any non-derived Ledger entry after confirming. The deletion syncs to all guild members, and deleted bank log entries are not re-imported by later bank scans.
+- **Pair / Void Return:** Officers can pair a withdrawn item with its matching return (same member, item and count within 30 days). Both entries are voided and net to 0g, no matter how the auction price changed in between.
+- **Expand / Collapse All** in the *Ledger*, a **? Help** window that explains request statuses and officer buttons, and *(Active)* tab rule tooltips for each bank tab.
+- **Data Synced / Request Sync** status button in the header that checks online guild members for newer data.
+- `/vm diag` command that shows Guild Bank detection, sync queue and payment status, to help with troubleshooting.
+
+### Changed
+- **Zero-Sum Guild Accounting:** On *% of AH* tabs the member is charged the discounted price (rounded to the nearest gold, minimum 1g). The rest is shown on the guild account as a *[SUBSIDY]*, or as a *[SURPLUS]* when the 1g minimum is more than the item is worth.
+- **Free-for-All and Direct Withdrawals:** Items taken from Free-for-All tabs, or withdrawn without an approved request, are tracked at 100% of their auction value in the *Ledger* and *Ranking*, so taking an item out and putting it back nets to 0g.
+- **Reassign** now works on every non-derived Ledger entry, including item deposits (for example raid loot) moved to the guild account with an expense category.
+- **Two-Word Character Names:** Names that appear only partly in the Guild Bank log (first word only) are matched to the full guild roster name everywhere, including class colors and duplicate detection.
+- **Ledger and Ranking** now use exactly the same valuation, so their totals always agree.
+- **Settings** shows unpurchased Guild Bank tabs in a compact list.
+- **Sync Protocol:** The protocol version is now 7. Request and Ledger messages go out before bulk inventory data, the inventory is only re-sent when its contents change (gold-only changes send a small update), and long messages are shortened to fit the chat channel limit instead of being dropped silently.
+- **Officer Rank Detection:** Officer permissions are now determined the same way for your own client, other members' messages and tab rule checks.
+- **Request Cleanup:** Completed, rejected and written-off requests are removed after 30 days.
+- **Monthly Ledger Compaction** is paused for now so that all clients keep identical Ledger data. Old deletion records are still cleaned up after 90 days.
+
+### Fixed
+- Vault Manager now detects an open Guild Bank on clients and bag addons that do not report it (no Guild Bank open event, hidden default Guild Bank window). It also notices when the bank is closed or the player walks away.
+- Fixed *Prepare* doing nothing, and fixed requests being marked as fulfilled without the items or gold actually being withdrawn.
+- Fixed a Guild Bank withdrawal by an officer with a different number of items being auto-matched to an approved request.
+- Fixed gold deposits and withdrawals only appearing in the *Ledger* after closing and reopening the Guild Bank.
+- Fixed deleted Ledger entries coming back after the next bank scan or from other guild members.
+- Fixed two identical transactions by the same member within two days being merged into one.
+- Fixed a member with no bank data being able to wipe the vault view for the whole guild.
+- Fixed attaching several stacks to Send Mail overwriting the first attachment.
+- Fixed pressing Escape in Vault Manager also opening the game menu.
+- Fixed a double click on a request button triggering the next action after the button changed.
+- Fixed the relog reminder sometimes not appearing because guild rank information was not loaded yet.
+
+### Removed
+- Removed the unused automatic return tracking, which is replaced by *Pair / Void Return*.
+
 ## [1.4.3] - 2026-11-25
 
 ### Added

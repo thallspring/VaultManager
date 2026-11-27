@@ -173,6 +173,11 @@ local function CaptureMailSnapshot(target)
     end
 
     local sentMoney = (GetSendMailMoney and GetSendMailMoney()) or 0
+    local codAmount = (GetSendMailCOD and GetSendMailCOD()) or 0
+    if codAmount > 0 then
+        -- With CoD checked the money field is the CoD amount, not gold sent to the recipient
+        sentMoney = 0
+    end
     local itemsByKey = {}
     local maxSlots = ATTACHMENTS_MAX_SEND or 12
 
@@ -206,6 +211,7 @@ local function CaptureMailSnapshot(target)
     pendingMailSnapshot = {
         recipient = recip,
         money = sentMoney,
+        cod = codAmount,
         items = itemsByKey,
         timestamp = time()
     }
@@ -302,7 +308,8 @@ function Fulfillment:GetPendingAndApprovedCounts()
 end
 
 -- Used by BankScanner for direct member withdrawals of APPROVED requests
-function Fulfillment:FindMatchingApprovedRequest(recipientName, itemID, itemName, count, goldCopper)
+-- exactOnly: only match when the withdrawn count equals the requested count (bank log auto-completion)
+function Fulfillment:FindMatchingApprovedRequest(recipientName, itemID, itemName, count, goldCopper, exactOnly)
     if not VM.db or not VM.db.requests or not recipientName or recipientName == "" then return nil end
 
     local numID = tonumber(itemID) or 0
@@ -348,6 +355,7 @@ function Fulfillment:FindMatchingApprovedRequest(recipientName, itemID, itemName
         end
     end
 
+    if exactOnly then return bestExact end
     return bestExact or bestCover
 end
 
@@ -455,20 +463,32 @@ function Fulfillment:Init()
         end)
     end
 
-    -- Delayed relog reminder if this officer still has unfulfilled PREPARED requests
+    -- Delayed relog reminder if this officer still has unfulfilled PREPARED requests.
+    -- Guild rank info may not be available 5s after login, so retry a few times.
     if C_Timer and C_Timer.After then
-        C_Timer.After(5, function()
+        local attempts = 0
+        local function CheckRelogReminder()
+            attempts = attempts + 1
+            local _, _, rankIndex = GetGuildInfo("player")
+            if (VM.isUnguilded or rankIndex == nil) and attempts < 4 then
+                C_Timer.After(5, CheckRelogReminder)
+                return
+            end
             if not VM.isUnguilded and VM:IsOfficer() then
                 local mine = self:GetMyPreparedOrders()
                 if #mine > 0 and VM.UI and VM.UI.ShowRelogPreparedReminder then
                     VM.UI:ShowRelogPreparedReminder(mine)
                 end
             end
-        end)
+        end
+        C_Timer.After(5, CheckRelogReminder)
     end
 
     local f = CreateFrame("Frame")
-    f:RegisterEvent("GUILDBANKFRAME_CLOSED")
+    f:RegisterEvent("BAG_UPDATE")
+    f:RegisterEvent("PLAYER_MONEY")
+    f:RegisterEvent("UI_ERROR_MESSAGE")
+    pcall(f.RegisterEvent, f, "BAG_UPDATE_DELAYED")
     f:RegisterEvent("MAIL_SHOW")
     f:RegisterEvent("MAIL_CLOSED")
     f:RegisterEvent("MAIL_SEND_SUCCESS")
@@ -480,8 +500,10 @@ function Fulfillment:Init()
     f:RegisterEvent("UI_INFO_MESSAGE")
 
     f:SetScript("OnEvent", function(_, event, arg1, arg2)
-        if event == "GUILDBANKFRAME_CLOSED" then
-            self.isWithdrawing = false
+        if event == "BAG_UPDATE" or event == "BAG_UPDATE_DELAYED" or event == "PLAYER_MONEY" then
+            self:CheckWithdrawVerification()
+        elseif event == "UI_ERROR_MESSAGE" then
+            self:NoteWithdrawError(arg1, arg2)
         elseif event == "MAIL_SHOW" then
             self.isMailOpen = true
             pendingMailSnapshot = nil
@@ -505,6 +527,10 @@ function Fulfillment:Init()
                 local done = self:CompleteFromTransfer(snap.recipient, snap.items, snap.money, "MAIL")
                 if done > 0 then
                     VM:Print(string.format("Mail sent — auto-completed %d request(s).", done))
+                    -- CoD payment is credited to the member at delivery; you now hold it for the guild
+                    if (snap.cod or 0) > 0 then
+                        self:RecordDeliveryPayment(snap.recipient, snap.cod, "MAIL")
+                    end
                 end
                 if VM.UI and VM.UI.ShowMailFulfillmentPanel and self.isMailOpen then
                     local remaining = self:GetMyPreparedOrders()
@@ -540,21 +566,13 @@ function Fulfillment:Init()
                 local snap = lastAcceptedTrade
                 lastAcceptedTrade = nil
 
-                if snap.targetMoney and snap.targetMoney > 0 and snap.recipient ~= "" then
-                    VM.pendingTradePayments = VM.pendingTradePayments or {}
-                    local payerMain = VM:GetMainFor(snap.recipient)
-                    table.insert(VM.pendingTradePayments, {
-                        amount = snap.targetMoney,
-                        payer = payerMain,
-                        rawPayer = snap.recipient,
-                        timestamp = time()
-                    })
-                    VM:LogDebug(string.format("Recorded pending trade payment: %s from %s", VM:FormatMoney(snap.targetMoney), payerMain))
-                end
-
                 local done = self:CompleteFromTransfer(snap.recipient, snap.items, snap.playerMoney, "TRADE")
                 if done > 0 then
                     VM:Print(string.format("Trade completed — auto-completed %d request(s).", done))
+                    -- Gold the member put in the trade is their payment, credited to them now
+                    if snap.targetMoney and snap.targetMoney > 0 and snap.recipient ~= "" then
+                        self:RecordDeliveryPayment(snap.recipient, snap.targetMoney, "TRADE")
+                    end
                 end
             end
         elseif event == "TRADE_CLOSED" then
@@ -567,6 +585,18 @@ function Fulfillment:Init()
             end
         end
     end)
+end
+
+-- Credits a member's CoD/Trade payment at delivery. The receiving officer is recorded as holder,
+-- so their later Guild Bank deposit of that gold is booked as a transfer (see BankScanner:ScanMoneyLogs).
+function Fulfillment:RecordDeliveryPayment(payer, amount, method)
+    local copper = math.floor(tonumber(amount) or 0)
+    if copper <= 0 or not VM.Ledger or not VM.Ledger.RecordPayment then return end
+    local tx = VM.Ledger:RecordPayment(payer, copper, VM:GetPlayerName(), method)
+    if tx then
+        VM:Print(string.format("Recorded %s payment of %s from |cffffff00%s|r. Deposit it in the Guild Bank as a transfer.",
+            method == "MAIL" and "CoD" or "trade", VM:FormatMoney(copper), VM:NormalizeName(payer)))
+    end
 end
 
 -- Create new item request (Member / Officer)
@@ -740,22 +770,147 @@ function Fulfillment:FinalizePreparedState(req, withdrawnFromBank)
     end
 end
 
--- Executes Guild Bank item withdrawal steps into reserved empty bag slots
+--------------------------------------------------------------------------------
+-- Verified Guild Bank withdrawal (Prepare)
+-- A request only becomes PREPARED/FULFILLED after the items arrived in the bags
+-- (BAG_UPDATE) or the gold arrived (PLAYER_MONEY). Otherwise it stays APPROVED.
+--------------------------------------------------------------------------------
+local WITHDRAW_VERIFY_TIMEOUT = 5
+local withdrawSession = nil
+
+local function CountMatchingInBags(req)
+    local total = 0
+    for bag = 0, 4 do
+        local numSlots = GetContainerSlotCount(bag)
+        for slot = 1, numSlots do
+            local link, count = GetBagSlotInfo(bag, slot)
+            if link and count and count > 0 then
+                local id = tonumber(link:match("item:(%d+)")) or 0
+                local name = link:match("%[(.-)%]") or link
+                if DoesItemMatchRequest(id, name, req) then
+                    total = total + count
+                end
+            end
+        end
+    end
+    return total
+end
+
+local verifyFrame = CreateFrame("Frame")
+verifyFrame:Hide()
+local verifyAccum = 0
+verifyFrame:SetScript("OnUpdate", function(selfFrame, elapsed)
+    if not withdrawSession or not withdrawSession.verifying then
+        selfFrame:Hide()
+        return
+    end
+    verifyAccum = verifyAccum + elapsed
+    if verifyAccum < 0.25 then return end
+    verifyAccum = 0
+    Fulfillment:CheckWithdrawVerification()
+end)
+
+function Fulfillment:NoteWithdrawError(arg1, arg2)
+    if not withdrawSession then return end
+    local msg = (type(arg2) == "string" and arg2) or (type(arg1) == "string" and arg1) or nil
+    if msg and msg ~= "" then
+        withdrawSession.lastError = msg
+    end
+end
+
+local function EndWithdrawSession()
+    withdrawSession = nil
+    Fulfillment.isWithdrawing = false
+    verifyFrame:Hide()
+end
+
+function Fulfillment:FailWithdraw(reason)
+    local s = withdrawSession
+    if not s then return end
+    local req = s.req
+    local gained = 0
+    if s.kind == "ITEM" then
+        gained = math.max(0, CountMatchingInBags(req) - (s.before or 0))
+    else
+        gained = math.max(0, ((GetMoney and GetMoney()) or 0) - (s.before or 0))
+    end
+    EndWithdrawSession()
+
+    local detail = s.lastError and (" Server: " .. s.lastError) or ""
+    VM:Print(string.format("|cffff4444Prepare failed: %s%s Request stays APPROVED.|r", reason or "withdrawal was not confirmed.", detail))
+    if gained > 0 then
+        if s.kind == "ITEM" then
+            VM:Print(string.format("|cffffaa00%d of %d item(s) did arrive in your bags. Put them back or click Prepare again after the bank updates.|r",
+                gained, s.expected or 0))
+        else
+            VM:Print(string.format("|cffffaa00%s arrived in your bags (expected %s).|r", VM:FormatMoney(gained), VM:FormatMoney(s.expected or 0)))
+        end
+    end
+    if VM.BankScanner and VM.BankScanner.SchedulePostWithdrawScan then
+        VM.BankScanner:SchedulePostWithdrawScan()
+    end
+    if VM.UI then VM.UI:RefreshAll() end
+end
+
+function Fulfillment:CheckWithdrawVerification()
+    local s = withdrawSession
+    if not s or not s.verifying then return end
+    local gained
+    if s.kind == "ITEM" then
+        gained = CountMatchingInBags(s.req) - (s.before or 0)
+    else
+        gained = ((GetMoney and GetMoney()) or 0) - (s.before or 0)
+    end
+
+    if gained >= (s.expected or 0) then
+        local req = s.req
+        EndWithdrawSession()
+        local live = VM.db.requests[req.id]
+        if live and live.status == "APPROVED" then
+            self:FinalizePreparedState(live, true)
+        end
+        if VM.BankScanner and VM.BankScanner.SchedulePostWithdrawScan then
+            VM.BankScanner:SchedulePostWithdrawScan()
+        end
+        return
+    end
+
+    if GetTime() > (s.deadline or 0) then
+        self:FailWithdraw("the items/gold did not arrive in your bags in time.")
+    end
+end
+
+local function StartVerification(s, extraSec)
+    s.verifying = true
+    s.deadline = GetTime() + WITHDRAW_VERIFY_TIMEOUT + (extraSec or 0)
+    verifyAccum = 0
+    verifyFrame:Show()
+    Fulfillment:CheckWithdrawVerification()
+end
+
+-- Bank closed (detected by BankScanner): abort queued steps; keep verifying what is already in flight
+function Fulfillment:OnGuildBankClosed()
+    local s = withdrawSession
+    if s and not s.verifying then
+        self:FailWithdraw("the Guild Bank closed before the withdrawal finished.")
+    end
+end
+
+-- Executes Guild Bank item withdrawal steps into reserved empty bag slots, then verifies arrival
 function Fulfillment:ExecuteBankWithdrawSteps(req, tab, steps)
+    local s = withdrawSession
+    if not s then return end
+
     local function RunStep(idx)
+        if withdrawSession ~= s then return end
         local step = steps[idx]
         if not step then
-            self.isWithdrawing = false
-            self:FinalizePreparedState(req, true)
-            if VM.BankScanner and VM.BankScanner.SchedulePostWithdrawScan then
-                VM.BankScanner:SchedulePostWithdrawScan()
-            end
+            StartVerification(s, 0)
             return
         end
 
         if not IsBankCurrentlyOpen() then
-            self.isWithdrawing = false
-            VM:Print("|cffff4444Guild Bank closed before withdrawal finished.|r")
+            Fulfillment:FailWithdraw("the Guild Bank closed before the withdrawal finished.")
             return
         end
 
@@ -769,43 +924,26 @@ function Fulfillment:ExecuteBankWithdrawSteps(req, tab, steps)
                 SplitGuildBankItem(tab, step.gbSlot, step.takeCount)
             end
         end
+        if GetCursorInfo and not GetCursorInfo() then
+            s.lastError = s.lastError or "nothing was picked up from the Guild Bank slot (permission, daily limit or locked slot)."
+        end
         PickupBagSlot(step.destBag, step.destSlot)
-        ClearCursor()
+        -- If the drop was rejected the item is still on the cursor: return it instead of leaving it there
+        if CursorHasItem and CursorHasItem() then
+            ClearCursor()
+        end
 
-        if idx < #steps then
-            if C_Timer and C_Timer.After then
-                C_Timer.After(0.28, function() RunStep(idx + 1) end)
-            else
-                RunStep(idx + 1)
-            end
+        if idx < #steps and C_Timer and C_Timer.After then
+            C_Timer.After(0.35, function() RunStep(idx + 1) end)
         else
-            self.isWithdrawing = false
-            self:FinalizePreparedState(req, true)
-            if VM.BankScanner and VM.BankScanner.SchedulePostWithdrawScan then
-                VM.BankScanner:SchedulePostWithdrawScan()
-            end
+            RunStep(idx + 1)
         end
     end
 
     RunStep(1)
 end
 
--- Prepare request: requires open Guild Bank (event-based check so Bagnon/ElvUI/custom frames work)
-function Fulfillment:PrepareRequest(reqID)
-    if not VM:IsOfficer() then return end
-    local req = VM.db.requests[reqID]
-    if not req or req.status ~= "APPROVED" then return end
-
-    if self.isWithdrawing then
-        VM:Print("|cffffaa00Already withdrawing a request from the Guild Bank. Please wait a moment.|r")
-        return
-    end
-
-    if not IsBankCurrentlyOpen() then
-        VM:Print("|cffff4444Open the Guild Bank to prepare and withdraw this request.|r")
-        return
-    end
-
+local function BeginPrepare(self, req)
     if req.isGoldRequest then
         local goldAmt = tonumber(req.goldAmount or req.quotedTotalPrice or req.quotedUnitPrice) or 0
         if goldAmt <= 0 then return end
@@ -822,27 +960,56 @@ function Fulfillment:PrepareRequest(reqID)
                 VM:FormatMoney(limit), VM:FormatMoney(goldAmt)))
             return
         end
+        if CanWithdrawGuildBankMoney and not CanWithdrawGuildBankMoney() then
+            VM:Print("|cffff4444Your guild rank is not allowed to withdraw gold from the Guild Bank.|r")
+            return
+        end
+        if not WithdrawGuildBankMoney then
+            VM:Print("|cffff4444This client does not support Guild Bank gold withdrawal.|r")
+            return
+        end
 
         self.isWithdrawing = true
-        if WithdrawGuildBankMoney then
-            WithdrawGuildBankMoney(goldAmt)
-        end
-        self.isWithdrawing = false
-        self:FinalizePreparedState(req, true)
-        if VM.BankScanner and VM.BankScanner.SchedulePostWithdrawScan then
-            VM.BankScanner:SchedulePostWithdrawScan()
-        end
+        withdrawSession = {
+            req = req,
+            kind = "GOLD",
+            before = (GetMoney and GetMoney()) or 0,
+            expected = goldAmt,
+        }
+        WithdrawGuildBankMoney(goldAmt)
+        StartVerification(withdrawSession, 0)
         return
     end
 
     -- Item Request
     local needed = tonumber(req.count) or 1
     local targetTab = tonumber(req.tab) or 1
+
+    if GetGuildBankTabInfo then
+        local _, _, isViewable, _, _, remaining = GetGuildBankTabInfo(targetTab)
+        if isViewable == false then
+            VM:Print(string.format("|cffff4444You cannot view Guild Bank Tab %d.|r", targetTab))
+            return
+        end
+        if type(remaining) == "number" and remaining == 0 then
+            VM:Print(string.format("|cffff4444You have no item withdrawals left today on Guild Bank Tab %d.|r", targetTab))
+            return
+        end
+    end
+
     self.isWithdrawing = true
+    withdrawSession = {
+        req = req,
+        kind = "ITEM",
+        before = CountMatchingInBags(req),
+        expected = needed,
+    }
+    local session = withdrawSession
 
     local function ScanAndWithdrawFromTab(attempt)
+        if withdrawSession ~= session then return end
         if not IsBankCurrentlyOpen() then
-            self.isWithdrawing = false
+            Fulfillment:FailWithdraw("the Guild Bank is not open.")
             return
         end
 
@@ -862,14 +1029,13 @@ function Fulfillment:PrepareRequest(reqID)
         end
 
         if totalAvailable < needed then
-            if attempt < 2 and C_Timer and C_Timer.After then
+            if attempt < 3 and C_Timer and C_Timer.After then
                 if SetCurrentGuildBankTab then SetCurrentGuildBankTab(targetTab) end
                 if QueryGuildBankTab then QueryGuildBankTab(targetTab) end
-                C_Timer.After(0.45, function() ScanAndWithdrawFromTab(attempt + 1) end)
+                C_Timer.After(0.6, function() ScanAndWithdrawFromTab(attempt + 1) end)
                 return
             end
-            self.isWithdrawing = false
-            VM:Print(string.format("|cffff4444Only %d of %d %s found in Tab %d. Try again after the tab loads.|r",
+            Fulfillment:FailWithdraw(string.format("only %d of %d %s found in Tab %d.",
                 totalAvailable, needed, req.itemLink or req.itemName or "Item", targetTab))
             return
         end
@@ -886,19 +1052,18 @@ function Fulfillment:PrepareRequest(reqID)
         local remaining = needed
         local emptyIdx = 1
 
-        for _, s in ipairs(matchingSlots) do
+        for _, slotInfo in ipairs(matchingSlots) do
             if remaining <= 0 then break end
             if not empties[emptyIdx] then
-                self.isWithdrawing = false
-                VM:Print(string.format("|cffff4444Not enough free general bag slots to withdraw %dx %s.|r",
+                Fulfillment:FailWithdraw(string.format("not enough free general bag slots to withdraw %dx %s.",
                     needed, req.itemLink or req.itemName or "Item"))
                 return
             end
-            local take = math.min(s.count, remaining)
+            local take = math.min(slotInfo.count, remaining)
             table.insert(steps, {
-                gbSlot = s.slot,
+                gbSlot = slotInfo.slot,
                 takeCount = take,
-                isFullStack = (take == s.count),
+                isFullStack = (take == slotInfo.count),
                 destBag = empties[emptyIdx].bag,
                 destSlot = empties[emptyIdx].slot,
             })
@@ -906,7 +1071,16 @@ function Fulfillment:PrepareRequest(reqID)
             emptyIdx = emptyIdx + 1
         end
 
-        self:ExecuteBankWithdrawSteps(req, targetTab, steps)
+        if GetGuildBankTabInfo then
+            local _, _, _, _, _, remainingWithdrawals = GetGuildBankTabInfo(targetTab)
+            if type(remainingWithdrawals) == "number" and remainingWithdrawals >= 0 and remainingWithdrawals < #steps then
+                Fulfillment:FailWithdraw(string.format("this needs %d stack withdrawal(s) but you only have %d left today on Tab %d.",
+                    #steps, remainingWithdrawals, targetTab))
+                return
+            end
+        end
+
+        Fulfillment:ExecuteBankWithdrawSteps(req, targetTab, steps)
     end
 
     local curTab = (GetCurrentGuildBankTab and GetCurrentGuildBankTab()) or 0
@@ -920,6 +1094,35 @@ function Fulfillment:PrepareRequest(reqID)
         end
     else
         ScanAndWithdrawFromTab(1)
+    end
+end
+
+-- Prepare request: confirms the Guild Bank is reachable (works with bag addons / no open events),
+-- withdraws, and only marks PREPARED/FULFILLED after the withdrawal is verified.
+function Fulfillment:PrepareRequest(reqID)
+    if not VM:IsOfficer() then return end
+    local req = VM.db.requests[reqID]
+    if not req or req.status ~= "APPROVED" then return end
+
+    if self.isWithdrawing then
+        VM:Print("|cffffaa00Already withdrawing a request from the Guild Bank. Please wait a moment.|r")
+        return
+    end
+
+    local function Proceed(ok)
+        if not ok then
+            VM:Print("|cffff4444Open the Guild Bank to prepare and withdraw this request.|r")
+            return
+        end
+        local live = VM.db.requests[reqID]
+        if not live or live.status ~= "APPROVED" or self.isWithdrawing then return end
+        BeginPrepare(self, live)
+    end
+
+    if VM.BankScanner and VM.BankScanner.EnsureBankOpen then
+        VM.BankScanner:EnsureBankOpen(Proceed)
+    else
+        Proceed(IsBankCurrentlyOpen())
     end
 end
 
@@ -1199,8 +1402,16 @@ function Fulfillment:PopulateMail(req)
     end
 
     local left = AttachItemsFromBags(req, function()
-        ClickSendMailItemButton()
-        return true
+        -- Attach into the first empty Send Mail slot (calling without an index can overwrite slot 1)
+        local maxSlots = ATTACHMENTS_MAX_SEND or 12
+        for i = 1, maxSlots do
+            local occupied = (GetSendMailItemLink and GetSendMailItemLink(i)) or (GetSendMailItem and GetSendMailItem(i))
+            if not occupied then
+                ClickSendMailItemButton(i)
+                return true
+            end
+        end
+        return false
     end)
     if left > 0 then
         VM:Print(string.format("|cffffaa00Attached available items, but %d more %s missing from bags.|r",

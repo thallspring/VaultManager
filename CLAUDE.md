@@ -250,3 +250,19 @@ Before making edits, perform a full read-only review of all 8 `.lua` files and r
 
 5\. A concrete, prioritized fix plan (keeping `VaultManager.toc` at `1.4.3` until user confirms in-game tests pass).
 
+
+---
+
+## 8. Audit Status (fix/v1.5.0-audit, pending in-game verification)
+
+**In-game Step 0 findings (WoW Forever 1.15.x):** opening the Guild Bank fires *no* `GUILDBANKFRAME_OPENED` and *no* `PLAYER_INTERACTION_MANAGER_FRAME_SHOW`; only `GUILDBANKBAGSLOTS_CHANGED` / `GUILDBANKLOG_UPDATE`. `GuildBankFrame` exists but is not visible. `MAX_GUILDBANK_TABS = 8` (money log index 9). Bank logs record full two-word names (`Thallock Dotcom`) while `UnitName("player")` returns only the first word (`Thallock`).
+
+**Implemented:**
+* Bank session detection: server traffic opens a session; close via `CloseGuildBankFrame` hook, `GuildBankFrame` OnHide, close/interaction events, loading screens, or an unanswered heartbeat probe (`QueryGuildBankTab` + money log after 20s idle / on `PLAYER_STOPPED_MOVING`). `BankScanner:EnsureBankOpen(cb)` actively probes before Prepare/Force Scan. `/vm diag` shows detection state.
+* Prepare is verified (`BAG_UPDATE` / `PLAYER_MONEY`, 5s timeout, `UI_ERROR_MESSAGE` captured, daily withdrawal limit pre-check). Scanner auto-completion of approved requests requires an exact count.
+* Log answers are never dropped (`pendingRescan`, capped chain) and money changes trigger a 2s follow-up money log query.
+* Dedup keys use `VM:CanonicalActor()` (roster-resolved two-word names). Tombstones of bank-log sourced entries count as consumed log lines (no re-import) and win against peers' re-imports. `CleanupDuplicates` only tombstones copies from *different* scanners (`dupOf`, local only).
+* Officers can delete any non-derived entry (confirm popup). Pair / Void Return (`Ledger:PairTransactions`, synced via TX state flag `2` + `pairId`).
+* Member payments (`source = "PAYMENT"`, holder = `tx.officer`) are credited at Mail CoD / Trade delivery; the holder's later bank deposit becomes `source = "TRANSFER"` (`chargedTotalPrice` = transferred part, valued 0).
+* Comms: high/low priority queues, `INV_GOLD`, content-signature inventory broadcasts, TX/REQ byte budget, no fake `lastScan`, officer-only deletes/voids, unified `VM:IsOfficerRank()`.
+* Monthly compaction paused (`VM.COMPACTION_ENABLED = false`); 90-day tombstone purge still runs.

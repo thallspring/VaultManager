@@ -4,6 +4,8 @@ _G.VaultManager = VM
 VM.PREFIX = "VMGR_V1"
 VM.VERSION = 7
 VM.OFFICER_MAX_RANK_INDEX = 1
+-- Monthly compaction is paused until P2P ledger state is stable across clients (tombstone purge still runs)
+VM.COMPACTION_ENABLED = false
 VM.debugLog = {}
 VM.pendingTradePayments = {}
 
@@ -350,11 +352,35 @@ function VM:NormalizeItemKey(itemID, itemLink, itemName)
     end
 end
 
+-- Canonical actor key for log deduplication: resolves first-word log/UnitName variants
+-- (e.g. "Thallock" vs "Thallock Dotcom") to the guild roster name when unambiguous.
+function VM:CanonicalActor(name)
+    local n = self:NormalizeActor(name)
+    if n == "UNATTRIBUTED" or n == "GUILD" then return n end
+    local cache = self.db and self.db.rosterCache
+    if cache and next(cache) then
+        local key = self:ResolveNameKey(cache, n)
+        if key then return key end
+    end
+    return n
+end
+
+-- Loose character comparison: exact, case-insensitive, or first-word vs two-word name
+function VM:IsSameCharacter(a, b)
+    local na, nb = self:NormalizeName(a), self:NormalizeName(b)
+    if na == "" or nb == "" then return false end
+    local la, lb = na:lower(), nb:lower()
+    if la == lb then return true end
+    if not la:find("%s") and lb:sub(1, #la + 1) == (la .. " ") then return true end
+    if not lb:find("%s") and la:sub(1, #lb + 1) == (lb .. " ") then return true end
+    return self:CanonicalActor(na) == self:CanonicalActor(nb)
+end
+
 function VM:GetTxMatchKey(tx)
     if not tx then return "" end
     local isGold = (tx.itemID == 0 or tx.itemLink == "GOLD" or tx.source == "BANK_MONEY_LOG" or tx.source == "MANUAL_GOLD" or (tx.itemName and (tx.itemName:find("Gold Deposit") or tx.itemName:find("Gold Withdrawal"))))
     local action = self:NormalizeAction(tx.type)
-    local actor = self:NormalizeActor(tx.rawSender or tx.player)
+    local actor = self:CanonicalActor(tx.rawSender or tx.player)
     if isGold then
         local copper = (tx.unitPriceAtTime or 0) * (tx.count or 1)
         return string.format("GOLD:%s:%s:%d", action, actor, copper)
@@ -369,16 +395,18 @@ function VM:GetPlayerName()
     return self:NormalizeName(UnitName("player"))
 end
 
+-- Single source of truth for officer ranks (used locally, for peers, for tab rules and P2P trust)
+function VM:IsOfficerRank(rankIndex)
+    return type(rankIndex) == "number" and rankIndex >= 0 and rankIndex <= VM.OFFICER_MAX_RANK_INDEX
+end
+
 function VM:IsOfficer()
     if not IsInGuild() then return false end
     local _, _, rankIndex = GetGuildInfo("player")
-    if rankIndex ~= nil and rankIndex <= VM.OFFICER_MAX_RANK_INDEX then
+    if self:IsOfficerRank(rankIndex) then
         return true
     end
     if IsGuildLeader and IsGuildLeader() then
-        return true
-    end
-    if CanEditOfficerNote and CanEditOfficerNote() then
         return true
     end
     return false
@@ -407,7 +435,7 @@ function VM:IsOfficerName(name)
                     local rLower = rNorm:lower()
                     if rLower == normLower then
                         self.db.rosterCache[rNorm] = rIndex or 99
-                        return (rIndex ~= nil and rIndex <= VM.OFFICER_MAX_RANK_INDEX)
+                        return self:IsOfficerRank(rIndex)
                     elseif allowPrefix and #rLower > prefixLen and rLower:sub(1, prefixLen) == prefix then
                         prefixRank = rIndex
                         prefixCount = prefixCount + 1
@@ -415,12 +443,12 @@ function VM:IsOfficerName(name)
                 end
             end
             if prefixCount == 1 and type(prefixRank) == "number" then
-                return prefixRank <= VM.OFFICER_MAX_RANK_INDEX
+                return self:IsOfficerRank(prefixRank)
             end
         end
         return false
     end
-    return rankIndex <= VM.OFFICER_MAX_RANK_INDEX
+    return self:IsOfficerRank(rankIndex)
 end
 
 function VM:UpdateRosterCache()
@@ -1058,7 +1086,7 @@ function VM:ValidateTabRules()
                     end
 
                     if foundInRoster and rankIndex ~= nil then
-                        if rankIndex > 1 and rankIndex ~= 0 then
+                        if not self:IsOfficerRank(rankIndex) then
                             isNonOfficer = true
                         end
                     end
@@ -1584,6 +1612,22 @@ SlashCmdList["VAULTMANAGER"] = function(msg)
     if cmd == "scan" then
         if VM.BankScanner then VM.BankScanner:ForceScan() end
         print("|cff00ccff[Vault Manager]|r Manual Guild Bank scan triggered.")
+    elseif cmd == "diag" then
+        local S = VM.BankScanner
+        local p = function(k, v) print(string.format("  %s: |cffffff00%s|r", k, tostring(v))) end
+        print("|cff00ccff[Vault Manager Diagnostics]|r")
+        p("Bank open (detected)", S and S:IsBankOpen())
+        p("Bank open reason", S and S.bankOpenReason)
+        p("Last bank activity (s ago)", S and S.lastBankActivityAt and string.format("%.1f", GetTime() - S.lastBankActivityAt) or "never")
+        p("Scan state", S and S.scanState)
+        p("Withdrawing", VM.Fulfillment and VM.Fulfillment.isWithdrawing)
+        p("Officer", VM:IsOfficer())
+        p("Player / canonical", VM:GetPlayerName() .. " / " .. VM:CanonicalActor(VM:GetPlayerName()))
+        p("Tabs / money log index", tostring(GetNumGuildBankTabs and GetNumGuildBankTabs()) .. " / " .. tostring((MAX_GUILDBANK_TABS or 8) + 1))
+        p("Comms queue (high/low)", VM.Comms and VM.Comms.GetQueueSizes and string.format("%d/%d", VM.Comms:GetQueueSizes()) or "?")
+        if VM.Ledger and VM.Ledger.GetHeldCash then
+            p("Held member payments", VM:FormatMoneyPlain(VM.Ledger:GetHeldCash(VM:GetPlayerName())))
+        end
     elseif cmd == "debug" then
         print("|cff00ccff[Vault Manager Debug Log (last 15)]|r")
         local startIdx = math.max(1, #VM.debugLog - 14)

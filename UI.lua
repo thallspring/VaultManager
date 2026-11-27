@@ -82,6 +82,50 @@ if StaticPopupDialogs then
     }
 end
 
+if StaticPopupDialogs then
+    StaticPopupDialogs["VAULTMANAGER_DELETE_TX"] = {
+        text = "Delete this Ledger entry for all guild members?\n\n%s\n\nThe deletion is synced as a tombstone and the entry will not be re-imported from the Guild Bank log.",
+        button1 = "Delete",
+        button2 = "Cancel",
+        OnAccept = function(self, data)
+            local d = data or self.data
+            if d and d.txID and VM.Ledger then
+                VM.Ledger:DeleteTransaction(d.txID)
+            end
+        end,
+        timeout = 0,
+        whileDead = true,
+        hideOnEscape = true,
+        preferredIndex = 3,
+    }
+    StaticPopupDialogs["VAULTMANAGER_PAIR_TX"] = {
+        text = "Pair as return?\n\n%s\n%s\n\nBoth entries are voided and net to 0g regardless of price changes.",
+        button1 = "Pair",
+        button2 = "Cancel",
+        OnAccept = function(self, data)
+            local d = data or self.data
+            if d and d.a and d.b and VM.Ledger then
+                VM.Ledger:PairTransactions(d.a, d.b)
+            end
+        end,
+        timeout = 0,
+        whileDead = true,
+        hideOnEscape = true,
+        preferredIndex = 3,
+    }
+end
+
+local function DescribeTxPlain(tx)
+    if not tx then return "?" end
+    local isGold = (tx.itemID == 0 or tx.itemLink == "GOLD")
+    local when = date("%d/%m %H:%M", tx.timestamp or 0)
+    local who = tx.player or "?"
+    if isGold then
+        return string.format("%s  %s %s  %s", when, tx.type == "OUT" and "GOLD OUT" or "GOLD IN", VM:FormatMoneyPlain((tx.unitPriceAtTime or 0) * (tx.count or 1)), who)
+    end
+    return string.format("%s  %s %dx %s  %s", when, tx.type or "?", tx.count or 1, tx.itemName or "Item", who)
+end
+
 local function ApplyModernBackdrop(frame, bgColor, borderColor)
     if not frame.SetBackdrop then
         Mixin(frame, BackdropTemplateMixin)
@@ -1038,7 +1082,7 @@ function UI:CreateAssignModal()
         VM.Comms:BroadcastTransaction(tx)
 
         if payCb:GetChecked() and totalP > 0 and recipNorm ~= "GUILD" then
-            VM.Ledger:RecordGoldDeposit(recipNorm, totalP, "MANUAL_ASSIGN_PAYMENT", recipNorm, mainName)
+            VM.Ledger:RecordPayment(recipNorm, totalP, VM:GetPlayerName(), "MANUAL", "Manual assign payment")
         end
 
         VM:Print(string.format("Assigned %dx %s to |cffffff00%s|r (Charged: %s).", qty, item.name, recipNorm, VM:FormatMoney(totalP)))
@@ -1507,7 +1551,11 @@ function UI:CreateMainFrame()
         local prefs = GetUIPrefs()
         prefs.windowPos = { point = point, relativePoint = relativePoint, xOfs = xOfs, yOfs = yOfs }
     end)
-    mainFrame:SetScript("OnKeyDown", function(_, key)
+    mainFrame:SetScript("OnKeyDown", function(selfFrame, key)
+        -- Consume ESC (closes our window only, not the game menu); let all other keys through
+        if selfFrame.SetPropagateKeyboardInput and not (InCombatLockdown and InCombatLockdown()) then
+            selfFrame:SetPropagateKeyboardInput(key ~= "ESCAPE")
+        end
         if key == "ESCAPE" then
             if qtyPickerFrame and qtyPickerFrame:IsShown() then
                 qtyPickerFrame:Hide()
@@ -2450,6 +2498,10 @@ local function CreateRequestRow(content)
 
     local function ExecuteAction(actionKey, req)
         if not req or not actionKey then return end
+        -- Buttons shift between states (Prepare -> Complete); block accidental double clicks
+        local nowGT = GetTime()
+        if row.actionLockUntil and nowGT < row.actionLockUntil then return end
+        row.actionLockUntil = nowGT + 1.0
         if actionKey == "APPROVE" then
             VM.Fulfillment:ApproveRequest(req.id)
         elseif actionKey == "REJECT" or actionKey == "CANCEL" then
@@ -2997,6 +3049,18 @@ local function CreateLedgerRow(content)
     row.deleteBtn:SetPoint("RIGHT", -8, 0)
     row.deleteBtn:Hide()
 
+    row.pairBtn = CreateModernButton(row, 52, 20, "Pair", THEME.gold)
+    row.pairBtn:SetPoint("RIGHT", -32, 0)
+    row.pairBtn:Hide()
+    row.pairBtn:HookScript("OnEnter", function(selfBtn)
+        if selfBtn.tooltipText then
+            GameTooltip:SetOwner(selfBtn, "ANCHOR_TOP")
+            GameTooltip:SetText(selfBtn.tooltipText, 1, 1, 1, 1, true)
+            GameTooltip:Show()
+        end
+    end)
+    row.pairBtn:HookScript("OnLeave", function() GameTooltip:Hide() end)
+
     row:SetScript("OnEnter", function(selfRow)
         selfRow:SetBackdropColor(THEME.rowHover[1], THEME.rowHover[2], THEME.rowHover[3], 1)
         local tx = selfRow.txData
@@ -3036,8 +3100,30 @@ local function CreateLedgerRow(content)
 
     row.deleteBtn:SetScript("OnClick", function()
         local tx = row.txData
-        if tx and not tx.isDerived then
-            VM.Ledger:DeleteTransaction(tx.id)
+        if not tx or tx.isDerived then return end
+        local dlg = StaticPopup_Show and StaticPopup_Show("VAULTMANAGER_DELETE_TX", DescribeTxPlain(tx))
+        if dlg then
+            dlg.data = { txID = tx.id }
+        end
+    end)
+
+    row.pairBtn:SetScript("OnClick", function()
+        local tx = row.txData
+        if not tx or tx.isDerived then return end
+        if tx.voided then
+            VM.Ledger:UnpairTransaction(tx.id)
+            return
+        end
+        local partner = VM.Ledger:FindPairCandidate(tx)
+        if not partner then
+            VM:Print("No matching withdrawal/return found to pair with (same main, item and count within 30 days).")
+            return
+        end
+        local outTx = (tx.type == "OUT") and tx or partner
+        local inTx = (tx.type == "OUT") and partner or tx
+        local dlg = StaticPopup_Show and StaticPopup_Show("VAULTMANAGER_PAIR_TX", DescribeTxPlain(outTx), DescribeTxPlain(inTx))
+        if dlg then
+            dlg.data = { a = outTx.id, b = inTx.id }
         end
     end)
 
@@ -3158,6 +3244,7 @@ function UI:RefreshLedger()
         header.subText:Hide()
         header.actionBtn:Hide()
         header.deleteBtn:Hide()
+        header.pairBtn:Hide()
         header.nameText:Show()
         header.donatedText:Show()
         header.receivedText:Show()
@@ -3219,6 +3306,7 @@ function UI:RefreshLedger()
                     sub.subText:Show()
                     sub.actionBtn:Hide()
                     sub.deleteBtn:Hide()
+                    sub.pairBtn:Hide()
 
                     local dir
                     if isSummary then
@@ -3254,6 +3342,13 @@ function UI:RefreshLedger()
                     end
 
                     local noteTag = (tx.note and tx.note ~= "") and (" |cffcccccc— " .. tx.note .. "|r") or ""
+                    if tx.voided then
+                        noteTag = " |cffffd700[RETURN PAIRED — 0g]|r" .. noteTag
+                    elseif tx.source == "TRANSFER" then
+                        noteTag = " |cff26a6f2[TRANSFER]|r" .. noteTag
+                    elseif tx.source == "PAYMENT" then
+                        noteTag = " |cff44dd77[PAYMENT]|r" .. noteTag
+                    end
 
                     local ruleTag = ""
                     if tx.type == "OUT" and not isGold and not isSummary and not isDerived and tx.source ~= "WRITE_OFF" then
@@ -3284,8 +3379,20 @@ function UI:RefreshLedger()
                             dateStr, dir, catTag, charTag, rawTag, tx.count or 1, tx.itemLink or tx.itemName or "Item", VM:FormatMoney(val), ruleTag, noteTag))
                     end
 
-                    local showDelete = isOff and (tx.isManual == true) and (not isDerived)
+                    local showDelete = isOff and (not isDerived) and (not isSummary) and VM.Ledger:CanDeleteTransaction(tx)
                     local showAction = false
+                    local showPair = false
+                    if isOff and isItemTx and not isDerived then
+                        if tx.voided then
+                            sub.pairBtn:SetText("Unpair")
+                            sub.pairBtn.tooltipText = "Undo the return pairing; both entries count again."
+                            showPair = true
+                        elseif VM.Ledger:FindPairCandidate(tx) then
+                            sub.pairBtn:SetText("Pair")
+                            sub.pairBtn.tooltipText = "Pair this item with its matching withdrawal/return so both net to 0g regardless of price changes."
+                            showPair = true
+                        end
+                    end
 
                     if isOff and not isSummary and not isDerived then
                         if grp.mainName == "UNATTRIBUTED" then
@@ -3299,17 +3406,24 @@ function UI:RefreshLedger()
                         end
                     end
 
+                    local rightEdge = -8
                     if showDelete then
                         sub.deleteBtn:Show()
+                        rightEdge = -32
+                    end
+                    if showPair then
+                        sub.pairBtn:ClearAllPoints()
+                        sub.pairBtn:SetPoint("RIGHT", rightEdge, 0)
+                        sub.pairBtn:Show()
+                        rightEdge = rightEdge - 56
                     end
                     if showAction then
                         sub.actionBtn:ClearAllPoints()
-                        sub.actionBtn:SetPoint("RIGHT", showDelete and -32 or -8, 0)
+                        sub.actionBtn:SetPoint("RIGHT", rightEdge, 0)
                         sub.actionBtn:Show()
-                        sub.subText:SetWidth(showDelete and 530 or 554)
-                    else
-                        sub.subText:SetWidth(showDelete and 650 or 680)
+                        rightEdge = rightEdge - 112
                     end
+                    sub.subText:SetWidth(math.max(300, 690 + rightEdge))
 
                     y = y + 25
                 end
@@ -4525,7 +4639,6 @@ function UI:BuildSettingsPanel(panel)
             VM.db.processedBankLogs = {}
             VM.db.requests = {}
             VM.db.fulfillments = VM.db.requests
-            VM.pendingTradePayments = {}
         end
         if VM.Comms then
             VM.Comms.peerHasNewerData = false

@@ -20,10 +20,50 @@ local lastObservedBankMoney = 0
 local lastBankMoneyDrop = { amount = 0, at = 0 }
 
 Scanner.isBankOpen = false
+Scanner.bankOpenReason = nil
+Scanner.lastBankActivityAt = nil
 Scanner.scanState = "READY" -- "READY" | "SCANNING" | "COMPLETE" | "STALE"
 
+-- Bank session detection (WoW Forever 1.15.x fires neither GUILDBANKFRAME_OPENED nor
+-- PLAYER_INTERACTION_MANAGER_FRAME_SHOW for the Guild Bank, and bag addons hide GuildBankFrame).
+-- A session is opened by server responses (GUILDBANKBAGSLOTS_CHANGED / GUILDBANKLOG_UPDATE) and
+-- closed by close hooks/events or by an unanswered heartbeat probe.
+local PROBE_IDLE_SEC = 20      -- send a heartbeat probe after this many seconds without bank traffic
+local PROBE_TIMEOUT_SEC = 4    -- no server answer within this window => bank is closed
+local LOGIN_GUARD_SEC = 4      -- ignore bank traffic right after a loading screen
+local AUTO_OPEN_SUPPRESS_SEC = 90
+local lastBankClosedAt = 0
+local lastCloseReason = nil
+local loginGuardUntil = 0
+local probeSentAt = nil
+local lastProbeAt = 0
+local probeCallbacks = {}
+local pendingRescan = false
+local pendingRescanChain = 0   -- caps back-to-back follow-up scans so echo events can never loop
+local moneyFollowupLeft = 0
+local closeHooksInstalled = false
+
+local AUTO_LOG_SOURCES = {
+    BANK_LOG = true,
+    FFA_SCAN = true,
+    BANK_MONEY_LOG = true,
+    REQUEST = true,
+    GOLD_REQUEST = true,
+    TRANSFER = true,
+}
+
+local PAYMENT_SOURCES = {
+    PAYMENT = true,
+    MANUAL_ASSIGN_PAYMENT = true,
+}
+
 function Scanner:IsBankOpen()
-    return self.isBankOpen or (GuildBankFrame and GuildBankFrame:IsVisible() and true or false)
+    if self.isBankOpen then return true end
+    return (GuildBankFrame and GuildBankFrame:IsVisible()) and true or false
+end
+
+local function GetMoneyLogTab()
+    return (MAX_GUILDBANK_TABS or 8) + 1
 end
 
 -- Debounce frame using OnUpdate (without C_Timer)
@@ -253,8 +293,7 @@ local function QueryMoneyLogThrottled()
     local nowGT = GetTime and GetTime() or 0
     if (nowGT - lastMoneyLogQueryAt) < 0.5 then return end
     lastMoneyLogQueryAt = nowGT
-    QueryGuildBankLog((MAX_GUILDBANK_TABS or 8) + 1)
-    QueryGuildBankLog(7)
+    QueryGuildBankLog(GetMoneyLogTab())
 end
 
 local function QueryCurrentTabLogThrottled()
@@ -294,65 +333,263 @@ function Scanner:GetScanStatus()
     end
 end
 
+local function FireProbeCallbacks(ok)
+    if #probeCallbacks == 0 then return end
+    local cbs = probeCallbacks
+    probeCallbacks = {}
+    for _, cb in ipairs(cbs) do
+        pcall(cb, ok)
+    end
+end
+
+-- Heartbeat: keeps the bank session alive, detects closing via unanswered probes, runs money-log follow-ups
+local heartbeatFrame = CreateFrame("Frame")
+heartbeatFrame:Hide()
+local heartbeatAccum = 0
+heartbeatFrame:SetScript("OnUpdate", function(selfFrame, elapsed)
+    if moneyFollowupLeft > 0 then
+        moneyFollowupLeft = moneyFollowupLeft - elapsed
+        if moneyFollowupLeft <= 0 then
+            moneyFollowupLeft = 0
+            if Scanner.isBankOpen and QueryGuildBankLog then
+                lastMoneyLogQueryAt = GetTime()
+                QueryGuildBankLog(GetMoneyLogTab())
+                Scanner:TriggerDebouncedScan(false, 0.9)
+            end
+        end
+    end
+
+    heartbeatAccum = heartbeatAccum + elapsed
+    if heartbeatAccum < 0.5 then return end
+    heartbeatAccum = 0
+
+    local now = GetTime()
+    if not Scanner.isBankOpen and not probeSentAt and moneyFollowupLeft <= 0 then
+        selfFrame:Hide()
+        return
+    end
+
+    -- A visible default Guild Bank frame is proof enough that the session is alive
+    if Scanner.isBankOpen and GuildBankFrame and GuildBankFrame:IsVisible() then
+        Scanner.lastBankActivityAt = now
+    end
+
+    if probeSentAt then
+        if (now - probeSentAt) > PROBE_TIMEOUT_SEC then
+            probeSentAt = nil
+            FireProbeCallbacks(false)
+            if Scanner.isBankOpen then
+                Scanner:SetBankOpen(false, "probe-timeout")
+            end
+        end
+    elseif Scanner.isBankOpen and (now - (Scanner.lastBankActivityAt or now)) > PROBE_IDLE_SEC then
+        Scanner:SendProbe()
+    end
+end)
+
+function Scanner:SendProbe()
+    if not QueryGuildBankTab and not QueryGuildBankLog then return end
+    local now = GetTime()
+    probeSentAt = now
+    lastProbeAt = now
+    local curTab = (GetCurrentGuildBankTab and GetCurrentGuildBankTab()) or 1
+    if not curTab or curTab < 1 then curTab = 1 end
+    if QueryGuildBankTab then QueryGuildBankTab(curTab) end
+    if QueryGuildBankLog then
+        lastMoneyLogQueryAt = now
+        QueryGuildBankLog(GetMoneyLogTab())
+    end
+    heartbeatFrame:Show()
+end
+
+-- Confirms the Guild Bank is reachable (server answers a tab query) before running callback(true/false)
+function Scanner:EnsureBankOpen(callback)
+    local now = GetTime()
+    if self.isBankOpen and self.lastBankActivityAt and (now - self.lastBankActivityAt) <= 5 then
+        if callback then callback(true) end
+        return
+    end
+    if callback then table.insert(probeCallbacks, callback) end
+    if not probeSentAt then
+        self:SendProbe()
+    end
+end
+
+-- Called for every server-originated Guild Bank event. canOpen = event proves an open bank session.
+function Scanner:MarkBankActivity(reason, canOpen)
+    if VM.isUnguilded or not IsInGuild() then return end
+    local now = GetTime()
+    if not self.isBankOpen and now < loginGuardUntil then return end
+    self.lastBankActivityAt = now
+    if probeSentAt then
+        probeSentAt = nil
+    end
+    if not self.isBankOpen and canOpen then
+        self:SetBankOpen(true, reason)
+    end
+    FireProbeCallbacks(true)
+end
+
+function Scanner:SetBankOpen(open, reason)
+    if open then
+        if self.isBankOpen then return end
+        self.isBankOpen = true
+        self.bankOpenReason = reason
+        self.lastBankActivityAt = GetTime()
+        VM:LogDebug("BankScanner: bank session OPEN (" .. tostring(reason) .. ")")
+        lastObservedNumTabs = (GetNumGuildBankTabs and GetNumGuildBankTabs()) or 0
+        lastObservedNextTabCost = (GetGuildBankTabCost and GetGuildBankTabCost()) or 0
+        lastObservedBankMoney = (GetGuildBankMoney and GetGuildBankMoney()) or 0
+        lastBankMoneyDrop = { amount = 0, at = 0 }
+        heartbeatFrame:Show()
+
+        -- Do not re-pop the window if a heartbeat timeout falsely ended the previous session moments ago
+        local suppressAuto = (lastCloseReason == "probe-timeout") and ((GetTime() - lastBankClosedAt) < AUTO_OPEN_SUPPRESS_SEC)
+        if not suppressAuto and VM.Fulfillment and VM.Fulfillment.OnGuildBankOpened then
+            if C_Timer and C_Timer.After then
+                C_Timer.After(0.25, function()
+                    if Scanner.isBankOpen and VM.Fulfillment then
+                        VM.Fulfillment:OnGuildBankOpened()
+                    end
+                end)
+            else
+                VM.Fulfillment:OnGuildBankOpened()
+            end
+        end
+
+        suppressChatPrint = false
+        pendingRescanChain = 0
+        self:RequestAllTabsAndLogs()
+        self:TriggerDebouncedScan(true, 0.75)
+    else
+        if not self.isBankOpen then return end
+        self.isBankOpen = false
+        self.bankOpenReason = nil
+        lastBankClosedAt = GetTime()
+        lastCloseReason = reason
+        VM:LogDebug("BankScanner: bank session CLOSED (" .. tostring(reason) .. ")")
+        isScanning = false
+        isTabSwitching = false
+        pendingRetries = 0
+        pendingRescan = false
+        moneyFollowupLeft = 0
+        lastBankMoneyDrop = { amount = 0, at = 0 }
+        scanDebounceFrame:Hide()
+        rescanFrame:Hide()
+        scanTimeoutFrame:Hide()
+        if self.scanState == "SCANNING" then
+            self.scanState = "READY"
+        end
+        if VM.Fulfillment and VM.Fulfillment.OnGuildBankClosed then
+            VM.Fulfillment:OnGuildBankClosed()
+        end
+        if VM.UI and VM.UI.UpdateScanStatusButton then
+            VM.UI:UpdateScanStatusButton()
+        end
+    end
+end
+
+local function HookGuildBankFrame()
+    if GuildBankFrame and not GuildBankFrame.__vmHooked and GuildBankFrame.HookScript then
+        GuildBankFrame.__vmHooked = true
+        GuildBankFrame:HookScript("OnShow", function() Scanner:MarkBankActivity("frame-show", true) end)
+        GuildBankFrame:HookScript("OnHide", function() Scanner:SetBankOpen(false, "frame-hide") end)
+    end
+end
+
+function Scanner:InstallCloseHooks()
+    if closeHooksInstalled then return end
+    closeHooksInstalled = true
+    if hooksecurefunc and type(CloseGuildBankFrame) == "function" then
+        hooksecurefunc("CloseGuildBankFrame", function()
+            Scanner:SetBankOpen(false, "CloseGuildBankFrame")
+        end)
+    end
+    HookGuildBankFrame()
+end
+
+local function SafeRegister(frame, event)
+    local ok = pcall(frame.RegisterEvent, frame, event)
+    if not ok then
+        VM:LogDebug("BankScanner: event not available on this client: " .. tostring(event))
+    end
+    return ok
+end
+
+local function IsGuildBankerInteraction(arg)
+    local guildBanker = (Enum and Enum.PlayerInteractionType and Enum.PlayerInteractionType.GuildBanker) or 10
+    return arg == guildBanker
+end
+
 function Scanner:Init()
     local f = CreateFrame("Frame")
-    f:RegisterEvent("GUILDBANKFRAME_OPENED")
-    f:RegisterEvent("GUILDBANKFRAME_CLOSED")
-    f:RegisterEvent("GUILDBANKBAGSLOTS_CHANGED")
-    f:RegisterEvent("GUILDBANKLOG_UPDATE")
-    f:RegisterEvent("GUILDBANK_UPDATE_MONEY")
-    f:RegisterEvent("GUILDBANK_UPDATE_TABS")
+    SafeRegister(f, "GUILDBANKFRAME_OPENED")
+    SafeRegister(f, "GUILDBANKFRAME_CLOSED")
+    SafeRegister(f, "PLAYER_INTERACTION_MANAGER_FRAME_SHOW")
+    SafeRegister(f, "PLAYER_INTERACTION_MANAGER_FRAME_HIDE")
+    SafeRegister(f, "GUILDBANKBAGSLOTS_CHANGED")
+    SafeRegister(f, "GUILDBANKLOG_UPDATE")
+    SafeRegister(f, "GUILDBANK_UPDATE_MONEY")
+    SafeRegister(f, "GUILDBANK_UPDATE_WITHDRAWMONEY")
+    SafeRegister(f, "GUILDBANK_UPDATE_TABS")
+    SafeRegister(f, "PLAYER_ENTERING_WORLD")
+    SafeRegister(f, "PLAYER_STOPPED_MOVING")
+    SafeRegister(f, "ADDON_LOADED")
 
-    f:SetScript("OnEvent", function(_, event)
+    self:InstallCloseHooks()
+    loginGuardUntil = GetTime() + LOGIN_GUARD_SEC
+
+    f:SetScript("OnEvent", function(_, event, arg1)
+        if event == "ADDON_LOADED" then
+            if arg1 == "Blizzard_GuildBankUI" then HookGuildBankFrame() end
+            return
+        end
+        if event == "PLAYER_ENTERING_WORLD" then
+            loginGuardUntil = GetTime() + LOGIN_GUARD_SEC
+            if self.isBankOpen then self:SetBankOpen(false, "loading-screen") end
+            return
+        end
         if VM.isUnguilded then return end
-        VM:LogDebug("BankScanner event: " .. tostring(event))
+        VM:LogDebug("BankScanner event: " .. tostring(event) .. (arg1 ~= nil and (" " .. tostring(arg1)) or ""))
+
+        if event == "PLAYER_STOPPED_MOVING" then
+            -- Walking away ends the banker interaction without any event: verify sooner
+            if self.isBankOpen and not probeSentAt and (GetTime() - lastProbeAt) > 5 then
+                self:SendProbe()
+            end
+            return
+        end
 
         if event == "GUILDBANKFRAME_CLOSED" then
-            self.isBankOpen = false
-            isScanning = false
-            isTabSwitching = false
-            pendingRetries = 0
-            lastBankMoneyDrop = { amount = 0, at = 0 }
-            scanDebounceFrame:Hide()
-            rescanFrame:Hide()
-            scanTimeoutFrame:Hide()
-            if self.scanState == "SCANNING" then
-                self.scanState = "READY"
-            end
-            if VM.UI and VM.UI.UpdateScanStatusButton then
-                VM.UI:UpdateScanStatusButton()
-            end
+            self:SetBankOpen(false, event)
             return
         end
-
+        if event == "PLAYER_INTERACTION_MANAGER_FRAME_HIDE" then
+            if IsGuildBankerInteraction(arg1) then self:SetBankOpen(false, event) end
+            return
+        end
         if event == "GUILDBANKFRAME_OPENED" then
-            self.isBankOpen = true
-            lastObservedNumTabs = (GetNumGuildBankTabs and GetNumGuildBankTabs()) or 0
-            lastObservedNextTabCost = (GetGuildBankTabCost and GetGuildBankTabCost()) or 0
-            lastObservedBankMoney = (GetGuildBankMoney and GetGuildBankMoney()) or 0
-            lastBankMoneyDrop = { amount = 0, at = 0 }
-
-            -- Delay auto-open slightly so WoW's ShowUIPanel / CloseSpecialWindows does not close VM immediately
-            if VM.Fulfillment and VM.Fulfillment.OnGuildBankOpened then
-                if C_Timer and C_Timer.After then
-                    C_Timer.After(0.25, function()
-                        if self.isBankOpen and VM.Fulfillment then
-                            VM.Fulfillment:OnGuildBankOpened()
-                        end
-                    end)
-                else
-                    VM.Fulfillment:OnGuildBankOpened()
-                end
-            end
-
-            suppressChatPrint = false
-            self:RequestAllTabsAndLogs()
-            self:TriggerDebouncedScan(true, 0.75)
+            self:MarkBankActivity(event, true)
+            return
+        end
+        if event == "PLAYER_INTERACTION_MANAGER_FRAME_SHOW" then
+            if IsGuildBankerInteraction(arg1) then self:MarkBankActivity(event, true) end
             return
         end
 
-        if event == "GUILDBANK_UPDATE_MONEY" and self.isBankOpen then
-            if GetGuildBankMoney then
+        -- Slot/log responses only arrive while the bank is reachable => they open a session.
+        -- Money/tab updates only renew an existing session (they may be pushed guild-wide).
+        local opensSession = (event == "GUILDBANKBAGSLOTS_CHANGED" or event == "GUILDBANKLOG_UPDATE")
+        local wasOpen = self.isBankOpen
+        self:MarkBankActivity(event, opensSession)
+        if not self.isBankOpen then return end
+        if not wasOpen then
+            -- SetBankOpen already requested all tabs/logs and scheduled the initial scan
+            return
+        end
+
+        if event == "GUILDBANK_UPDATE_MONEY" or event == "GUILDBANK_UPDATE_WITHDRAWMONEY" then
+            if event == "GUILDBANK_UPDATE_MONEY" and GetGuildBankMoney then
                 local curMoney = GetGuildBankMoney() or 0
                 if lastObservedBankMoney > 0 and curMoney >= 0 and curMoney < lastObservedBankMoney then
                     lastBankMoneyDrop = { amount = lastObservedBankMoney - curMoney, at = GetTime() }
@@ -361,16 +598,23 @@ function Scanner:Init()
                     lastObservedBankMoney = curMoney
                 end
             end
-            if VM.Fulfillment and VM.Fulfillment.isWithdrawing then return end
-            -- Always fetch fresh money log immediately so live gold deposits/withdrawals register without reopening bank
+            if VM.Fulfillment and VM.Fulfillment.isWithdrawing then
+                pendingRescan = true
+                return
+            end
+            -- Fetch the money log now and once more shortly after: the server often answers the
+            -- first query with the pre-transaction log.
             QueryMoneyLogThrottled()
             suppressChatPrint = true
+            pendingRescanChain = 0
             self:TriggerDebouncedScan(false, 0.65)
+            moneyFollowupLeft = 2.0
+            heartbeatFrame:Show()
             return
         end
 
         -- Detect newly purchased Guild Bank Tab live ONLY if Guild Bank gold actually dropped by the tab cost
-        if event == "GUILDBANK_UPDATE_TABS" and self.isBankOpen and GetNumGuildBankTabs then
+        if event == "GUILDBANK_UPDATE_TABS" and GetNumGuildBankTabs then
             local curTabs = GetNumGuildBankTabs() or 0
             if lastObservedNumTabs > 0 and curTabs > lastObservedNumTabs then
                 local cost = tonumber(lastObservedNextTabCost) or 0
@@ -396,20 +640,33 @@ function Scanner:Init()
         end
 
         if VM.Fulfillment and VM.Fulfillment.isWithdrawing then
+            pendingRescan = true
             return
         end
 
         if event == "GUILDBANKBAGSLOTS_CHANGED" then
-            if isTabSwitching or GetTime() < ignoreSlotEventsUntil then return end
+            if isTabSwitching then return end
+            if GetTime() < ignoreSlotEventsUntil or isScanning then
+                pendingRescan = true
+                return
+            end
             QueryCurrentTabLogThrottled()
             suppressChatPrint = true
+            pendingRescanChain = 0
             self:TriggerDebouncedScan(false, 0.65)
         elseif event == "GUILDBANK_UPDATE_TABS" then
-            if isTabSwitching or isScanning then return end
+            if isTabSwitching or isScanning then
+                pendingRescan = true
+                return
+            end
             suppressChatPrint = true
             self:TriggerDebouncedScan(false, 0.65)
         elseif event == "GUILDBANKLOG_UPDATE" then
-            if isScanning or GetTime() < ignoreLogEventsUntil then return end
+            -- Never drop a log answer: if it lands during/just after a scan, rescan afterwards
+            if isScanning or GetTime() < ignoreLogEventsUntil then
+                pendingRescan = true
+                return
+            end
             suppressChatPrint = true
             self:TriggerDebouncedScan(false, 0.55)
         end
@@ -438,9 +695,12 @@ function Scanner:SchedulePostWithdrawScan()
     ignoreSlotEventsUntil = 0
     ignoreLogEventsUntil = 0
     isScanning = false
+    pendingRescan = false
     suppressChatPrint = true
     self:RequestAllTabsAndLogs()
     self:TriggerDebouncedScan(false, 0.65)
+    moneyFollowupLeft = 2.0
+    heartbeatFrame:Show()
 end
 
 function Scanner:RequestAllTabsAndLogs()
@@ -460,8 +720,8 @@ function Scanner:RequestAllTabsAndLogs()
         SetCurrentGuildBankTab(origTab)
     end
     if QueryGuildBankLog then
-        QueryGuildBankLog((MAX_GUILDBANK_TABS or 8) + 1)
-        QueryGuildBankLog(7)
+        lastMoneyLogQueryAt = GetTime()
+        QueryGuildBankLog(GetMoneyLogTab())
     end
     isTabSwitching = false
 end
@@ -473,7 +733,13 @@ function Scanner:ForceScan()
         return
     end
     if not self:IsBankOpen() then
-        VM:Print("Open the Guild Bank to scan tabs and logs.")
+        self:EnsureBankOpen(function(ok)
+            if ok then
+                Scanner:ForceScan()
+            else
+                VM:Print("Open the Guild Bank to scan tabs and logs.")
+            end
+        end)
         return
     end
     local now = time()
@@ -526,6 +792,16 @@ function Scanner:RunFullScanPass(isFinal)
     end
     suppressChatPrint = false
 
+    -- A log/slot answer arrived while scanning (or inside the echo window): run one more pass
+    if pendingRescan and self.isBankOpen and pendingRescanChain < 3 then
+        pendingRescan = false
+        pendingRescanChain = pendingRescanChain + 1
+        suppressChatPrint = true
+        self:TriggerDebouncedScan(false, 1.0)
+    else
+        pendingRescan = false
+    end
+
     if VM.UI and VM.UI.UpdateScanStatusButton then
         VM.UI:UpdateScanStatusButton()
     end
@@ -555,8 +831,11 @@ function Scanner:ScanBank()
                 items = {}
             }
         else
-            if SetCurrentGuildBankTab then SetCurrentGuildBankTab(tab) end
-            if QueryGuildBankTab then QueryGuildBankTab(tab) end
+            -- Read cached tab data only (server queries are issued by RequestAllTabsAndLogs);
+            -- querying here caused slot-event echo loops and repeated inventory broadcasts.
+            if SetCurrentGuildBankTab and numTabs > 1 and (GetCurrentGuildBankTab and GetCurrentGuildBankTab()) ~= tab then
+                SetCurrentGuildBankTab(tab)
+            end
 
             if isViewable == false and oldTabs[tab] then
                 newTabs[tab] = oldTabs[tab]
@@ -709,6 +988,35 @@ function Scanner:ScanBank()
         end
     end
 
+    -- Content signature: unchanged contents => no new inventory snapshot / broadcast (prevents queue floods)
+    local sigParts = { tostring(numTabs) }
+    for tab = 1, maxTabs do
+        local t = newTabs[tab]
+        if t then
+            table.insert(sigParts, string.format("#%d:%s:%s", tab, tostring(t.name), t.isPurchased and "1" or "0"))
+            local keys = {}
+            for k in pairs(t.items or {}) do table.insert(keys, tostring(k)) end
+            table.sort(keys)
+            for _, k in ipairs(keys) do
+                local it = t.items[k] or t.items[tonumber(k) or k]
+                table.insert(sigParts, k .. "=" .. tostring(it and it.count or 0))
+            end
+        end
+    end
+    local contentSig = table.concat(sigParts, "|")
+
+    local inv = VM.db.inventory
+    if inv and inv.contentSig == contentSig and (inv.lastScan or 0) > 0 and inv.tabs and next(inv.tabs) then
+        if bankMoney > 0 and inv.gold ~= bankMoney then
+            inv.gold = bankMoney
+            if VM.Comms and VM.Comms.BroadcastInventoryGold then
+                VM.Comms:BroadcastInventoryGold()
+            end
+            if VM.UI then VM.UI:RefreshAll() end
+        end
+        return uniqueItemsCount
+    end
+
     local serverTime = (GetServerTime and GetServerTime()) or time()
     local pName = UnitName("player") or VM:GetPlayerName()
     VM.db.inventory = {
@@ -719,6 +1027,7 @@ function Scanner:ScanBank()
         lastSyncedFrom = nil,
         gold = bankMoney,
         numTabs = numTabs,
+        contentSig = contentSig,
         tabs = newTabs
     }
     if VM.db.scanMetadata then
@@ -764,7 +1073,7 @@ function Scanner:ScanLogs()
                 local cleanLink = itemLink or "[Unknown Item]"
                 local itemID = tonumber(cleanLink and cleanLink:match("item:(%d+)")) or 0
                 local extractedName = cleanLink:match("%[(.-)%]") or cleanLink:gsub("^%[", ""):gsub("%]$", "")
-                local normName = VM:NormalizeActor(name)
+                local normName = VM:CanonicalActor(name)
                 count = tonumber(count) or 1
 
                 local hasTime = (year ~= nil or month ~= nil or day ~= nil or hour ~= nil)
@@ -812,11 +1121,14 @@ function Scanner:ScanLogs()
 
     if VM.db and VM.db.ledger then
         for _, exTx in pairs(VM.db.ledger) do
-            if exTx and not exTx.deleted and exTx.timestamp then
+            -- Tombstones of bank-log sourced entries still "consume" their log occurrence, so an
+            -- officer-deleted entry is never re-imported from the 72h bank log window.
+            local countable = exTx and exTx.timestamp and (not exTx.deleted or (AUTO_LOG_SOURCES[exTx.source or ""] and not exTx.dupOf))
+            if countable then
                 local isGold = (exTx.itemID == 0 or exTx.itemLink == "GOLD" or exTx.source == "BANK_MONEY_LOG" or exTx.source == "MANUAL_GOLD" or (exTx.itemName and (exTx.itemName:find("Gold Deposit") or exTx.itemName:find("Gold Withdrawal"))))
                 if not isGold then
                     local exDir = VM:NormalizeAction(exTx.type)
-                    local exActor = VM:NormalizeActor(exTx.rawSender or exTx.player)
+                    local exActor = VM:CanonicalActor(exTx.rawSender or exTx.player)
                     local exItemKey = VM:NormalizeItemKey(exTx.itemID, exTx.itemLink, exTx.itemName)
                     local exCount = tonumber(exTx.count or 1)
                     local exKey = string.format("ITEM:%s:%s:%s:%d", exDir, exActor, exItemKey, exCount)
@@ -840,18 +1152,13 @@ function Scanner:ScanLogs()
         local existingM = existingCounts[entry.matchKey] or 0
         if entry.occIndex > existingM then
             if entry.isDeposit then
-                local activeRet = VM.db.activeReturn
-                if activeRet and (entry.itemID == activeRet.itemID or (entry.itemID == 0 and entry.cleanLink == activeRet.itemLink)) then
-                    VM.Ledger:RecordReturnDeposit(entry.normName, entry.itemID, entry.cleanLink, entry.count, activeRet.fulfillmentId, entry.computedTimestamp)
-                else
-                    VM.Ledger:RecordDeposit(entry.normName, entry.itemID, entry.cleanLink, entry.count, "BANK_LOG", entry.computedTimestamp, entry.tab, entry.isFFA)
-                end
+                VM.Ledger:RecordDeposit(entry.normName, entry.itemID, entry.cleanLink, entry.count, "BANK_LOG", entry.computedTimestamp, entry.tab, entry.isFFA)
                 existingCounts[entry.matchKey] = existingM + 1
                 addedCount = addedCount + 1
             else
                 local matchedReq = nil
                 if isOfficer and VM.Fulfillment and VM.Fulfillment.FindMatchingApprovedRequest then
-                    matchedReq = VM.Fulfillment:FindMatchingApprovedRequest(entry.normName, entry.itemID, entry.itemName, entry.count, 0)
+                    matchedReq = VM.Fulfillment:FindMatchingApprovedRequest(entry.normName, entry.itemID, entry.itemName, entry.count, 0, true)
                 end
 
                 local ahPrice = VM:GetEffectiveLivePrice(entry.itemID, entry.cleanLink, 0)
@@ -1004,7 +1311,7 @@ function Scanner:ScanMoneyLogs()
         if not typeStr:find("repair") then
             local copper = tonumber(amount) or 0
             if copper > 0 then
-                local normName = (name and name ~= "") and VM:NormalizeActor(name) or "UNATTRIBUTED"
+                local normName = (name and name ~= "") and VM:CanonicalActor(name) or "UNATTRIBUTED"
                 local hasTime = (year ~= nil or month ~= nil or day ~= nil or hour ~= nil)
                 local computedTimestamp
                 if hasTime then
@@ -1063,11 +1370,14 @@ function Scanner:ScanMoneyLogs()
 
     if VM.db and VM.db.ledger then
         for _, exTx in pairs(VM.db.ledger) do
-            if exTx and not exTx.deleted and exTx.timestamp and exTx.source ~= "TAB_PURCHASE" then
+            local countable = exTx and exTx.timestamp and exTx.source ~= "TAB_PURCHASE"
+                and not PAYMENT_SOURCES[exTx.source or ""]
+                and (not exTx.deleted or (AUTO_LOG_SOURCES[exTx.source or ""] and not exTx.dupOf))
+            if countable then
                 local isGold = (exTx.itemID == 0 or exTx.itemLink == "GOLD" or exTx.source == "BANK_MONEY_LOG" or exTx.source == "MANUAL_GOLD" or exTx.source == "GOLD_REQUEST" or exTx.source == "WRITE_OFF" or (exTx.itemName and (exTx.itemName:find("Gold Deposit") or exTx.itemName:find("Gold Withdrawal"))))
                 if isGold then
                     local exDir = VM:NormalizeAction(exTx.type)
-                    local exActor = VM:NormalizeActor(exTx.rawSender or exTx.player)
+                    local exActor = VM:CanonicalActor(exTx.rawSender or exTx.player)
                     local exCopper = (exTx.unitPriceAtTime or 0) * (exTx.count or 1)
                     local exKey = string.format("GOLD:%s:%s:%d", exDir, exActor, exCopper)
 
@@ -1090,33 +1400,27 @@ function Scanner:ScanMoneyLogs()
         local existingM = existingGoldCounts[entry.matchKey] or 0
         if entry.occIndex > existingM then
             if entry.isDeposit then
-                -- Trade-to-Bank Auto-Attribution
-                local attributedTo = entry.normName
-                local rawSender = entry.normName
-                if VM.pendingTradePayments and #VM.pendingTradePayments > 0 then
-                    local cutoff = time() - 600
-                    for idx = #VM.pendingTradePayments, 1, -1 do
-                        local p = VM.pendingTradePayments[idx]
-                        if p.timestamp < cutoff then
-                            table.remove(VM.pendingTradePayments, idx)
-                        elseif p.amount == entry.copper then
-                            attributedTo = p.payer
-                            rawSender = entry.normName
-                            table.remove(VM.pendingTradePayments, idx)
-                            VM:Print(string.format("Auto-attributed %s gold deposit to |cffffff00%s|r (from recent trade).",
-                                VM:FormatMoney(entry.copper), attributedTo))
-                            break
-                        end
+                -- Member CoD/Trade payments were already credited to the member at delivery.
+                -- The officer's later deposit of that gold is a TRANSFER (not a personal donation).
+                local held = (VM.Ledger and VM.Ledger.GetHeldCash) and VM.Ledger:GetHeldCash(entry.normName) or 0
+                local transferPart = math.min(held, entry.copper)
+                local tx
+                if transferPart > 0 and VM.Ledger.RecordTransferDeposit then
+                    tx = VM.Ledger:RecordTransferDeposit(entry.normName, entry.copper, transferPart, entry.computedTimestamp)
+                    if IsSameActor(entry.normName, VM:GetPlayerName()) then
+                        VM:Print(string.format("Deposit of %s booked as transfer of collected member payments (%s)%s.",
+                            VM:FormatMoney(entry.copper), VM:FormatMoney(transferPart),
+                            (entry.copper > transferPart) and (", remainder " .. VM:FormatMoney(entry.copper - transferPart) .. " as your donation") or ""))
                     end
+                else
+                    tx = VM.Ledger:RecordGoldDeposit(entry.normName, entry.copper, "BANK_MONEY_LOG", entry.normName, entry.normName, entry.computedTimestamp)
                 end
-
-                local tx = VM.Ledger:RecordGoldDeposit(attributedTo, entry.copper, "BANK_MONEY_LOG", rawSender, attributedTo, entry.computedTimestamp)
                 if tx then
                     tx.isFFA = false
                     tx.timestamp = entry.computedTimestamp
                 end
 
-                if attributedTo == entry.normName and entry.normName == VM:GetPlayerName() and isOfficer then
+                if transferPart <= 0 and IsSameActor(entry.normName, VM:GetPlayerName()) and isOfficer then
                     VM:Print(string.format("Gold deposit of %s recorded. Use 'Reassign' in the Ledger if this was paid by another member.",
                         VM:FormatMoney(entry.copper)))
                 end
@@ -1163,24 +1467,23 @@ function Scanner:ScanMoneyLogs()
         local serverTime = (GetServerTime and GetServerTime()) or time()
         local pName = UnitName("player") or VM:GetPlayerName()
         if VM.db.inventory then
-            VM.db.inventory.lastScan = serverTime
-            VM.db.inventory.lastScanTime = serverTime
-            VM.db.inventory.lastScanBy = pName
-            VM.db.inventory.scannedBy = pName
-            VM.db.inventory.lastSyncedFrom = nil
+            if not VM.db.inventory.lastScan or VM.db.inventory.lastScan == 0 then
+                VM.db.inventory.lastScan = serverTime
+                VM.db.inventory.lastScanTime = serverTime
+                VM.db.inventory.lastScanBy = pName
+                VM.db.inventory.scannedBy = pName
+            end
             local m = GetGuildBankMoney and GetGuildBankMoney()
             if type(m) == "number" and m >= 0 then
+                local changed = (VM.db.inventory.gold ~= m)
                 VM.db.inventory.gold = m
                 lastObservedBankMoney = m
+                -- Gold-only update: never re-broadcast the whole inventory for a money log change
+                if changed and VM.Comms.BroadcastInventoryGold then
+                    VM.Comms:BroadcastInventoryGold()
+                end
             end
         end
-        if VM.db.scanMetadata then
-            VM.db.scanMetadata.lastScan = serverTime
-            VM.db.scanMetadata.lastScanTime = serverTime
-            VM.db.scanMetadata.lastScanBy = pName
-            VM.db.scanMetadata.scannedBy = pName
-        end
-        VM.Comms:BroadcastInventory()
         if VM.UI then VM.UI:RefreshAll() end
     end
     return addedCount

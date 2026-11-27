@@ -11,6 +11,7 @@ ignore:
   - .github
   - .gitignore
   - CHANGELOG.md
+  - CLAUDE.md
   - GEMINI.md
   - README.md
   - "*.bak"

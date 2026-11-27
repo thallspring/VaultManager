@@ -2,7 +2,10 @@ local _, VM = ...
 VM.Comms = {}
 local Comms = VM.Comms
 
-local MSG_QUEUE = {}
+-- Two-level send queue: REQ/TX/RULE/MAIN/HELLO/EPOCH (high) always go before bulk inventory (low)
+local MSG_QUEUE = {}       -- high priority
+local MSG_QUEUE_LOW = {}   -- INV_META / INV_TAB / INV_ITEM / INV_GOLD
+local oversizeWarned = {}
 local THROTTLE_INTERVAL = 0.35
 local elapsedSinceSend = 0
 
@@ -42,6 +45,7 @@ local PROTECTED_TX_SOURCES = {
     WRITE_OFF = true,
     TAB_PURCHASE = true,
     GUILD_EXPENSE = true,
+    PAYMENT = true,
 }
 
 local function EscapeStr(s)
@@ -228,9 +232,14 @@ function Comms:Init()
         end
 
         elapsedSinceSend = elapsedSinceSend + elapsed
-        if elapsedSinceSend >= THROTTLE_INTERVAL and #MSG_QUEUE > 0 then
+        if elapsedSinceSend >= THROTTLE_INTERVAL and (#MSG_QUEUE > 0 or #MSG_QUEUE_LOW > 0) then
             elapsedSinceSend = 0
-            local payload = table.remove(MSG_QUEUE, 1)
+            local payload
+            if #MSG_QUEUE > 0 then
+                payload = table.remove(MSG_QUEUE, 1)
+            else
+                payload = table.remove(MSG_QUEUE_LOW, 1)
+            end
             if IsInGuild() then
                 if C_ChatInfo and C_ChatInfo.SendAddonMessage then
                     C_ChatInfo.SendAddonMessage(VM.PREFIX, payload, "GUILD")
@@ -242,19 +251,34 @@ function Comms:Init()
     end)
 end
 
+local function IsLowPriority(payload)
+    return payload:sub(1, 4) == "INV_"
+end
+
+function Comms:GetQueueSizes()
+    return #MSG_QUEUE, #MSG_QUEUE_LOW
+end
+
 function Comms:SendRaw(payload)
-    if VM.isUnguilded then return end
+    if VM.isUnguilded then return false end
     local guildName = GetGuildInfo("player") or ""
-    if guildName == "" then return end
+    if guildName == "" then return false end
     local fullPayload = payload .. "|" .. EscapeStr(guildName)
     if #fullPayload > 255 then
+        local cmd = tostring(payload):match("^([%u_]+)") or "?"
         VM:LogDebug(string.format("Comms:SendRaw skipped oversized payload (%d bytes): %s", #fullPayload, tostring(payload):sub(1, 32)))
-        return
+        if not oversizeWarned[cmd] then
+            oversizeWarned[cmd] = true
+            VM:Print(string.format("|cffffaa00A %s sync message was too long to send (%d bytes) and was skipped. Type /vm debug for details.|r", cmd, #fullPayload))
+        end
+        return false
     end
-    for _, existing in ipairs(MSG_QUEUE) do
-        if existing == fullPayload then return end
+    local queue = IsLowPriority(payload) and MSG_QUEUE_LOW or MSG_QUEUE
+    for _, existing in ipairs(queue) do
+        if existing == fullPayload then return true end
     end
-    table.insert(MSG_QUEUE, fullPayload)
+    table.insert(queue, fullPayload)
+    return true
 end
 
 function Comms:BroadcastEpoch()
@@ -546,6 +570,16 @@ function Comms:OnMessageReceived(msg, sender)
         MarkDataReceived()
         ScheduleUIRefresh()
 
+    elseif cmd == "INV_GOLD" then
+        -- Gold-only inventory update for the same scan snapshot (no tab wipe)
+        local scanTime = tonumber(parts[2]) or 0
+        local gold = tonumber(parts[3]) or 0
+        if scanTime > 0 and scanTime == (VM.db.inventory.lastScan or 0) and gold >= 0 then
+            VM.db.inventory.gold = gold
+            MarkDataReceived()
+            ScheduleUIRefresh()
+        end
+
     elseif cmd == "INV_TAB" then
         local scanTime = tonumber(parts[2]) or 0
         local tabIdx = tonumber(parts[3])
@@ -810,7 +844,11 @@ function Comms:OnMessageReceived(msg, sender)
         local source = UnescapeStr(parts[11])
         local itemName = UnescapeStr(parts[12])
         local rawItemLink = UnescapeStr(parts[13])
-        local deleted = isNewFormat and (tonumber(parts[14]) == 1) or false
+        local stateFlag = isNewFormat and (tonumber(parts[14]) or 0) or 0
+        local deleted = (stateFlag == 1)
+        local voided = (stateFlag == 2)
+        local pairId = (#parts >= 25 and parts[25] ~= "") and UnescapeStr(parts[25]) or nil
+        local fulfillmentId = (#parts >= 26 and parts[26] ~= "") and UnescapeStr(parts[26]) or nil
         local updatedAt = tonumber(isNewFormat and parts[15] or parts[14]) or timestamp or 0
         local rawSender = (#parts >= 16 and parts[16] ~= "") and VM:NormalizeName(UnescapeStr(parts[16])) or player
         local attributedTo = (#parts >= 17 and parts[17] ~= "") and VM:NormalizeName(UnescapeStr(parts[17])) or player
@@ -872,7 +910,9 @@ function Comms:OnMessageReceived(msg, sender)
             guildCategory = (VM.Ledger and VM.Ledger.NormalizeGuildCategory) and VM.Ledger:NormalizeGuildCategory(rawCat) or rawCat
         end
 
-        if (source == "GOLD_REQUEST" or source == "WRITE_OFF" or source == "GUILD_EXPENSE") and not fromOfficer then return end
+        if (source == "GOLD_REQUEST" or source == "WRITE_OFF" or source == "GUILD_EXPENSE" or source == "PAYMENT") and not fromOfficer then return end
+        -- Only officers may delete or void ledger entries
+        if (deleted or voided) and not fromOfficer then return end
         if not fromOfficer and not isGold and (source ~= "BANK_LOG" and source ~= "BANK_MONEY_LOG" and source ~= "TAB_PURCHASE" and source ~= "FFA_SCAN" and source ~= "GOLD_IN" and source ~= "GOLD_OUT" and source ~= "MANUAL_GOLD" and itemLink ~= "GOLD") then
             return
         end
@@ -905,6 +945,9 @@ function Comms:OnMessageReceived(msg, sender)
             rawSender = rawSender,
             attributedTo = attributedTo,
             isFFA = isFFA,
+            voided = voided or nil,
+            pairId = voided and pairId or nil,
+            fulfillmentId = fulfillmentId,
             isManual = (source == "MANUAL_GOLD" or source == "MANUAL" or source == "MANUAL_ASSIGN" or source == "GUILD_EXPENSE")
         }
         local existing = VM.db.ledger[tx.id]
@@ -912,19 +955,20 @@ function Comms:OnMessageReceived(msg, sender)
         -- Deduplicate automatic bank-log transactions across clients that generated different IDs
         if not existing and not PROTECTED_TX_SOURCES[source or ""] then
             local txAction = VM:NormalizeAction(tx.type)
-            local txActor = VM:NormalizeActor(tx.rawSender or tx.player)
+            local txActor = VM:CanonicalActor(tx.rawSender or tx.player)
             local WINDOW_48H = 172800
 
             if isGold then
                 local txCopper = (tx.unitPriceAtTime or 0) * (tx.count or 1)
+                -- Tombstones are valid matches too: a peer's re-import of a deleted bank-log line maps onto it
                 for _, exTx in pairs(VM.db.ledger) do
-                    if not exTx.deleted and not PROTECTED_TX_SOURCES[exTx.source or ""] then
+                    if not exTx.dupOf and not PROTECTED_TX_SOURCES[exTx.source or ""] then
                         local exIsGold = (exTx.itemID == 0 or exTx.itemLink == "GOLD" or exTx.source == "BANK_MONEY_LOG" or (exTx.itemName and (exTx.itemName:find("Gold Deposit") or exTx.itemName:find("Gold Withdrawal"))))
                         if exIsGold then
                             local exAction = VM:NormalizeAction(exTx.type)
-                            local exActor = VM:NormalizeActor(exTx.rawSender or exTx.player)
+                            local exActor = VM:CanonicalActor(exTx.rawSender or exTx.player)
                             local exCopper = (exTx.unitPriceAtTime or 0) * (exTx.count or 1)
-                            if txAction == exAction and (txActor == exActor or (tx.rawSender and VM:NormalizeActor(tx.rawSender) == exActor) or (exTx.rawSender and VM:NormalizeActor(exTx.rawSender) == txActor)) and txCopper == exCopper then
+                            if txAction == exAction and txActor == exActor and txCopper == exCopper then
                                 if math.abs((exTx.timestamp or 0) - (tx.timestamp or 0)) <= WINDOW_48H then
                                     existing = exTx
                                     tx.id = exTx.id
@@ -941,11 +985,11 @@ function Comms:OnMessageReceived(msg, sender)
                 local txItemKey = VM:NormalizeItemKey(tx.itemID, tx.itemLink, tx.itemName)
                 local txCount = tonumber(tx.count or 1)
                 for _, exTx in pairs(VM.db.ledger) do
-                    if not exTx.deleted and not PROTECTED_TX_SOURCES[exTx.source or ""] then
+                    if not exTx.dupOf and not PROTECTED_TX_SOURCES[exTx.source or ""] then
                         local exIsGold = (exTx.itemID == 0 or exTx.itemLink == "GOLD" or exTx.source == "BANK_MONEY_LOG")
                         if not exIsGold then
                             local exAction = VM:NormalizeAction(exTx.type)
-                            local exActor = VM:NormalizeActor(exTx.rawSender or exTx.player)
+                            local exActor = VM:CanonicalActor(exTx.rawSender or exTx.player)
                             local exItemKey = VM:NormalizeItemKey(exTx.itemID, exTx.itemLink, exTx.itemName)
                             local exCount = tonumber(exTx.count or 1)
                             if txAction == exAction and txActor == exActor and txItemKey == exItemKey and txCount == exCount then
@@ -985,6 +1029,10 @@ function Comms:OnMessageReceived(msg, sender)
         if existing and existing.unitPriceAtTime and existing.unitPriceAtTime > 0 and (tx.itemLink == "GOLD" or tx.itemID == 0) then
             tx.unitPriceAtTime = existing.unitPriceAtTime
         end
+        -- A tombstone always wins against a re-import of the same bank-log line under a different id
+        if existing and existing.deleted and not tx.deleted and existing.id ~= txId then
+            return
+        end
         if tx.id ~= "" and (not existing or tx.updatedAt > (existing.updatedAt or existing.timestamp or 0)) then
             VM.db.ledger[tx.id] = tx
             MarkDataReceived()
@@ -993,9 +1041,19 @@ function Comms:OnMessageReceived(msg, sender)
     end
 end
 
+function Comms:BroadcastInventoryGold()
+    local inv = VM.db.inventory
+    if not inv or not inv.lastScan or inv.lastScan == 0 then return end
+    self:SendRaw(string.format("INV_GOLD|%d|%d", math.floor(inv.lastScan), math.floor(tonumber(inv.gold) or 0)))
+end
+
 function Comms:BroadcastInventory()
     local inv = VM.db.inventory
     if not inv or not inv.lastScan or inv.lastScan == 0 then return end
+    -- A newer snapshot supersedes any inventory messages still waiting in the queue
+    if #MSG_QUEUE_LOW > 0 then
+        MSG_QUEUE_LOW = {}
+    end
     local maxLen = GetMaxPayloadLen()
     local scanBy = inv.lastScanBy or inv.scannedBy or UnitName("player")
     local gold = math.floor(tonumber(inv.gold) or 0)
@@ -1028,14 +1086,12 @@ end
 
 function Comms:BroadcastRequest(req)
     if not req then return end
-    if not req.isGoldRequest and (not VM.db.inventory or (VM.db.inventory.lastScan or 0) == 0) then
-        return
-    end
     local maxLen = GetMaxPayloadLen()
     local qTotalStr = (req.quotedTotalPrice ~= nil) and tostring(math.floor(tonumber(req.quotedTotalPrice) or 0)) or ""
     local isGoldVal = req.isGoldRequest and 1 or 0
     local numItemID = tonumber(req.itemID) or 0
 
+    local nameStr = req.itemName or ""
     local function BuildReqPayload(linkStr, reasonStr)
         return string.format("REQ|%s|%s|%s|%d|%d|%s|%d|%d|%s|%s|%d|%s|%d|%s|%s|%d|%d|%s|%d|%s|%s|%s|%d|%s",
             EscapeStr(req.id),
@@ -1051,7 +1107,7 @@ function Comms:BroadcastRequest(req)
             math.floor(tonumber(req.quotedUnitPrice) or 0),
             EscapeStr(req.priceMode or ""),
             math.floor(tonumber(req.pricePercent) or 0),
-            EscapeStr(req.itemName or ""),
+            EscapeStr(nameStr),
             EscapeStr(linkStr),
             math.floor(tonumber(req.approvedAt) or 0),
             math.floor(tonumber(req.completedAt) or 0),
@@ -1074,6 +1130,11 @@ function Comms:BroadcastRequest(req)
     end
     while #payload > maxLen and #reasonStr > 0 do
         reasonStr = reasonStr:sub(1, math.max(0, #reasonStr - 4))
+        payload = BuildReqPayload(linkStr, reasonStr)
+    end
+    -- Item name is recoverable from the item ID on the receiving side
+    while #payload > maxLen and numItemID > 0 and #nameStr > 8 do
+        nameStr = nameStr:sub(1, #nameStr - 4)
         payload = BuildReqPayload(linkStr, reasonStr)
     end
 
@@ -1109,30 +1170,32 @@ end
 
 function Comms:BroadcastTransaction(tx)
     if not tx or tx.type == "SUMMARY" or tx.isDerived then return end
-    local inv = VM.db.inventory
-    if not inv or not inv.lastScan or inv.lastScan == 0 then
-        local now = (GetServerTime and GetServerTime()) or time()
-        VM.db.inventory = VM.db.inventory or { gold = 0, tabs = {} }
-        VM.db.inventory.lastScan = now
-        VM.db.inventory.lastScanTime = now
-        VM.db.inventory.lastScanBy = UnitName("player") or VM:GetPlayerName()
-        VM.db.inventory.scannedBy = VM.db.inventory.lastScanBy
-    end
 
     local maxLen = GetMaxPayloadLen()
-    local delVal = tx.deleted and 1 or 0
+    -- State flag: 0 = active, 1 = deleted (tombstone), 2 = voided (Pair/Void Return)
+    local stateVal = tx.deleted and 1 or (tx.voided and 2 or 0)
     local cTotalStr = (tx.chargedTotalPrice ~= nil) and tostring(math.floor(tonumber(tx.chargedTotalPrice) or 0)) or ""
     local pPctStr = (tx.pricePercent ~= nil) and tostring(math.floor(tonumber(tx.pricePercent) or 0)) or ""
     local tabStr = (tx.tab ~= nil) and tostring(math.floor(tonumber(tx.tab) or 0)) or ""
     local ffaStr = (tx.isFFA == true and "1") or (tx.isFFA == false and "0") or ""
     local guildCatStr = tostring(tx.guildCategory or "")
     local numItemID = tonumber(tx.itemID) or 0
+    local player = tx.player or ""
+    -- Receivers default rawSender/attributedTo to player when empty (saves bytes for two-word names)
+    local rawStr = (tx.rawSender and tx.rawSender ~= player) and tx.rawSender or ""
+    local attrStr = (tx.attributedTo and tx.attributedTo ~= player) and tx.attributedTo or ""
 
-    local function BuildTxPayload(linkStr, noteStr)
-        return string.format("TX|%s|%s|%s|%s|%d|%d|%d|%d|%s|%s|%s|%s|%d|%d|%s|%s|%s|%s|%s|%s|%s|%s|%s",
+    local linkStr = tx.itemLink or ""
+    local noteStr = tx.note or ""
+    local nameStr = tx.itemName or ""
+    local pairStr = (tx.voided and tx.pairId) or ""
+    local fulfillStr = tx.fulfillmentId or ""
+
+    local function BuildTxPayload()
+        local p = string.format("TX|%s|%s|%s|%s|%d|%d|%d|%d|%s|%s|%s|%s|%d|%d|%s|%s|%s|%s|%s|%s|%s|%s|%s",
             EscapeStr(tx.id),
             EscapeStr(tx.type),
-            EscapeStr(tx.player),
+            EscapeStr(player),
             EscapeStr(tostring(tx.itemID or 0)),
             math.floor(tonumber(tx.count) or 1),
             math.floor(tonumber(tx.unitPriceAtTime) or 0),
@@ -1140,12 +1203,12 @@ function Comms:BroadcastTransaction(tx)
             math.floor(tonumber(tx.timestamp) or 0),
             EscapeStr(tx.officer or ""),
             EscapeStr(tx.source or ""),
-            EscapeStr(tx.itemName or ""),
+            EscapeStr(nameStr),
             EscapeStr(linkStr),
-            delVal,
+            stateVal,
             math.floor(tonumber(tx.updatedAt or tx.timestamp) or 0),
-            EscapeStr(tx.rawSender or tx.player or ""),
-            EscapeStr(tx.attributedTo or tx.player or ""),
+            EscapeStr(rawStr),
+            EscapeStr(attrStr),
             cTotalStr,
             EscapeStr(noteStr),
             EscapeStr(tx.priceMode or ""),
@@ -1153,19 +1216,30 @@ function Comms:BroadcastTransaction(tx)
             tabStr,
             ffaStr,
             EscapeStr(guildCatStr))
+        if pairStr ~= "" or fulfillStr ~= "" then
+            p = p .. "|" .. EscapeStr(pairStr) .. "|" .. EscapeStr(fulfillStr)
+        end
+        return p
     end
 
-    local linkStr = tx.itemLink or ""
-    local noteStr = tx.note or ""
-    local payload = BuildTxPayload(linkStr, noteStr)
+    local payload = BuildTxPayload()
 
+    -- Byte budget: drop/shorten the least important fields first
     if #payload > maxLen and numItemID > 0 and linkStr ~= "" and linkStr ~= "GOLD" then
         linkStr = ""
-        payload = BuildTxPayload(linkStr, noteStr)
+        payload = BuildTxPayload()
+    end
+    if #payload > maxLen and fulfillStr ~= "" then
+        fulfillStr = ""
+        payload = BuildTxPayload()
     end
     while #payload > maxLen and #noteStr > 0 do
         noteStr = noteStr:sub(1, math.max(0, #noteStr - 4))
-        payload = BuildTxPayload(linkStr, noteStr)
+        payload = BuildTxPayload()
+    end
+    while #payload > maxLen and numItemID > 0 and #nameStr > 8 do
+        nameStr = nameStr:sub(1, #nameStr - 4)
+        payload = BuildTxPayload()
     end
 
     self:SendRaw(payload)
@@ -1176,7 +1250,7 @@ function Comms:BroadcastLedgerSync(sinceTs)
     local minTs = tonumber(sinceTs) or 0
     local cutoff = time() - (60 * 86400)
     for _, tx in pairs(VM.db.ledger) do
-        if tx and tx.type ~= "SUMMARY" and not tx.isDerived then
+        if tx and tx.type ~= "SUMMARY" and not tx.isDerived and not tx.dupOf then
             local upd = tx.updatedAt or tx.timestamp or 0
             if upd > cutoff and (minTs == 0 or upd > minTs) then
                 self:BroadcastTransaction(tx)

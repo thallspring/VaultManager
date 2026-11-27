@@ -269,46 +269,91 @@ function Ledger:RecordTabPurchase(copperAmount, buyerName, customTimestamp, tabN
     return tx
 end
 
-function Ledger:RecordReturnDeposit(playerName, itemID, itemLink, count, fulfillmentId, customTimestamp)
-    local ahPrice = VM:GetItemAHPrice(itemID, itemLink) or 0
-    local cleanLink = itemLink or "item:0"
-    local itemName = cleanLink:gsub("^%[", ""):gsub("%]$", "")
+-- Member payment received by an officer (Mail CoD / Trade / manual) credited to the payer at delivery.
+-- tx.officer is the holder of the gold; their later Guild Bank deposit is booked as TRANSFER.
+function Ledger:RecordPayment(payerName, copperAmount, holderName, method, note)
+    local amount = math.floor(tonumber(copperAmount) or 0)
+    if amount <= 0 then return nil end
+    local payer = VM:NormalizeName(payerName)
+    if payer == "" then return nil end
     local now = time()
-    local txTimestamp = customTimestamp or now
-    local normPlayer = VM:NormalizeName(playerName)
+    local methodLabel = (method == "MAIL" and "CoD payment") or (method == "TRADE" and "Trade payment") or "Payment"
     local tx = {
-        id = GenerateTxID("IN"),
+        id = GenerateTxID("PAY"),
         type = "IN",
-        player = normPlayer,
-        rawSender = normPlayer,
-        attributedTo = normPlayer,
-        itemID = itemID or 0,
-        itemLink = cleanLink,
-        itemName = itemName,
-        count = count or 1,
-        unitPriceAtTime = ahPrice,
+        player = payer,
+        rawSender = payer,
+        attributedTo = payer,
+        itemID = 0,
+        itemLink = "GOLD",
+        itemName = "Gold Deposit",
+        count = 1,
+        unitPriceAtTime = amount,
         chargedUnitPrice = 0,
-        timestamp = txTimestamp,
+        note = note or methodLabel,
+        timestamp = now,
         updatedAt = now,
-        officer = VM:GetPlayerName(),
-        source = "RETURN",
-        tag = "[RETURNED]",
-        netValue = 0,
+        officer = VM:NormalizeName(holderName or VM:GetPlayerName()),
+        source = "PAYMENT",
+        isFFA = false,
+        isManual = false,
         deleted = false
     }
-
-    for _, otx in pairs(VM.db.ledger) do
-        if otx.fulfillmentId == fulfillmentId and not otx.deleted then
-            otx.voided = true
-            otx.netValue = 0
-            otx.updatedAt = now
-        end
-    end
-
     VM.db.ledger[tx.id] = tx
-    VM.db.activeReturn = nil
     VM.Comms:BroadcastTransaction(tx)
     if VM.UI then VM.UI:RefreshAll() end
+    return tx
+end
+
+-- Gold of member payments an officer still holds (payments received minus transfers deposited)
+function Ledger:GetHeldCash(officerName)
+    if not VM.db or not VM.db.ledger then return 0 end
+    local held = 0
+    for _, tx in pairs(VM.db.ledger) do
+        if tx and not tx.deleted and not tx.voided then
+            if tx.source == "PAYMENT" and tx.officer and VM:IsSameCharacter(tx.officer, officerName) then
+                held = held + (tx.unitPriceAtTime or 0) * (tx.count or 1)
+            elseif tx.source == "TRANSFER" and VM:IsSameCharacter(tx.rawSender or tx.player, officerName) then
+                local full = (tx.unitPriceAtTime or 0) * (tx.count or 1)
+                held = held - (tonumber(tx.chargedTotalPrice) or full)
+            end
+        end
+    end
+    return math.max(0, held)
+end
+
+-- Officer deposit of collected member payments: full log amount kept for deduplication,
+-- chargedTotalPrice = transferred part (valued 0). Any remainder counts as the officer's donation.
+function Ledger:RecordTransferDeposit(officerName, depositCopper, transferCopper, customTimestamp)
+    local deposit = math.floor(tonumber(depositCopper) or 0)
+    local transfer = math.min(deposit, math.floor(tonumber(transferCopper) or 0))
+    if deposit <= 0 or transfer <= 0 then return nil end
+    local now = time()
+    local actor = VM:NormalizeName(officerName)
+    local tx = {
+        id = GenerateTxID("GOLD_TRF"),
+        type = "IN",
+        player = actor,
+        rawSender = actor,
+        attributedTo = actor,
+        itemID = 0,
+        itemLink = "GOLD",
+        itemName = "Gold Deposit",
+        count = 1,
+        unitPriceAtTime = deposit,
+        chargedUnitPrice = 0,
+        chargedTotalPrice = transfer,
+        note = string.format("Transfer of member payments (%s)", VM:FormatMoneyPlain(transfer)),
+        timestamp = customTimestamp or now,
+        updatedAt = now,
+        officer = VM:GetPlayerName(),
+        source = "TRANSFER",
+        isFFA = false,
+        isManual = false,
+        deleted = false
+    }
+    VM.db.ledger[tx.id] = tx
+    VM.Comms:BroadcastTransaction(tx)
     return tx
 end
 
@@ -473,19 +518,120 @@ function Ledger:AssignUnattributed(txID, memberName, guildCategory)
     if VM.UI then VM.UI:RefreshAll() end
 end
 
+function Ledger:CanDeleteTransaction(tx)
+    return tx ~= nil and not tx.deleted and not tx.isDerived and tx.type ~= "SUMMARY"
+end
+
+-- Officers may void any non-derived entry. The tombstone (deleted = true) is synced guild-wide and
+-- also blocks re-import of bank-log entries (BankScanner counts tombstones as consumed log lines).
 function Ledger:DeleteTransaction(txID)
     if not VM:IsOfficer() then return end
     local tx = VM.db.ledger[txID]
-    if not tx or not tx.isManual or tx.isDerived then return end
+    if not self:CanDeleteTransaction(tx) then return end
+    local now = time()
+    if tx.pairId then
+        self:ClearPair(tx, now)
+    end
     tx.deleted = true
-    tx.updatedAt = time()
+    tx.updatedAt = now
     VM.Comms:BroadcastTransaction(tx)
     if VM.UI then VM.UI:RefreshAll() end
+end
+
+--------------------------------------------------------------------------------
+-- Pair / Void Return: an item OUT and its matching return IN (same main, item and count)
+-- are both voided, so they net to 0g regardless of AH price drift or discounted pricing.
+--------------------------------------------------------------------------------
+local PAIR_WINDOW = 30 * 86400
+
+local function IsPairableTx(tx)
+    if not tx or tx.deleted or tx.isDerived or tx.type == "SUMMARY" then return false end
+    if tx.itemID == 0 or tx.itemLink == "GOLD" or tx.itemLink == "SUMMARY" then return false end
+    if tx.source == "WRITE_OFF" then return false end
+    return tx.type == "IN" or tx.type == "OUT"
+end
+
+local function MainOf(tx)
+    local p = VM:NormalizeName(tx.player)
+    if p == "GUILD" or p == "UNATTRIBUTED" then return p end
+    return VM:GetMainFor(p)
+end
+
+function Ledger:FindPairCandidate(tx)
+    if not IsPairableTx(tx) or tx.voided then return nil end
+    local main = MainOf(tx)
+    if main == "GUILD" or main == "UNATTRIBUTED" then return nil end
+    local itemKey = VM:NormalizeItemKey(tx.itemID, tx.itemLink, tx.itemName)
+    local count = tonumber(tx.count) or 1
+    local ts = tx.timestamp or 0
+    local wantType = (tx.type == "IN") and "OUT" or "IN"
+    local best, bestGap = nil, nil
+    for _, other in pairs(VM.db.ledger) do
+        if other ~= tx and other.type == wantType and IsPairableTx(other) and not other.voided
+            and (tonumber(other.count) or 1) == count
+            and VM:NormalizeItemKey(other.itemID, other.itemLink, other.itemName) == itemKey
+            and MainOf(other) == main then
+            local ots = other.timestamp or 0
+            -- The OUT must come before (or within an hour of) the return IN
+            local outTs, inTs = (wantType == "OUT") and ots or ts, (wantType == "OUT") and ts or ots
+            local gap = inTs - outTs
+            if gap >= -3600 and gap <= PAIR_WINDOW then
+                local absGap = math.abs(gap)
+                if not bestGap or absGap < bestGap then
+                    best, bestGap = other, absGap
+                end
+            end
+        end
+    end
+    return best
+end
+
+function Ledger:PairTransactions(txIdA, txIdB)
+    if not VM:IsOfficer() then return false end
+    local a, b = VM.db.ledger[txIdA], VM.db.ledger[txIdB]
+    if not IsPairableTx(a) or not IsPairableTx(b) or a.voided or b.voided or a.type == b.type then return false end
+    local now = time()
+    a.voided, a.pairId, a.updatedAt = true, b.id, now
+    b.voided, b.pairId, b.updatedAt = true, a.id, now
+    VM.Comms:BroadcastTransaction(a)
+    VM.Comms:BroadcastTransaction(b)
+    if VM.UI then VM.UI:RefreshAll() end
+    return true
+end
+
+function Ledger:ClearPair(tx, now)
+    local partner = tx.pairId and VM.db.ledger[tx.pairId]
+    if partner and partner.pairId == tx.id then
+        partner.voided, partner.pairId, partner.updatedAt = nil, nil, now
+        VM.Comms:BroadcastTransaction(partner)
+    end
+    tx.voided, tx.pairId = nil, nil
+end
+
+function Ledger:UnpairTransaction(txID)
+    if not VM:IsOfficer() then return end
+    local tx = VM.db.ledger[txID]
+    if not tx or not tx.voided then return end
+    local now = time()
+    self:ClearPair(tx, now)
+    tx.updatedAt = now
+    VM.Comms:BroadcastTransaction(tx)
+    if VM.UI then VM.UI:RefreshAll() end
+end
+
+-- TRANSFER deposits: only the part exceeding the transferred member payments counts as donation
+local function TransferValue(tx)
+    local full = (tx.unitPriceAtTime or 0) * (tx.count or 1)
+    local transferred = tonumber(tx.chargedTotalPrice) or full
+    return math.max(0, full - transferred)
 end
 
 function Ledger:GetFullItemValue(tx, useHistorical, priceMode)
     if not tx or tx.voided or tx.netValue == 0 or tx.tag == "[RETURNED]" then
         return 0
+    end
+    if tx.source == "TRANSFER" then
+        return TransferValue(tx)
     end
     if tx.itemID == 0 or tx.itemLink == "GOLD" then
         return (tx.unitPriceAtTime or 0) * (tx.count or 1)
@@ -513,6 +659,9 @@ function Ledger:GetTransactionValue(tx, useHistorical, priceMode)
     end
     if tx.voided or tx.netValue == 0 or tx.tag == "[RETURNED]" then
         return 0
+    end
+    if tx.source == "TRANSFER" then
+        return TransferValue(tx)
     end
     if tx.itemID == 0 or tx.itemLink == "GOLD" then
         return (tx.unitPriceAtTime or 0) * (tx.count or 1)
@@ -776,6 +925,21 @@ function Ledger:CompactMonthlyHistory()
     local now = time()
     local cutoff = now - (60 * 86400)
     local tombstoneCutoff = now - (90 * 86400)
+
+    if not VM.COMPACTION_ENABLED then
+        -- Compaction paused: only purge tombstones older than 90 days (well outside any bank log window)
+        local purged = 0
+        for id, tx in pairs(VM.db.ledger) do
+            if tx and tx.deleted and (tx.updatedAt or tx.timestamp or 0) < tombstoneCutoff then
+                VM.db.ledger[id] = nil
+                purged = purged + 1
+            end
+        end
+        if purged > 0 then
+            VM:LogDebug(string.format("Purged %d old tombstones (compaction paused).", purged))
+        end
+        return
+    end
     local groups = {}
     local purgedTombstones = 0
 
@@ -928,6 +1092,10 @@ function Ledger:CompactMonthlyHistory()
     end
 end
 
+-- Removes cross-client duplicates of the same bank log line (same action/actor/item/count within 48h,
+-- recorded by DIFFERENT scanners). Repeated identical transactions by the same scanner are legitimate
+-- and kept. Duplicates become local tombstones (dupOf) instead of being hard-deleted, so peers cannot
+-- resurrect them and the bank scanner does not re-import them.
 function Ledger:CleanupDuplicates()
     if not VM.db or not VM.db.ledger then return 0 end
 
@@ -936,6 +1104,7 @@ function Ledger:CleanupDuplicates()
         MANUAL_GOLD = true,
         MANUAL_ASSIGN = true,
         MANUAL_ASSIGN_PAYMENT = true,
+        PAYMENT = true,
         REQUEST = true,
         GOLD_REQUEST = true,
         RETURN = true,
@@ -947,19 +1116,8 @@ function Ledger:CleanupDuplicates()
 
     local groups = {}
     for id, tx in pairs(VM.db.ledger) do
-        if tx and tx.timestamp and not tx.deleted and not tx.isManual and tx.type ~= "SUMMARY" and not protectedSources[tx.source or ""] then
-            local isGold = (tx.itemID == 0 or tx.itemLink == "GOLD" or tx.source == "BANK_MONEY_LOG" or (tx.itemName and (tx.itemName:find("Gold Deposit") or tx.itemName:find("Gold Withdrawal"))))
-            local action = VM:NormalizeAction(tx.type)
-            local actor = VM:NormalizeActor(tx.rawSender or tx.player)
-            local groupKey
-            if isGold then
-                local copper = (tx.unitPriceAtTime or 0) * (tx.count or 1)
-                groupKey = string.format("GOLD:%s:%s:%d", action, actor, copper)
-            else
-                local itemKey = VM:NormalizeItemKey(tx.itemID, tx.itemLink, tx.itemName)
-                local count = tonumber(tx.count or 1)
-                groupKey = string.format("ITEM:%s:%s:%s:%d", action, actor, itemKey, count)
-            end
+        if tx and tx.timestamp and not tx.deleted and not tx.voided and not tx.isManual and tx.type ~= "SUMMARY" and not protectedSources[tx.source or ""] then
+            local groupKey = VM:GetTxMatchKey(tx)
             groups[groupKey] = groups[groupKey] or {}
             table.insert(groups[groupKey], { id = id, tx = tx })
         end
@@ -981,27 +1139,32 @@ function Ledger:CleanupDuplicates()
 
             local kept = {}
             for _, entry in ipairs(entries) do
-                local isDup = false
-                for _, keptTx in ipairs(kept) do
-                    local timeDiff = math.abs((entry.tx.timestamp or 0) - (keptTx.timestamp or 0))
-                    if timeDiff <= WINDOW_48H then
-                        isDup = true
+                local dupOf = nil
+                local entryOfficer = VM:NormalizeName(entry.tx.officer or "")
+                for _, k in ipairs(kept) do
+                    local keptOfficer = VM:NormalizeName(k.tx.officer or "")
+                    local timeDiff = math.abs((entry.tx.timestamp or 0) - (k.tx.timestamp or 0))
+                    -- Each kept entry absorbs at most one copy per other scanner
+                    if timeDiff <= WINDOW_48H and entryOfficer ~= keptOfficer and not k.absorbed[entryOfficer] then
+                        dupOf = k
                         break
                     end
                 end
 
-                if isDup then
-                    VM.db.ledger[entry.id] = nil
+                if dupOf then
+                    dupOf.absorbed[entryOfficer] = true
+                    entry.tx.deleted = true
+                    entry.tx.dupOf = dupOf.id
                     removedCount = removedCount + 1
                 else
-                    table.insert(kept, entry.tx)
+                    table.insert(kept, { id = entry.id, tx = entry.tx, absorbed = {} })
                 end
             end
         end
     end
 
     if removedCount > 0 then
-        VM:LogDebug(string.format("Ledger:CleanupDuplicates purged %d duplicate transactions.", removedCount))
+        VM:LogDebug(string.format("Ledger:CleanupDuplicates tombstoned %d cross-client duplicates.", removedCount))
         if VM.UI and VM.UI.RefreshAll then
             VM.UI:RefreshAll()
         end

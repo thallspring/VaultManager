@@ -2,37 +2,12 @@ local _, VM = ...
 VM.Ranking = {}
 local Ranking = VM.Ranking
 
+-- Single valuation path shared with the Ledger (voided pairs, TRANSFER deposits, FFA/WRITE_OFF at
+-- 100% AH, discounted member price on % of AH tabs) so Ranking can never diverge from Ledger totals.
 function Ranking:GetTransactionValuation(tx, priceMode)
-    if not tx or tx.voided or tx.netValue == 0 or tx.tag == "[RETURNED]" then
-        return 0
-    end
-    if tx.itemID == 0 or tx.itemLink == "GOLD" then
-        return (tx.unitPriceAtTime or 0) * (tx.count or 1)
-    end
-
-    -- FFA (FREE) and officer WRITE_OFF are valued at 100% AH on the member;
-    -- discounted (% of AH) withdrawals use the rounded member price.
-    local isFFA = (tx.isFFA == true) or (tx.priceMode == "FREE")
-    if tx.type == "OUT" and not isFFA and tx.source ~= "WRITE_OFF" then
-        if tx.chargedTotalPrice ~= nil and tx.chargedTotalPrice >= 0 then
-            return tx.chargedTotalPrice
-        elseif tx.chargedUnitPrice ~= nil and tx.chargedUnitPrice > 0 then
-            return tx.chargedUnitPrice * (tx.count or 1)
-        elseif tx.priceMode == "PERCENT" then
-            local base = (tx.unitPriceAtTime and tx.unitPriceAtTime > 0) and tx.unitPriceAtTime or (VM:GetEffectiveLivePrice(tx.itemID, tx.itemLink, tx.unitPriceAtTime) or 0)
-            return VM:CalculateMemberTotalPrice(base, tx.count or 1, { mode = "PERCENT", percent = tx.pricePercent or 50 })
-        end
-    end
-
+    if not tx then return 0 end
     local mode = priceMode or (VM.db and VM.db.uiPrefs and VM.db.uiPrefs.rankingPriceMode) or "live"
-    local unitVal = 0
-    if mode == "locked" then
-        unitVal = (tx.unitPriceAtTime and tx.unitPriceAtTime > 0) and tx.unitPriceAtTime or (VM:GetEffectiveLivePrice(tx.itemID, tx.itemLink, tx.unitPriceAtTime) or 0)
-    else -- "live"
-        local livePrice = VM:GetEffectiveLivePrice(tx.itemID, tx.itemLink, tx.unitPriceAtTime) or 0
-        unitVal = (livePrice > 0) and livePrice or (tx.unitPriceAtTime or 0)
-    end
-    return unitVal * (tx.count or 0)
+    return VM.Ledger:GetTransactionValue(tx, mode == "locked", mode)
 end
 
 local function MatchesPeriod(txTimestamp, period)

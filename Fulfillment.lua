@@ -2,13 +2,15 @@ local _, VM = ...
 VM.Fulfillment = {}
 local Fulfillment = VM.Fulfillment
 
-Fulfillment.activeOrder = nil -- Order currently being prepared by officer
+Fulfillment.activeOrder = nil
 
+local MAX_SLOTS_PER_TAB = 98
 local currentTradeTargetMoney = 0
 local currentTradeTargetName = ""
 local pendingMailSnapshot = nil
 local lastAcceptedTrade = nil
 local sendMailHooked = false
+local whisperedInCurrentTrade = {}
 
 local function CleanItemName(str)
     if type(str) ~= "string" or str == "" then return "" end
@@ -21,29 +23,150 @@ local function CleanItemName(str)
     return (s:match("^%s*(.-)%s*$") or s):lower()
 end
 
-local function DoesBagItemMatchRequest(bagItemID, bagItemName, req)
+local function CleanItemDisplay(str)
+    if type(str) ~= "string" or str == "" then return "Item" end
+    local s = str:gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", "")
+    local bracket = s:match("%[(.-)%]")
+    if bracket and bracket ~= "" then
+        s = bracket
+    end
+    s = s:gsub("^%[", ""):gsub("%]$", "")
+    s = s:match("^%s*(.-)%s*$") or s
+    return (s ~= "") and s or "Item"
+end
+
+local function DoesItemMatchRequest(itemID, itemName, req)
     if not req or req.isGoldRequest then return false end
     local reqID = tonumber(req.itemID) or 0
-    local bID = tonumber(bagItemID) or 0
+    local bID = tonumber(itemID) or 0
     if reqID > 0 and bID > 0 then
         return bID == reqID
     end
     local reqName = CleanItemName(req.itemName or req.itemLink)
-    local bagName = CleanItemName(bagItemName)
+    local bagName = CleanItemName(itemName)
     return reqName ~= "" and bagName ~= "" and reqName == bagName
 end
 
+local function IsSameActor(nameA, nameB)
+    local a = VM:NormalizeName(nameA)
+    local b = VM:NormalizeName(nameB)
+    if a == "" or b == "" then return false end
+    local la, lb = a:lower(), b:lower()
+    if la == lb then return true end
+    if not la:find("%s") and lb:sub(1, #la + 1) == (la .. " ") then return true end
+    if not lb:find("%s") and la:sub(1, #lb + 1) == (lb .. " ") then return true end
+    return false
+end
+
 local function IsSameRecipient(reqRequester, targetName)
+    if IsSameActor(reqRequester, targetName) then return true end
     local rNorm = VM:NormalizeName(reqRequester)
     local tNorm = VM:NormalizeName(targetName)
     if rNorm == "" or tNorm == "" then return false end
-    if rNorm:lower() == tNorm:lower() then return true end
     local rMain = VM:GetMainFor(rNorm)
     local tMain = VM:GetMainFor(tNorm)
-    if rMain ~= "" and tMain ~= "" and rMain:lower() == tMain:lower() then
+    if rMain ~= "" and tMain ~= "" and IsSameActor(rMain, tMain) then
         return true
     end
     return false
+end
+
+local function GetContainerSlotCount(bag)
+    if C_Container and C_Container.GetContainerNumSlots then
+        return C_Container.GetContainerNumSlots(bag) or 0
+    elseif GetContainerNumSlots then
+        return GetContainerNumSlots(bag) or 0
+    end
+    return 0
+end
+
+local function GetContainerFreeSlotsAndType(bag)
+    if C_Container and C_Container.GetContainerNumFreeSlots then
+        return C_Container.GetContainerNumFreeSlots(bag)
+    elseif GetContainerNumFreeSlots then
+        return GetContainerNumFreeSlots(bag)
+    end
+    return 0, 0
+end
+
+local function GetBagSlotInfo(bag, slot)
+    if C_Container and C_Container.GetContainerItemInfo then
+        local info = C_Container.GetContainerItemInfo(bag, slot)
+        if info then
+            return info.hyperlink, info.stackCount or 1, info.isLocked
+        end
+        return nil, 0, false
+    elseif GetContainerItemInfo then
+        local _, count, locked, _, _, _, link = GetContainerItemInfo(bag, slot)
+        return link, count or 0, locked
+    end
+    return nil, 0, false
+end
+
+local function PickupBagSlot(bag, slot)
+    if C_Container and C_Container.PickupContainerItem then
+        C_Container.PickupContainerItem(bag, slot)
+    elseif PickupContainerItem then
+        PickupContainerItem(bag, slot)
+    end
+end
+
+local function SplitBagSlot(bag, slot, amount)
+    if C_Container and C_Container.SplitContainerItem then
+        C_Container.SplitContainerItem(bag, slot, amount)
+    elseif SplitContainerItem then
+        SplitContainerItem(bag, slot, amount)
+    end
+end
+
+-- Returns list of empty slots in general-purpose bags (bagType == 0)
+local function GetEmptyGeneralBagSlots()
+    local empties = {}
+    for bag = 0, 4 do
+        local _, bagType = GetContainerFreeSlotsAndType(bag)
+        if not bagType or bagType == 0 then
+            local numSlots = GetContainerSlotCount(bag)
+            for slot = 1, numSlots do
+                local link = GetBagSlotInfo(bag, slot)
+                if not link then
+                    table.insert(empties, { bag = bag, slot = slot })
+                end
+            end
+        end
+    end
+    return empties
+end
+
+local function CountMatchingItemsInBags(req)
+    local total = 0
+    for bag = 0, 4 do
+        local numSlots = GetContainerSlotCount(bag)
+        for slot = 1, numSlots do
+            local link, count = GetBagSlotInfo(bag, slot)
+            if link then
+                local id = tonumber(link:match("item:(%d+)")) or 0
+                local name = link:match("%[(.-)%]") or link
+                if DoesItemMatchRequest(id, name, req) then
+                    total = total + (tonumber(count) or 1)
+                end
+            end
+        end
+    end
+    return total
+end
+
+function Fulfillment:GetExpectedMemberPayment(req)
+    if not req or req.isGoldRequest then return 0 end
+    if req.priceMode == "FREE" then return 0 end
+    if req.quotedTotalPrice and req.quotedTotalPrice > 0 then
+        return req.quotedTotalPrice
+    elseif req.priceMode == "PERCENT" then
+        local liveUnit = VM:GetEffectiveLivePrice(req.itemID, req.itemLink, req.priceAtRequest or req.quotedUnitPrice)
+        return VM:CalculateMemberTotalPrice(liveUnit, req.count or 1, { mode = "PERCENT", percent = req.pricePercent or 50 })
+    elseif req.quotedUnitPrice and req.quotedUnitPrice > 0 then
+        return req.quotedUnitPrice * (req.count or 1)
+    end
+    return 0
 end
 
 local function CaptureMailSnapshot(target)
@@ -139,7 +262,7 @@ function Fulfillment:PruneOldRequests()
     local cutoff = time() - (30 * 86400)
     local removed = 0
     for id, req in pairs(VM.db.requests) do
-        if req and (req.status == "FULFILLED" or req.status == "REJECTED") then
+        if req and (req.status == "FULFILLED" or req.status == "REJECTED" or req.status == "WRITTEN_OFF") then
             local refTs = req.completedAt or req.updatedAt or req.createdAt or 0
             if refTs > 0 and refTs < cutoff then
                 VM.db.requests[id] = nil
@@ -156,6 +279,37 @@ function Fulfillment:PruneOldRequests()
     return removed
 end
 
+function Fulfillment:GetMyPreparedOrders(optionalRecipient)
+    local list = {}
+    if not VM.db or not VM.db.requests or VM.isUnguilded then return list end
+    local me = VM:GetPlayerName()
+    if me == "" then return list end
+
+    for _, req in pairs(VM.db.requests) do
+        if req and req.status == "PREPARED" and IsSameActor(req.preparedBy, me) then
+            if not optionalRecipient or optionalRecipient == "" or IsSameRecipient(req.requester, optionalRecipient) then
+                table.insert(list, req)
+            end
+        end
+    end
+    table.sort(list, function(a, b) return (a.preparedAt or a.createdAt or 0) < (b.preparedAt or b.createdAt or 0) end)
+    return list
+end
+
+function Fulfillment:GetPendingAndApprovedCounts()
+    local pendingCount, approvedCount = 0, 0
+    if not VM.db or not VM.db.requests or VM.isUnguilded then return 0, 0 end
+    for _, req in pairs(VM.db.requests) do
+        if req.status == "PENDING" then
+            pendingCount = pendingCount + 1
+        elseif req.status == "APPROVED" then
+            approvedCount = approvedCount + 1
+        end
+    end
+    return pendingCount, approvedCount
+end
+
+-- Used by BankScanner for direct member withdrawals of APPROVED requests
 function Fulfillment:FindMatchingApprovedRequest(recipientName, itemID, itemName, count, goldCopper)
     if not VM.db or not VM.db.requests or not recipientName or recipientName == "" then return nil end
 
@@ -205,12 +359,69 @@ function Fulfillment:FindMatchingApprovedRequest(recipientName, itemID, itemName
     return bestExact or bestCover
 end
 
+-- Used by Mail / Trade auto-complete: prioritizes THIS officer's PREPARED orders, then falls back to APPROVED
+function Fulfillment:FindMatchingDeliverableRequest(recipientName, itemID, itemName, count, goldCopper)
+    if not VM.db or not VM.db.requests or not recipientName or recipientName == "" then return nil end
+
+    local me = VM:GetPlayerName()
+    local numID = tonumber(itemID) or 0
+    local cleanTargetName = CleanItemName(itemName)
+    local qty = tonumber(count) or 0
+    local goldAmt = tonumber(goldCopper) or 0
+
+    local function SearchByStatus(targetStatus, requirePreparedByMe)
+        local bestExact = nil
+        local bestCover = nil
+        for _, req in pairs(VM.db.requests) do
+            if req and req.status == targetStatus and IsSameRecipient(req.requester, recipientName) then
+                if not requirePreparedByMe or IsSameActor(req.preparedBy, me) then
+                    if goldAmt > 0 then
+                        if req.isGoldRequest then
+                            local reqGold = tonumber(req.goldAmount or req.quotedTotalPrice or req.quotedUnitPrice) or 0
+                            if reqGold == goldAmt then
+                                if not bestExact or (req.createdAt or 0) < (bestExact.createdAt or 0) then
+                                    bestExact = req
+                                end
+                            end
+                        end
+                    else
+                        if not req.isGoldRequest then
+                            local reqID = tonumber(req.itemID) or 0
+                            local reqCleanName = CleanItemName(req.itemName or req.itemLink)
+                            local itemMatches = (numID > 0 and reqID > 0 and numID == reqID)
+                                or (cleanTargetName ~= "" and reqCleanName ~= "" and cleanTargetName == reqCleanName)
+
+                            if itemMatches then
+                                local reqCount = tonumber(req.count) or 1
+                                if qty == reqCount then
+                                    if not bestExact or (req.createdAt or 0) < (bestExact.createdAt or 0) then
+                                        bestExact = req
+                                    end
+                                elseif qty > reqCount then
+                                    if not bestCover or (req.createdAt or 0) < (bestCover.createdAt or 0) then
+                                        bestCover = req
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+        return bestExact or bestCover
+    end
+
+    local preparedMatch = SearchByStatus("PREPARED", true)
+    if preparedMatch then return preparedMatch end
+    return SearchByStatus("APPROVED", false)
+end
+
 function Fulfillment:CompleteFromTransfer(recipient, itemsByKey, moneySent, method)
     if not VM:IsOfficer() or not recipient or recipient == "" then return 0 end
     local completedCount = 0
 
     if moneySent and moneySent > 0 then
-        local goldReq = self:FindMatchingApprovedRequest(recipient, nil, nil, nil, moneySent)
+        local goldReq = self:FindMatchingDeliverableRequest(recipient, nil, nil, nil, moneySent)
         if goldReq then
             self:CompleteRequest(goldReq.id, {
                 completedBy = VM:GetPlayerName(),
@@ -226,7 +437,7 @@ function Fulfillment:CompleteFromTransfer(recipient, itemsByKey, moneySent, meth
             local safety = 0
             while remainingQty > 0 and safety < 20 do
                 safety = safety + 1
-                local matchedReq = self:FindMatchingApprovedRequest(recipient, entry.itemID, entry.itemName, remainingQty, 0)
+                local matchedReq = self:FindMatchingDeliverableRequest(recipient, entry.itemID, entry.itemName, remainingQty, 0)
                 if not matchedReq then break end
                 local reqQty = tonumber(matchedReq.count) or 1
                 self:CompleteRequest(matchedReq.id, {
@@ -252,8 +463,21 @@ function Fulfillment:Init()
         end)
     end
 
+    -- Delayed relog reminder if this officer still has unfulfilled PREPARED requests
+    if C_Timer and C_Timer.After then
+        C_Timer.After(5, function()
+            if not VM.isUnguilded and VM:IsOfficer() then
+                local mine = self:GetMyPreparedOrders()
+                if #mine > 0 and VM.UI and VM.UI.ShowRelogPreparedReminder then
+                    VM.UI:ShowRelogPreparedReminder(mine)
+                end
+            end
+        end)
+    end
+
     local f = CreateFrame("Frame")
     f:RegisterEvent("MAIL_SHOW")
+    f:RegisterEvent("MAIL_CLOSED")
     f:RegisterEvent("MAIL_SEND_SUCCESS")
     f:RegisterEvent("MAIL_FAILED")
     f:RegisterEvent("TRADE_SHOW")
@@ -265,14 +489,15 @@ function Fulfillment:Init()
     f:SetScript("OnEvent", function(_, event, arg1, arg2)
         if event == "MAIL_SHOW" then
             pendingMailSnapshot = nil
-            if self.activeOrder then
-                if C_Timer and C_Timer.After then
-                    C_Timer.After(0.2, function()
-                        if self.activeOrder then self:PopulateMail(self.activeOrder) end
-                    end)
-                else
-                    self:PopulateMail(self.activeOrder)
+            if VM:IsOfficer() then
+                local mine = self:GetMyPreparedOrders()
+                if #mine > 0 and VM.UI and VM.UI.ShowMailFulfillmentPanel then
+                    VM.UI:ShowMailFulfillmentPanel(mine)
                 end
+            end
+        elseif event == "MAIL_CLOSED" then
+            if VM.UI and VM.UI.HideMailFulfillmentPanel then
+                VM.UI:HideMailFulfillmentPanel()
             end
         elseif event == "MAIL_FAILED" then
             pendingMailSnapshot = nil
@@ -282,26 +507,31 @@ function Fulfillment:Init()
             if snap and (time() - (snap.timestamp or 0)) <= 30 then
                 local done = self:CompleteFromTransfer(snap.recipient, snap.items, snap.money, "MAIL")
                 if done > 0 then
-                    VM:Print(string.format("Mail sent — auto-completed %d approved request(s).", done))
+                    VM:Print(string.format("Mail sent — auto-completed %d request(s).", done))
+                end
+                if VM.UI and VM.UI.ShowMailFulfillmentPanel and MailFrame and MailFrame:IsShown() then
+                    local remaining = self:GetMyPreparedOrders()
+                    if #remaining > 0 then
+                        VM.UI:ShowMailFulfillmentPanel(remaining)
+                    elseif VM.UI.HideMailFulfillmentPanel then
+                        VM.UI:HideMailFulfillmentPanel()
+                    end
                 end
             end
         elseif event == "TRADE_SHOW" then
             currentTradeTargetMoney = 0
             currentTradeTargetName = VM:NormalizeName(UnitName("NPC") or "")
             lastAcceptedTrade = nil
-            if self.activeOrder then
-                if C_Timer and C_Timer.After then
-                    C_Timer.After(0.2, function()
-                        if self.activeOrder then self:PopulateTrade(self.activeOrder) end
-                    end)
-                else
-                    self:PopulateTrade(self.activeOrder)
+            whisperedInCurrentTrade = {}
+            if VM:IsOfficer() and currentTradeTargetName ~= "" then
+                local matches = self:GetMyPreparedOrders(currentTradeTargetName)
+                if #matches > 0 and VM.UI and VM.UI.ShowTradeFulfillmentPrompt then
+                    VM.UI:ShowTradeFulfillmentPrompt(currentTradeTargetName, matches)
                 end
             end
         elseif event == "TRADE_MONEY_CHANGED" then
             currentTradeTargetMoney = (GetTargetTradeMoney and GetTargetTradeMoney()) or 0
         elseif event == "TRADE_ACCEPT_UPDATE" then
-            -- arg1 == 1 (player accepted), arg2 == 1 (target accepted)
             if arg1 == 1 or arg2 == 1 then
                 CaptureTradeSnapshot()
             end
@@ -326,12 +556,16 @@ function Fulfillment:Init()
 
                 local done = self:CompleteFromTransfer(snap.recipient, snap.items, snap.playerMoney, "TRADE")
                 if done > 0 then
-                    VM:Print(string.format("Trade completed — auto-completed %d approved request(s).", done))
+                    VM:Print(string.format("Trade completed — auto-completed %d request(s).", done))
                 end
             end
         elseif event == "TRADE_CLOSED" then
             currentTradeTargetMoney = 0
             currentTradeTargetName = ""
+            whisperedInCurrentTrade = {}
+            if VM.UI and VM.UI.HideTradeFulfillmentPrompt then
+                VM.UI:HideTradeFulfillmentPrompt()
+            end
         end
     end)
 end
@@ -384,6 +618,8 @@ function Fulfillment:CreateRequest(tabIndex, itemKey, count)
         updatedAt = now,
         approvedBy = "",
         approvedAt = 0,
+        preparedBy = "",
+        preparedAt = 0,
         fulfilledBy = "",
         completedAt = 0,
         completedMethod = "",
@@ -403,7 +639,7 @@ function Fulfillment:CreateRequest(tabIndex, itemKey, count)
 end
 
 -- Create new gold request for guild expenses (Member / Officer)
-function Fulfillment:CreateGoldRequest(copperAmount, reason)
+function Fulfillment:CreateGoldRequest(copperAmount, reason, guildCategory)
     local amount = math.floor(tonumber(copperAmount) or 0)
     local cleanReason = strtrim(tostring(reason or ""))
     if amount <= 0 then
@@ -415,12 +651,14 @@ function Fulfillment:CreateGoldRequest(copperAmount, reason)
         return
     end
 
+    local cat = (VM.Ledger and VM.Ledger.NormalizeGuildCategory) and VM.Ledger:NormalizeGuildCategory(guildCategory) or "RAID"
     local now = time()
     local reqID = string.format("REQ_GOLD_%s_%d_%d", VM:GetPlayerName(), now, math.random(1000, 9999))
     local req = {
         id = reqID,
         requester = VM:GetPlayerName(),
         isGoldRequest = true,
+        guildCategory = cat,
         itemID = 0,
         itemLink = "GOLD",
         itemName = "Gold Request",
@@ -432,6 +670,8 @@ function Fulfillment:CreateGoldRequest(copperAmount, reason)
         updatedAt = now,
         approvedBy = "",
         approvedAt = 0,
+        preparedBy = "",
+        preparedAt = 0,
         fulfilledBy = "",
         completedAt = 0,
         completedMethod = "",
@@ -467,11 +707,263 @@ function Fulfillment:ApproveRequest(reqID)
     if VM.UI then VM.UI:RefreshAll() end
 end
 
+-- Helper to mark request PREPARED (or FULFILLED directly if officer prepared their own request at the bank)
+function Fulfillment:FinalizePreparedState(req, withdrawnFromBank)
+    local me = VM:GetPlayerName()
+    local now = time()
+
+    if withdrawnFromBank and IsSameRecipient(req.requester, me) then
+        self:CompleteRequest(req.id, {
+            completedBy = me,
+            completedAt = now,
+            method = "BANK"
+        })
+        VM:Print("Withdrew your own request directly from the Guild Bank — marked Fulfilled.")
+        return
+    end
+
+    req.status = "PREPARED"
+    req.preparedBy = me
+    req.preparedAt = now
+    req.updatedAt = now
+    self.activeOrder = req
+
+    VM.Comms:BroadcastRequest(req)
+    if VM.Minimap and VM.Minimap.UpdateBadge then VM.Minimap:UpdateBadge() end
+    if VM.UI then VM.UI:RefreshAll() end
+
+    if req.isGoldRequest then
+        VM:Print(string.format("Prepared gold request (%s) for |cffffff00%s|r. Open Mail or Trade to fulfill.",
+            VM:FormatMoney(req.goldAmount or req.quotedTotalPrice or 0), req.requester))
+    else
+        VM:Print(string.format("Prepared %dx %s for |cffffff00%s|r. Open Mail or Trade to fulfill.",
+            req.count or 1, req.itemLink or req.itemName or "Item", req.requester))
+    end
+end
+
+-- Executes Guild Bank item withdrawal steps into reserved empty bag slots
+function Fulfillment:ExecuteBankWithdrawSteps(req, tab, steps)
+    local function RunStep(idx)
+        local step = steps[idx]
+        if not step then
+            self:FinalizePreparedState(req, true)
+            return
+        end
+
+        if not (GuildBankFrame and GuildBankFrame:IsVisible()) then
+            VM:Print("|cffff4444Guild Bank closed before withdrawal finished.|r")
+            return
+        end
+
+        ClearCursor()
+        if step.isFullStack then
+            if PickupGuildBankItem then
+                PickupGuildBankItem(tab, step.gbSlot)
+            end
+        else
+            if SplitGuildBankItem then
+                SplitGuildBankItem(tab, step.gbSlot, step.takeCount)
+            end
+        end
+        PickupBagSlot(step.destBag, step.destSlot)
+        ClearCursor()
+
+        if idx < #steps then
+            if C_Timer and C_Timer.After then
+                C_Timer.After(0.28, function() RunStep(idx + 1) end)
+            else
+                RunStep(idx + 1)
+            end
+        else
+            self:FinalizePreparedState(req, true)
+        end
+    end
+
+    RunStep(1)
+end
+
+-- Prepare request: auto-withdraws from Guild Bank if open, or marks PREPARED if already in bags
+function Fulfillment:PrepareRequest(reqID)
+    if not VM:IsOfficer() then return end
+    local req = VM.db.requests[reqID]
+    if not req or req.status ~= "APPROVED" then return end
+
+    local isBankOpen = GuildBankFrame and GuildBankFrame:IsVisible()
+
+    if req.isGoldRequest then
+        local goldAmt = tonumber(req.goldAmount or req.quotedTotalPrice or req.quotedUnitPrice) or 0
+        if goldAmt <= 0 then return end
+
+        if isBankOpen then
+            local bankGold = (GetGuildBankMoney and GetGuildBankMoney()) or 0
+            if bankGold < goldAmt then
+                VM:Print(string.format("|cffff4444Not enough gold in Guild Bank (Have: %s, Need: %s).|r",
+                    VM:FormatMoney(bankGold), VM:FormatMoney(goldAmt)))
+                return
+            end
+            local limit = (GetGuildBankWithdrawMoney and GetGuildBankWithdrawMoney()) or -1
+            if limit >= 0 and limit < goldAmt then
+                VM:Print(string.format("|cffff4444Your daily Guild Bank withdraw limit (%s) is below %s.|r",
+                    VM:FormatMoney(limit), VM:FormatMoney(goldAmt)))
+                return
+            end
+            if WithdrawGuildBankMoney then
+                WithdrawGuildBankMoney(goldAmt)
+            end
+            self:FinalizePreparedState(req, true)
+        else
+            local myGold = (GetMoney and GetMoney()) or 0
+            if myGold >= goldAmt then
+                self:FinalizePreparedState(req, false)
+            else
+                VM:Print(string.format("|cffff4444Open the Guild Bank to withdraw %s for this request.|r", VM:FormatMoney(goldAmt)))
+            end
+        end
+        return
+    end
+
+    -- Item Request
+    local needed = tonumber(req.count) or 1
+    if not isBankOpen then
+        local inBags = CountMatchingItemsInBags(req)
+        if inBags >= needed then
+            self:FinalizePreparedState(req, false)
+        else
+            VM:Print(string.format("|cffff4444Open the Guild Bank to withdraw %dx %s (found %d in bags).|r",
+                needed, req.itemLink or req.itemName or "Item", inBags))
+        end
+        return
+    end
+
+    local targetTab = tonumber(req.tab) or 1
+    local function ScanAndWithdrawFromTab()
+        if not (GuildBankFrame and GuildBankFrame:IsVisible()) then return end
+
+        local matchingSlots = {}
+        local totalAvailable = 0
+        for slot = 1, MAX_SLOTS_PER_TAB do
+            local _, count, locked = GetGuildBankItemInfo(targetTab, slot)
+            local link = GetGuildBankItemLink(targetTab, slot)
+            if link and count and count > 0 and not locked then
+                local id = tonumber(link:match("item:(%d+)")) or 0
+                local name = link:match("%[(.-)%]") or link
+                if DoesItemMatchRequest(id, name, req) then
+                    table.insert(matchingSlots, { slot = slot, count = count })
+                    totalAvailable = totalAvailable + count
+                end
+            end
+        end
+
+        if totalAvailable < needed then
+            VM:Print(string.format("|cffff4444Only %d of %d %s found in Tab %d. Try again after the tab loads.|r",
+                totalAvailable, needed, req.itemLink or req.itemName or "Item", targetTab))
+            return
+        end
+
+        -- Prefer exact-match or smaller stacks first to minimize splitting
+        table.sort(matchingSlots, function(a, b)
+            if a.count == needed and b.count ~= needed then return true end
+            if b.count == needed and a.count ~= needed then return false end
+            return a.count < b.count
+        end)
+
+        local empties = GetEmptyGeneralBagSlots()
+        local steps = {}
+        local remaining = needed
+        local emptyIdx = 1
+
+        for _, s in ipairs(matchingSlots) do
+            if remaining <= 0 then break end
+            if not empties[emptyIdx] then
+                VM:Print(string.format("|cffff4444Not enough free general bag slots to withdraw %dx %s.|r",
+                    needed, req.itemLink or req.itemName or "Item"))
+                return
+            end
+            local take = math.min(s.count, remaining)
+            table.insert(steps, {
+                gbSlot = s.slot,
+                takeCount = take,
+                isFullStack = (take == s.count),
+                destBag = empties[emptyIdx].bag,
+                destSlot = empties[emptyIdx].slot,
+            })
+            remaining = remaining - take
+            emptyIdx = emptyIdx + 1
+        end
+
+        self:ExecuteBankWithdrawSteps(req, targetTab, steps)
+    end
+
+    local curTab = (GetCurrentGuildBankTab and GetCurrentGuildBankTab()) or 0
+    if curTab ~= targetTab then
+        if SetCurrentGuildBankTab then SetCurrentGuildBankTab(targetTab) end
+        if QueryGuildBankTab then QueryGuildBankTab(targetTab) end
+        if C_Timer and C_Timer.After then
+            C_Timer.After(0.35, ScanAndWithdrawFromTab)
+        else
+            ScanAndWithdrawFromTab()
+        end
+    else
+        ScanAndWithdrawFromTab()
+    end
+end
+
+-- Release a PREPARED request back to APPROVED (if responsible officer returns item or cancels prepare)
+function Fulfillment:ReleasePreparedRequest(reqID)
+    if not VM:IsOfficer() then return end
+    local req = VM.db.requests[reqID]
+    if not req or req.status ~= "PREPARED" then return end
+
+    local now = time()
+    req.status = "APPROVED"
+    req.preparedBy = ""
+    req.preparedAt = 0
+    req.updatedAt = now
+
+    if self.activeOrder and self.activeOrder.id == req.id then
+        self.activeOrder = nil
+    end
+
+    VM.Comms:BroadcastRequest(req)
+    if VM.Minimap and VM.Minimap.UpdateBadge then VM.Minimap:UpdateBadge() end
+    if VM.UI then VM.UI:RefreshAll() end
+    VM:Print("Request returned to APPROVED status.")
+end
+
+-- Write off a PREPARED request when the responsible officer has left the guild
+function Fulfillment:WriteOffRequest(reqID)
+    if not VM:IsOfficer() then return end
+    local req = VM.db.requests[reqID]
+    if not req or req.status ~= "PREPARED" then return end
+
+    local departed = VM:NormalizeName(req.preparedBy or "")
+    if departed == "" then return end
+
+    local now = time()
+    local me = VM:GetPlayerName()
+    VM.Ledger:RecordWriteOff(req, me)
+
+    req.status = "WRITTEN_OFF"
+    req.fulfilledBy = me
+    req.completedAt = now
+    req.completedMethod = "WRITEOFF"
+    req.updatedAt = now
+
+    if self.activeOrder and self.activeOrder.id == req.id then
+        self.activeOrder = nil
+    end
+
+    VM.Comms:BroadcastRequest(req)
+    if VM.Minimap and VM.Minimap.UpdateBadge then VM.Minimap:UpdateBadge() end
+    if VM.UI then VM.UI:RefreshAll() end
+    VM:Print(string.format("Request written off and charged to departed officer |cffffff00%s|r.", departed))
+end
+
 -- Reject / cancel request (Officer)
 function Fulfillment:RejectRequest(reqID)
     if not VM:IsOfficer() then return end
     local req = VM.db.requests[reqID]
-    if not req or (req.status ~= "PENDING" and req.status ~= "APPROVED") then return end
+    if not req or (req.status ~= "PENDING" and req.status ~= "APPROVED" and req.status ~= "PREPARED") then return end
 
     local now = time()
     req.status = "REJECTED"
@@ -492,7 +984,7 @@ end
 function Fulfillment:CompleteRequest(reqID, opts)
     if not VM:IsOfficer() then return end
     local req = VM.db.requests[reqID]
-    if not req or req.status ~= "APPROVED" then return end
+    if not req or (req.status ~= "APPROVED" and req.status ~= "PREPARED") then return end
 
     local now = time()
     local completedBy = VM:NormalizeName((opts and opts.completedBy) or VM:GetPlayerName())
@@ -533,15 +1025,90 @@ function Fulfillment:GetApprovedOrders()
     return list
 end
 
--- Shows popup when an officer opens the Guild Bank and there are approved orders
+-- Auto-opens main window on Requests tab when an officer opens Guild Bank with PENDING or APPROVED requests
 function Fulfillment:OnGuildBankOpened()
-    local approved = self:GetApprovedOrders()
-    if #approved > 0 and VM.UI then
-        VM.UI:ShowOfficerBankPopup(approved)
+    local prefs = VM.db and VM.db.uiPrefs
+    if prefs and prefs.autoOpenAtBank == false then return end
+
+    local pendingCount, approvedCount = self:GetPendingAndApprovedCounts()
+    if (pendingCount > 0 or approvedCount > 0) and VM.UI and VM.UI.OpenToRequestsTab then
+        VM.UI:OpenToRequestsTab()
     end
-    if VM.UI and VM.UI.CheckPendingFulfillmentReturns then
-        VM.UI:CheckPendingFulfillmentReturns()
+end
+
+-- Safe bag-to-target attachment with 2-step split via an empty bag slot (Classic-safe)
+local function AttachItemsFromBags(req, attachFn)
+    local remaining = tonumber(req.count) or 1
+    local exactOrSmaller = {}
+    local larger = {}
+
+    for bag = 0, 4 do
+        local numSlots = GetContainerSlotCount(bag)
+        for slot = 1, numSlots do
+            local link, count, locked = GetBagSlotInfo(bag, slot)
+            if link and count and count > 0 and not locked then
+                local id = tonumber(link:match("item:(%d+)")) or 0
+                local name = link:match("%[(.-)%]") or link
+                if DoesItemMatchRequest(id, name, req) then
+                    if count <= remaining then
+                        table.insert(exactOrSmaller, { bag = bag, slot = slot, count = count })
+                    else
+                        table.insert(larger, { bag = bag, slot = slot, count = count })
+                    end
+                end
+            end
+        end
     end
+
+    -- Prefer exact matches first, then largest full stacks <= remaining
+    table.sort(exactOrSmaller, function(a, b) return a.count > b.count end)
+
+    for _, entry in ipairs(exactOrSmaller) do
+        if remaining <= 0 then break end
+        if entry.count <= remaining then
+            ClearCursor()
+            PickupBagSlot(entry.bag, entry.slot)
+            if attachFn() then
+                remaining = remaining - entry.count
+            else
+                ClearCursor()
+                return remaining
+            end
+        end
+    end
+
+    if remaining > 0 and #larger > 0 then
+        table.sort(larger, function(a, b) return a.count < b.count end)
+        local src = larger[1]
+        local empties = GetEmptyGeneralBagSlots()
+        if #empties == 0 then
+            VM:Print("|cffff4444Free 1 general bag slot so Vault Manager can split the item stack.|r")
+            return remaining
+        end
+
+        local dest = empties[1]
+        ClearCursor()
+        SplitBagSlot(src.bag, src.slot, remaining)
+        PickupBagSlot(dest.bag, dest.slot)
+        ClearCursor()
+
+        local function AttachSplitSlot()
+            ClearCursor()
+            PickupBagSlot(dest.bag, dest.slot)
+            if not attachFn() then
+                ClearCursor()
+            end
+        end
+
+        if C_Timer and C_Timer.After then
+            C_Timer.After(0.25, AttachSplitSlot)
+        else
+            AttachSplitSlot()
+        end
+        remaining = 0
+    end
+
+    return remaining
 end
 
 -- Finds items in player's bags (or sets Send Money for gold requests) in Send Mail
@@ -571,21 +1138,10 @@ function Fulfillment:PopulateMail(req)
     end
 
     if SendMailSubjectEditBox then
-        SendMailSubjectEditBox:SetText(string.format("Guild Bank: %dx %s", req.count or 1, req.itemName or "Item"))
+        SendMailSubjectEditBox:SetText(string.format("Guild Bank: %dx %s", req.count or 1, CleanItemDisplay(req.itemName or req.itemLink)))
     end
 
-    local totalCOD = 0
-    if req.priceMode == "FREE" then
-        totalCOD = 0
-    elseif req.quotedTotalPrice and req.quotedTotalPrice > 0 then
-        totalCOD = req.quotedTotalPrice
-    elseif req.priceMode == "PERCENT" then
-        local liveUnit = VM:GetEffectiveLivePrice(req.itemID, req.itemLink, req.priceAtRequest or req.quotedUnitPrice)
-        totalCOD = VM:CalculateMemberTotalPrice(liveUnit, req.count or 1, { mode = "PERCENT", percent = req.pricePercent or 50 })
-    elseif req.quotedUnitPrice and req.quotedUnitPrice > 0 then
-        totalCOD = req.quotedUnitPrice * (req.count or 1)
-    end
-
+    local totalCOD = self:GetExpectedMemberPayment(req)
     if totalCOD > 0 then
         if SendMailSendMoneyButton then SendMailSendMoneyButton:SetChecked(false) end
         if SendMailCODButton then SendMailCODButton:SetChecked(true) end
@@ -600,43 +1156,55 @@ function Fulfillment:PopulateMail(req)
         end
     end
 
-    local remaining = tonumber(req.count) or 1
-    for bag = 0, 4 do
-        if remaining <= 0 then return end
-        local slots = C_Container and C_Container.GetContainerNumSlots(bag) or GetContainerNumSlots(bag)
-        for slot = 1, slots do
-            if remaining <= 0 then return end
-            local link, count
-            if C_Container and C_Container.GetContainerItemInfo then
-                local info = C_Container.GetContainerItemInfo(bag, slot)
-                if info then link = info.hyperlink; count = info.stackCount end
-            else
-                _, count, _, _, _, _, link = GetContainerItemInfo(bag, slot)
-            end
-
-            if link then
-                local id = tonumber(link:match("item:(%d+)"))
-                local name = link:match("%[(.-)%]") or link
-                if DoesBagItemMatchRequest(id, name, req) and remaining > 0 then
-                    if C_Container and C_Container.PickupContainerItem then
-                        C_Container.PickupContainerItem(bag, slot)
-                    else
-                        PickupContainerItem(bag, slot)
-                    end
-                    ClickSendMailItemButton()
-                    remaining = remaining - (count or 1)
-                end
-            end
-        end
+    local left = AttachItemsFromBags(req, function()
+        ClickSendMailItemButton()
+        return true
+    end)
+    if left > 0 then
+        VM:Print(string.format("|cffffaa00Attached available items, but %d more %s missing from bags.|r",
+            left, req.itemLink or req.itemName or "Item"))
     end
 end
 
--- Finds items in player's bags (or fills gold for gold requests) in Trade window
+-- Plain-text whisper sent to trade partner when officer clicks "Fill Trade"
+function Fulfillment:SendTradeFulfillWhisper(req, rawTargetName)
+    if not req or not rawTargetName or rawTargetName == "" then return end
+    if whisperedInCurrentTrade[req.id] then return end
+    if not SendChatMessage then return end
+
+    local msg
+    if req.isGoldRequest then
+        local goldAmt = tonumber(req.goldAmount or req.quotedTotalPrice or req.quotedUnitPrice) or 0
+        local reasonTxt = (req.reason and req.reason ~= "") and (" - " .. req.reason) or ""
+        msg = string.format("Your Guild Bank gold request (%s%s) is being fulfilled in this trade.",
+            VM:FormatMoneyPlain(goldAmt), reasonTxt)
+    else
+        local qty = tonumber(req.count) or 1
+        local itemLabel = CleanItemDisplay(req.itemName or req.itemLink)
+        local due = self:GetExpectedMemberPayment(req)
+        if due > 0 then
+            msg = string.format("Your Guild Bank request (%dx %s) is being fulfilled. Please enter %s in the trade window.",
+                qty, itemLabel, VM:FormatMoneyPlain(due))
+        else
+            msg = string.format("Your Guild Bank request (%dx %s) is being fulfilled (no payment required).",
+                qty, itemLabel)
+        end
+    end
+
+    local ok = pcall(SendChatMessage, msg, "WHISPER", nil, rawTargetName)
+    if ok then
+        whisperedInCurrentTrade[req.id] = true
+    end
+end
+
+-- Finds items in player's bags (or fills gold for gold requests) in Trade window & whispers partner
 function Fulfillment:PopulateTrade(req)
     if not req then return end
-    local tradeTarget = VM:NormalizeName(UnitName("NPC") or "")
-    if not IsSameRecipient(req.requester, tradeTarget) then
-        print(string.format("|cffffaa00[Vault Manager]|r Trading with %s, but order is for %s.", tradeTarget, req.requester))
+    local rawTarget = UnitName("NPC") or ""
+    local tradeTarget = VM:NormalizeName(rawTarget)
+    if tradeTarget == "" or not IsSameRecipient(req.requester, tradeTarget) then
+        VM:Print(string.format("|cffffaa00Trading with %s, but order is for %s.|r",
+            tradeTarget ~= "" and tradeTarget or "nobody", req.requester or "?"))
         return
     end
 
@@ -645,37 +1213,34 @@ function Fulfillment:PopulateTrade(req)
         if goldAmt > 0 and SetTradeMoney then
             SetTradeMoney(goldAmt)
         end
+        self:SendTradeFulfillWhisper(req, rawTarget)
         return
     end
 
-    local remaining = tonumber(req.count) or 1
-    local tradeSlot = 1
-    for bag = 0, 4 do
-        local slots = C_Container and C_Container.GetContainerNumSlots(bag) or GetContainerNumSlots(bag)
-        for slot = 1, slots do
-            if tradeSlot > 6 or remaining <= 0 then return end
-            local link, count
-            if C_Container and C_Container.GetContainerItemInfo then
-                local info = C_Container.GetContainerItemInfo(bag, slot)
-                if info then link = info.hyperlink; count = info.stackCount end
-            else
-                _, count, _, _, _, _, link = GetContainerItemInfo(bag, slot)
+    local nextTradeSlot = 1
+    local function FindNextEmptyTradeSlot()
+        while nextTradeSlot <= 6 do
+            local existingName = GetTradePlayerItemInfo and GetTradePlayerItemInfo(nextTradeSlot)
+            if not existingName then
+                return nextTradeSlot
             end
-
-            if link then
-                local id = tonumber(link:match("item:(%d+)"))
-                local name = link:match("%[(.-)%]") or link
-                if DoesBagItemMatchRequest(id, name, req) and remaining > 0 then
-                    if C_Container and C_Container.PickupContainerItem then
-                        C_Container.PickupContainerItem(bag, slot)
-                    else
-                        PickupContainerItem(bag, slot)
-                    end
-                    ClickTradeButton(tradeSlot)
-                    tradeSlot = tradeSlot + 1
-                    remaining = remaining - (count or 1)
-                end
-            end
+            nextTradeSlot = nextTradeSlot + 1
         end
+        return nil
     end
+
+    local left = AttachItemsFromBags(req, function()
+        local slot = FindNextEmptyTradeSlot()
+        if not slot then return false end
+        ClickTradeButton(slot)
+        nextTradeSlot = slot + 1
+        return true
+    end)
+
+    if left > 0 then
+        VM:Print(string.format("|cffffaa00Placed available items in trade, but %d more %s missing from bags.|r",
+            left, req.itemLink or req.itemName or "Item"))
+    end
+
+    self:SendTradeFulfillWhisper(req, rawTarget)
 end

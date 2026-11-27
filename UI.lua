@@ -147,12 +147,19 @@ local function GetUIPrefs()
     return VM.db.uiPrefs
 end
 
+local function IsBankCurrentlyOpen()
+    if VM.BankScanner and VM.BankScanner.IsBankOpen then
+        return VM.BankScanner:IsBankOpen()
+    end
+    return GuildBankFrame and GuildBankFrame:IsVisible() and true or false
+end
+
 local function ApplyDefaultWindowPosition()
     if not mainFrame then return end
     local prefs = GetUIPrefs()
     if prefs.windowPos then return end
     mainFrame:ClearAllPoints()
-    if GuildBankFrame and GuildBankFrame:IsVisible() then
+    if IsBankCurrentlyOpen() then
         mainFrame:SetPoint("RIGHT", UIParent, "RIGHT", -24, 0)
     else
         mainFrame:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
@@ -379,6 +386,21 @@ function UI:OpenToRequestsTab()
         VM:UpdateRosterCache()
     end
     STATE.currentTab = 2
+    HideAllPopups()
+    ApplyDefaultWindowPosition()
+    mainFrame:Show()
+    self:RefreshAll()
+end
+
+function UI:OpenToVaultTab()
+    if not mainFrame then self:CreateMainFrame() end
+    if VM.SwitchGuildContext then
+        VM:SwitchGuildContext("UI_OPEN_VAULT")
+    end
+    if VM.UpdateRosterCache then
+        VM:UpdateRosterCache()
+    end
+    STATE.currentTab = 1
     HideAllPopups()
     ApplyDefaultWindowPosition()
     mainFrame:Show()
@@ -1677,8 +1699,10 @@ function UI:BuildInventoryPanel(panel)
     scanBtn:SetPoint("TOPRIGHT", -10, -8)
     scanBtn:SetScript("OnClick", function()
         if VM.BankScanner and VM.BankScanner.ForceScan then
+            if IsBankCurrentlyOpen() then
+                VM:Print("Scanning Guild Bank tabs and logs...")
+            end
             VM.BankScanner:ForceScan()
-            VM:Print("Scanning Guild Bank tabs and logs...")
         end
     end)
     panel.scanBtn = scanBtn
@@ -3268,7 +3292,7 @@ function UI:RefreshLedger()
                             sub.actionMode = "ASSIGN_UNATTRIBUTED"
                             sub.actionBtn:SetText("Assign Member")
                             showAction = true
-                        elseif isGold or tx.type == "OUT" then
+                        else
                             sub.actionMode = "REASSIGN"
                             sub.actionBtn:SetText("Reassign")
                             showAction = true
@@ -4438,7 +4462,7 @@ function UI:BuildSettingsPanel(panel)
     autoOpenBankCb:SetPoint("TOPLEFT", 316, -78)
     autoOpenBankCb.label = autoOpenBankCb:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     autoOpenBankCb.label:SetPoint("LEFT", autoOpenBankCb, "RIGHT", 4, 0)
-    autoOpenBankCb.label:SetText("Auto-open Requests at Guild Bank (Officers)")
+    autoOpenBankCb.label:SetText("Auto-open Vault Manager at Guild Bank")
     autoOpenBankCb:SetScript("OnClick", function(cb)
         local prefs = GetUIPrefs()
         prefs.autoOpenAtBank = cb:GetChecked() and true or false
@@ -4467,7 +4491,7 @@ function UI:BuildSettingsPanel(panel)
                 VM:Print(string.format("Sync already checked. Please wait %ds.", waitSec))
             end
         end
-        if VM.BankScanner and VM.BankScanner.ForceScan and GuildBankFrame and GuildBankFrame:IsVisible() then
+        if VM.BankScanner and VM.BankScanner.ForceScan and IsBankCurrentlyOpen() then
             VM.BankScanner:ForceScan()
         end
     end)
@@ -5054,7 +5078,8 @@ function UI:RefreshAll()
 
     if mailPanelFrame and mailPanelFrame:IsShown() and VM.Fulfillment then
         local mine = VM.Fulfillment:GetMyPreparedOrders()
-        if #mine > 0 and MailFrame and MailFrame:IsVisible() then
+        local mailOpen = VM.Fulfillment.isMailOpen or (MailFrame and MailFrame:IsVisible())
+        if #mine > 0 and mailOpen then
             self:ShowMailFulfillmentPanel(mine)
         else
             mailPanelFrame:Hide()

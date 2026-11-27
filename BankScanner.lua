@@ -10,6 +10,10 @@ local ignoreEventsUntil = 0
 local suppressChatPrint = false
 local pendingRetries = 0
 
+local bankIsOpen = false
+local lastObservedNumTabs = 0
+local lastObservedNextTabCost = 0
+
 Scanner.scanState = "READY" -- "READY" | "SCANNING" | "COMPLETE" | "STALE"
 
 -- Debounce frame using OnUpdate (without C_Timer)
@@ -61,6 +65,102 @@ scanTimeoutFrame:SetScript("OnUpdate", function(self, elapsed)
         end
     end
 end)
+
+local function IsSameActor(a, b)
+    local na = VM:NormalizeName(a)
+    local nb = VM:NormalizeName(b)
+    if na == "" or nb == "" then return false end
+    local la, lb = na:lower(), nb:lower()
+    if la == lb then return true end
+    if not la:find("%s") and lb:sub(1, #la + 1) == (la .. " ") then return true end
+    if not lb:find("%s") and la:sub(1, #lb + 1) == (lb .. " ") then return true end
+    return false
+end
+
+-- Collects officer withdrawals already accounted for by PREPARED or non-BANK FULFILLED requests
+-- so ScanLogs / ScanMoneyLogs do not double-book them onto the officer's personal ledger.
+local function BuildAccountedOfficerItemPool(now)
+    local pool = {}
+    local WINDOW = 259200
+    for _, req in pairs(VM.db and VM.db.requests or {}) do
+        if req and not req.isGoldRequest then
+            local actor = nil
+            if req.status == "PREPARED" and req.preparedBy and req.preparedBy ~= "" then
+                actor = req.preparedBy
+            elseif req.status == "FULFILLED" and req.completedMethod ~= "BANK" then
+                local refTs = req.completedAt or req.updatedAt or 0
+                if refTs == 0 or math.abs(now - refTs) <= WINDOW then
+                    local off = (req.preparedBy and req.preparedBy ~= "") and req.preparedBy or req.fulfilledBy
+                    if off and off ~= "" and not IsSameActor(off, req.requester) then
+                        actor = off
+                    end
+                end
+            end
+            if actor then
+                local itemKey = VM:NormalizeItemKey(req.itemID, req.itemLink, req.itemName)
+                table.insert(pool, {
+                    actor = actor,
+                    itemKey = itemKey,
+                    remaining = tonumber(req.count) or 1,
+                })
+            end
+        end
+    end
+    return pool
+end
+
+local function ConsumeAccountedOfficerItem(pool, actor, itemKey, count)
+    local qty = tonumber(count) or 1
+    for _, entry in ipairs(pool) do
+        if entry.remaining >= qty and entry.itemKey == itemKey and IsSameActor(entry.actor, actor) then
+            entry.remaining = entry.remaining - qty
+            return true
+        end
+    end
+    return false
+end
+
+local function BuildAccountedOfficerGoldPool(now)
+    local pool = {}
+    local WINDOW = 259200
+    for _, req in pairs(VM.db and VM.db.requests or {}) do
+        if req and req.isGoldRequest then
+            local actor = nil
+            if req.status == "PREPARED" and req.preparedBy and req.preparedBy ~= "" then
+                actor = req.preparedBy
+            elseif req.status == "FULFILLED" and req.completedMethod ~= "BANK" then
+                local refTs = req.completedAt or req.updatedAt or 0
+                if refTs == 0 or math.abs(now - refTs) <= WINDOW then
+                    local off = (req.preparedBy and req.preparedBy ~= "") and req.preparedBy or req.fulfilledBy
+                    if off and off ~= "" and not IsSameActor(off, req.requester) then
+                        actor = off
+                    end
+                end
+            end
+            if actor then
+                local amt = tonumber(req.goldAmount or req.quotedTotalPrice or req.quotedUnitPrice) or 0
+                if amt > 0 then
+                    table.insert(pool, {
+                        actor = actor,
+                        amount = amt,
+                        used = false,
+                    })
+                end
+            end
+        end
+    end
+    return pool
+end
+
+local function ConsumeAccountedOfficerGold(pool, actor, copper)
+    for _, entry in ipairs(pool) do
+        if not entry.used and entry.amount == copper and IsSameActor(entry.actor, actor) then
+            entry.used = true
+            return true
+        end
+    end
+    return false
+end
 
 local GB_API = {
     GetNumTabs = function()
@@ -144,6 +244,7 @@ function Scanner:Init()
         VM:LogDebug("BankScanner event: " .. tostring(event))
 
         if event == "GUILDBANKFRAME_CLOSED" then
+            bankIsOpen = false
             isScanning = false
             pendingRetries = 0
             scanDebounceFrame:Hide()
@@ -159,13 +260,33 @@ function Scanner:Init()
         end
 
         if event == "GUILDBANKFRAME_OPENED" then
-            if VM:IsOfficer() then
+            bankIsOpen = true
+            lastObservedNumTabs = (GetNumGuildBankTabs and GetNumGuildBankTabs()) or 0
+            lastObservedNextTabCost = (GetGuildBankTabCost and GetGuildBankTabCost()) or 0
+            if VM:IsOfficer() and VM.Fulfillment then
                 VM.Fulfillment:OnGuildBankOpened()
             end
             suppressChatPrint = false
             self:RequestAllTabsAndLogs()
             self:TriggerDebouncedScan(true)
             return
+        end
+
+        -- Detect newly purchased Guild Bank Tab live (fallback if server omits money log entry)
+        if event == "GUILDBANK_UPDATE_TABS" and bankIsOpen and GetNumGuildBankTabs then
+            local curTabs = GetNumGuildBankTabs() or 0
+            if lastObservedNumTabs > 0 and curTabs > lastObservedNumTabs then
+                local cost = tonumber(lastObservedNextTabCost) or 0
+                if cost > 0 and VM.Ledger and VM.Ledger.RecordTabPurchase then
+                    local serverNow = (GetServerTime and GetServerTime()) or time()
+                    VM.Ledger:RecordTabPurchase(cost, VM:GetPlayerName(), serverNow, curTabs)
+                    VM:Print(string.format("Recorded Guild Bank Tab %d purchase (%s) under GUILD (Tabs).", curTabs, VM:FormatMoney(cost)))
+                end
+            end
+            if curTabs > 0 then
+                lastObservedNumTabs = curTabs
+                lastObservedNextTabCost = (GetGuildBankTabCost and GetGuildBankTabCost()) or 0
+            end
         end
 
         if isScanning or GetTime() < ignoreEventsUntil then
@@ -462,6 +583,7 @@ function Scanner:ScanLogs()
     local minLogTs, maxLogTs = nil, nil
     local now = (GetServerTime and GetServerTime()) or time()
     local isOfficer = VM:IsOfficer()
+    local officerItemPool = BuildAccountedOfficerItemPool(now)
 
     for tab = 1, numTabs do
         local numTx = GB_API.GetNumTransactions(tab)
@@ -522,6 +644,7 @@ function Scanner:ScanLogs()
                         isDeposit = isDeposit,
                         normName = normName,
                         itemID = itemID,
+                        itemKey = itemKey,
                         cleanLink = cleanLink,
                         itemName = extractedName,
                         count = count,
@@ -574,6 +697,8 @@ function Scanner:ScanLogs()
                 else
                     VM.Ledger:RecordDeposit(entry.normName, entry.itemID, entry.cleanLink, entry.count, "BANK_LOG", entry.computedTimestamp, entry.tab, entry.isFFA)
                 end
+                existingCounts[entry.matchKey] = existingM + 1
+                addedCount = addedCount + 1
             else
                 local matchedReq = nil
                 if isOfficer and VM.Fulfillment and VM.Fulfillment.FindMatchingApprovedRequest then
@@ -624,6 +749,11 @@ function Scanner:ScanLogs()
                         completedAt = entry.computedTimestamp,
                         method = "BANK"
                     })
+                    existingCounts[entry.matchKey] = existingM + 1
+                    addedCount = addedCount + 1
+                elseif ConsumeAccountedOfficerItem(officerItemPool, entry.normName, entry.itemKey, entry.count) then
+                    -- Already accounted for by an officer's PREPARED or Mail/Trade FULFILLED request
+                    existingCounts[entry.matchKey] = existingM + 1
                 elseif entry.isFFA then
                     local tx = {
                         id = string.format("OUT_FFA_%d_%d", time(), math.random(1000, 9999)),
@@ -650,11 +780,10 @@ function Scanner:ScanLogs()
                     }
                     VM.db.ledger[tx.id] = tx
                     VM.Comms:BroadcastTransaction(tx)
+                    existingCounts[entry.matchKey] = existingM + 1
+                    addedCount = addedCount + 1
                 end
             end
-
-            existingCounts[entry.matchKey] = existingM + 1
-            addedCount = addedCount + 1
         end
     end
 
@@ -686,50 +815,65 @@ function Scanner:ScanMoneyLogs()
     local minLogTs, maxLogTs = nil, nil
     local now = (GetServerTime and GetServerTime()) or time()
     local isOfficer = VM:IsOfficer()
+    local officerGoldPool = BuildAccountedOfficerGoldPool(now)
 
     for i = numMoneyTx, 1, -1 do
         local txType, name, amount, year, month, day, hour = GB_API.GetMoneyTransaction(i)
         local typeStr = tostring(txType or ""):lower()
 
-        -- Filter out repairs and tab purchases explicitly
-        if not (typeStr:find("repair") or typeStr:find("buytab")) then
+        -- Filter out guild repairs; capture Guild Bank Tab purchases automatically under GUILD (Tabs)
+        if not typeStr:find("repair") then
             local copper = tonumber(amount) or 0
             if copper > 0 then
                 local normName = (name and name ~= "") and VM:NormalizeActor(name) or "UNATTRIBUTED"
-                local isDeposit = (typeStr:find("deposit") or typeStr == "1")
-                local isWithdraw = (typeStr:find("withdraw") or typeStr == "2")
+                local hasTime = (year ~= nil or month ~= nil or day ~= nil or hour ~= nil)
+                local computedTimestamp
+                if hasTime then
+                    local ageSec = (tonumber(year) or 0) * 31536000
+                                 + (tonumber(month) or 0) * 2592000
+                                 + (tonumber(day) or 0) * 86400
+                                 + (tonumber(hour) or 0) * 3600
+                    computedTimestamp = now - ageSec
+                else
+                    computedTimestamp = now - ((numMoneyTx - i) * 1800)
+                end
 
-                if isDeposit or isWithdraw then
-                    local txDir = isDeposit and "IN" or "OUT"
-                    local hasTime = (year ~= nil or month ~= nil or day ~= nil or hour ~= nil)
-                    local computedTimestamp
-                    if hasTime then
-                        local ageSec = (tonumber(year) or 0) * 31536000
-                                     + (tonumber(month) or 0) * 2592000
-                                     + (tonumber(day) or 0) * 86400
-                                     + (tonumber(hour) or 0) * 3600
-                        computedTimestamp = now - ageSec
-                    else
-                        computedTimestamp = now - ((numMoneyTx - i) * 1800)
+                local isTabBuy = (typeStr:find("buytab") ~= nil) or (typeStr:find("fortab") ~= nil)
+                if isTabBuy then
+                    if VM.Ledger and VM.Ledger.RecordTabPurchase then
+                        local prevCount = 0
+                        for _ in pairs(VM.db.ledger or {}) do prevCount = prevCount + 1 end
+                        VM.Ledger:RecordTabPurchase(copper, normName, computedTimestamp)
+                        local afterCount = 0
+                        for _ in pairs(VM.db.ledger or {}) do afterCount = afterCount + 1 end
+                        if afterCount > prevCount then
+                            addedCount = addedCount + 1
+                        end
                     end
+                else
+                    local isDeposit = (typeStr:find("deposit") or typeStr == "1")
+                    local isWithdraw = (typeStr:find("withdraw") or typeStr == "2")
 
-                    if not minLogTs or computedTimestamp < minLogTs then minLogTs = computedTimestamp end
-                    if not maxLogTs or computedTimestamp > maxLogTs then maxLogTs = computedTimestamp end
+                    if isDeposit or isWithdraw then
+                        local txDir = isDeposit and "IN" or "OUT"
+                        if not minLogTs or computedTimestamp < minLogTs then minLogTs = computedTimestamp end
+                        if not maxLogTs or computedTimestamp > maxLogTs then maxLogTs = computedTimestamp end
 
-                    local matchKey = string.format("GOLD:%s:%s:%d", txDir, normName, copper)
-                    snapshotCounts[matchKey] = (snapshotCounts[matchKey] or 0) + 1
+                        local matchKey = string.format("GOLD:%s:%s:%d", txDir, normName, copper)
+                        snapshotCounts[matchKey] = (snapshotCounts[matchKey] or 0) + 1
 
-                    table.insert(moneyLogEntries, {
-                        index = i,
-                        txDir = txDir,
-                        isDeposit = isDeposit,
-                        isWithdraw = isWithdraw,
-                        normName = normName,
-                        copper = copper,
-                        computedTimestamp = computedTimestamp,
-                        matchKey = matchKey,
-                        occIndex = snapshotCounts[matchKey]
-                    })
+                        table.insert(moneyLogEntries, {
+                            index = i,
+                            txDir = txDir,
+                            isDeposit = isDeposit,
+                            isWithdraw = isWithdraw,
+                            normName = normName,
+                            copper = copper,
+                            computedTimestamp = computedTimestamp,
+                            matchKey = matchKey,
+                            occIndex = snapshotCounts[matchKey]
+                        })
+                    end
                 end
             end
         end
@@ -740,8 +884,8 @@ function Scanner:ScanMoneyLogs()
 
     if VM.db and VM.db.ledger then
         for _, exTx in pairs(VM.db.ledger) do
-            if exTx and not exTx.deleted and exTx.timestamp then
-                local isGold = (exTx.itemID == 0 or exTx.itemLink == "GOLD" or exTx.source == "BANK_MONEY_LOG" or exTx.source == "MANUAL_GOLD" or exTx.source == "GOLD_REQUEST" or (exTx.itemName and (exTx.itemName:find("Gold Deposit") or exTx.itemName:find("Gold Withdrawal"))))
+            if exTx and not exTx.deleted and exTx.timestamp and exTx.source ~= "TAB_PURCHASE" then
+                local isGold = (exTx.itemID == 0 or exTx.itemLink == "GOLD" or exTx.source == "BANK_MONEY_LOG" or exTx.source == "MANUAL_GOLD" or exTx.source == "GOLD_REQUEST" or exTx.source == "WRITE_OFF" or (exTx.itemName and (exTx.itemName:find("Gold Deposit") or exTx.itemName:find("Gold Withdrawal"))))
                 if isGold then
                     local exDir = VM:NormalizeAction(exTx.type)
                     local exActor = VM:NormalizeActor(exTx.rawSender or exTx.player)
@@ -797,6 +941,8 @@ function Scanner:ScanMoneyLogs()
                     VM:Print(string.format("Gold deposit of %s recorded. Use 'Reassign' in the Ledger if this was paid by another member.",
                         VM:FormatMoney(entry.copper)))
                 end
+                existingGoldCounts[entry.matchKey] = existingM + 1
+                addedCount = addedCount + 1
             else
                 local matchedGoldReq = nil
                 if isOfficer and VM.Fulfillment and VM.Fulfillment.FindMatchingApprovedRequest then
@@ -804,7 +950,7 @@ function Scanner:ScanMoneyLogs()
                 end
 
                 if matchedGoldReq then
-                    local tx = VM.Ledger:RecordGoldWithdrawal("GUILD", entry.copper, "GOLD_REQUEST", entry.computedTimestamp, entry.normName, "GUILD", matchedGoldReq.reason)
+                    local tx = VM.Ledger:RecordGoldWithdrawal("GUILD", entry.copper, "GOLD_REQUEST", entry.computedTimestamp, entry.normName, "GUILD", matchedGoldReq.reason, matchedGoldReq.guildCategory or "RAID")
                     if tx then
                         tx.isFFA = false
                         tx.timestamp = entry.computedTimestamp
@@ -816,17 +962,21 @@ function Scanner:ScanMoneyLogs()
                         completedAt = entry.computedTimestamp,
                         method = "BANK"
                     })
+                    existingGoldCounts[entry.matchKey] = existingM + 1
+                    addedCount = addedCount + 1
+                elseif ConsumeAccountedOfficerGold(officerGoldPool, entry.normName, entry.copper) then
+                    -- Already accounted for by an officer's PREPARED or Mail/Trade FULFILLED gold request
+                    existingGoldCounts[entry.matchKey] = existingM + 1
                 else
                     local tx = VM.Ledger:RecordGoldWithdrawal(entry.normName, entry.copper, "BANK_MONEY_LOG", entry.computedTimestamp, entry.normName, entry.normName)
                     if tx then
                         tx.isFFA = false
                         tx.timestamp = entry.computedTimestamp
                     end
+                    existingGoldCounts[entry.matchKey] = existingM + 1
+                    addedCount = addedCount + 1
                 end
             end
-
-            existingGoldCounts[entry.matchKey] = existingM + 1
-            addedCount = addedCount + 1
         end
     end
 

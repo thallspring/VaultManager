@@ -13,6 +13,8 @@ local pendingRetries = 0
 local bankIsOpen = false
 local lastObservedNumTabs = 0
 local lastObservedNextTabCost = 0
+local lastObservedBankMoney = 0
+local lastBankMoneyDrop = { amount = 0, at = 0 }
 
 Scanner.scanState = "READY" -- "READY" | "SCANNING" | "COMPLETE" | "STALE"
 
@@ -77,21 +79,50 @@ local function IsSameActor(a, b)
     return false
 end
 
--- Collects officer withdrawals already accounted for by PREPARED or non-BANK FULFILLED requests
--- so ScanLogs / ScanMoneyLogs do not double-book them onto the officer's personal ledger.
+local function BuildFulfillmentRawSenderMap()
+    local byReq = {}
+    for _, tx in pairs(VM.db and VM.db.ledger or {}) do
+        if tx and not tx.deleted and tx.fulfillmentId and tx.fulfillmentId ~= "" then
+            byReq[tx.fulfillmentId] = byReq[tx.fulfillmentId] or {}
+            local actor = tx.rawSender or tx.player
+            if actor and actor ~= "" then
+                table.insert(byReq[tx.fulfillmentId], actor)
+            end
+        end
+    end
+    return byReq
+end
+
+local function HasLedgerActorForReq(byReq, reqID, actor)
+    local list = byReq and reqID and byReq[reqID]
+    if not list then return false end
+    for _, a in ipairs(list) do
+        if IsSameActor(a, actor) then
+            return true
+        end
+    end
+    return false
+end
+
+-- Collects officer withdrawals already accounted for by PREPARED or FULFILLED requests
+-- (including officer self-alt BANK fulfillments where ledger rawSender is the alt, not the officer).
 local function BuildAccountedOfficerItemPool(now)
     local pool = {}
     local WINDOW = 259200
+    local byReq = BuildFulfillmentRawSenderMap()
+
     for _, req in pairs(VM.db and VM.db.requests or {}) do
         if req and not req.isGoldRequest then
             local actor = nil
             if req.status == "PREPARED" and req.preparedBy and req.preparedBy ~= "" then
                 actor = req.preparedBy
-            elseif req.status == "FULFILLED" and req.completedMethod ~= "BANK" then
+            elseif req.status == "FULFILLED" then
                 local refTs = req.completedAt or req.updatedAt or 0
                 if refTs == 0 or math.abs(now - refTs) <= WINDOW then
-                    local off = (req.preparedBy and req.preparedBy ~= "") and req.preparedBy or req.fulfilledBy
-                    if off and off ~= "" and not IsSameActor(off, req.requester) then
+                    local off = (req.completedMethod == "BANK")
+                        and req.fulfilledBy
+                        or ((req.preparedBy and req.preparedBy ~= "") and req.preparedBy or req.fulfilledBy)
+                    if off and off ~= "" and not IsSameActor(off, req.requester) and not HasLedgerActorForReq(byReq, req.id, off) then
                         actor = off
                     end
                 end
@@ -123,16 +154,20 @@ end
 local function BuildAccountedOfficerGoldPool(now)
     local pool = {}
     local WINDOW = 259200
+    local byReq = BuildFulfillmentRawSenderMap()
+
     for _, req in pairs(VM.db and VM.db.requests or {}) do
         if req and req.isGoldRequest then
             local actor = nil
             if req.status == "PREPARED" and req.preparedBy and req.preparedBy ~= "" then
                 actor = req.preparedBy
-            elseif req.status == "FULFILLED" and req.completedMethod ~= "BANK" then
+            elseif req.status == "FULFILLED" then
                 local refTs = req.completedAt or req.updatedAt or 0
                 if refTs == 0 or math.abs(now - refTs) <= WINDOW then
-                    local off = (req.preparedBy and req.preparedBy ~= "") and req.preparedBy or req.fulfilledBy
-                    if off and off ~= "" and not IsSameActor(off, req.requester) then
+                    local off = (req.completedMethod == "BANK")
+                        and req.fulfilledBy
+                        or ((req.preparedBy and req.preparedBy ~= "") and req.preparedBy or req.fulfilledBy)
+                    if off and off ~= "" and not IsSameActor(off, req.requester) and not HasLedgerActorForReq(byReq, req.id, off) then
                         actor = off
                     end
                 end
@@ -247,6 +282,7 @@ function Scanner:Init()
             bankIsOpen = false
             isScanning = false
             pendingRetries = 0
+            lastBankMoneyDrop = { amount = 0, at = 0 }
             scanDebounceFrame:Hide()
             rescanFrame:Hide()
             scanTimeoutFrame:Hide()
@@ -263,6 +299,8 @@ function Scanner:Init()
             bankIsOpen = true
             lastObservedNumTabs = (GetNumGuildBankTabs and GetNumGuildBankTabs()) or 0
             lastObservedNextTabCost = (GetGuildBankTabCost and GetGuildBankTabCost()) or 0
+            lastObservedBankMoney = (GetGuildBankMoney and GetGuildBankMoney()) or 0
+            lastBankMoneyDrop = { amount = 0, at = 0 }
             if VM:IsOfficer() and VM.Fulfillment then
                 VM.Fulfillment:OnGuildBankOpened()
             end
@@ -272,21 +310,44 @@ function Scanner:Init()
             return
         end
 
-        -- Detect newly purchased Guild Bank Tab live (fallback if server omits money log entry)
+        if event == "GUILDBANK_UPDATE_MONEY" and bankIsOpen and GetGuildBankMoney then
+            local curMoney = GetGuildBankMoney() or 0
+            if lastObservedBankMoney > 0 and curMoney >= 0 and curMoney < lastObservedBankMoney then
+                lastBankMoneyDrop = { amount = lastObservedBankMoney - curMoney, at = GetTime() }
+            end
+            if curMoney >= 0 then
+                lastObservedBankMoney = curMoney
+            end
+        end
+
+        -- Detect newly purchased Guild Bank Tab live ONLY if Guild Bank gold actually dropped by the tab cost
         if event == "GUILDBANK_UPDATE_TABS" and bankIsOpen and GetNumGuildBankTabs then
             local curTabs = GetNumGuildBankTabs() or 0
             if lastObservedNumTabs > 0 and curTabs > lastObservedNumTabs then
                 local cost = tonumber(lastObservedNextTabCost) or 0
-                if cost > 0 and VM.Ledger and VM.Ledger.RecordTabPurchase then
+                local curMoney = (GetGuildBankMoney and GetGuildBankMoney()) or lastObservedBankMoney
+                local bankPaidDirect = (cost > 0) and (
+                    (lastObservedBankMoney - curMoney == cost)
+                    or (lastBankMoneyDrop.amount == cost and (GetTime() - (lastBankMoneyDrop.at or 0)) <= 1.5)
+                )
+                if bankPaidDirect and VM.Ledger and VM.Ledger.RecordTabPurchase then
                     local serverNow = (GetServerTime and GetServerTime()) or time()
                     VM.Ledger:RecordTabPurchase(cost, VM:GetPlayerName(), serverNow, curTabs)
+                    lastBankMoneyDrop = { amount = 0, at = 0 }
                     VM:Print(string.format("Recorded Guild Bank Tab %d purchase (%s) under GUILD (Tabs).", curTabs, VM:FormatMoney(cost)))
+                end
+                if curMoney >= 0 then
+                    lastObservedBankMoney = curMoney
                 end
             end
             if curTabs > 0 then
                 lastObservedNumTabs = curTabs
                 lastObservedNextTabCost = (GetGuildBankTabCost and GetGuildBankTabCost()) or 0
             end
+        end
+
+        if VM.Fulfillment and VM.Fulfillment.isWithdrawing then
+            return
         end
 
         if isScanning or GetTime() < ignoreEventsUntil then
@@ -301,6 +362,7 @@ function Scanner:Init()
 end
 
 function Scanner:TriggerDebouncedScan(isFinal)
+    if VM.Fulfillment and VM.Fulfillment.isWithdrawing then return end
     self.scanState = "SCANNING"
     isScanning = true
     ignoreEventsUntil = GetTime() + 2.0
@@ -316,7 +378,19 @@ function Scanner:TriggerDebouncedScan(isFinal)
     end
 end
 
+-- Called by Fulfillment immediately after a Prepare withdrawal finishes so stock refreshes cleanly
+function Scanner:SchedulePostWithdrawScan()
+    if not bankIsOpen or not (GuildBankFrame and GuildBankFrame:IsVisible()) then return end
+    if VM.Fulfillment and VM.Fulfillment.isWithdrawing then return end
+    ignoreEventsUntil = 0
+    isScanning = false
+    suppressChatPrint = true
+    self:RequestAllTabsAndLogs()
+    self:TriggerDebouncedScan(false)
+end
+
 function Scanner:RequestAllTabsAndLogs()
+    if VM.Fulfillment and VM.Fulfillment.isWithdrawing then return end
     isScanning = true
     ignoreEventsUntil = GetTime() + 2.0
     local numTabs = GB_API.GetNumTabs()
@@ -334,6 +408,10 @@ end
 
 function Scanner:ForceScan()
     VM:LogDebug("ForceScan triggered")
+    if VM.Fulfillment and VM.Fulfillment.isWithdrawing then
+        VM:Print("Please wait for the active withdrawal to finish before scanning.")
+        return
+    end
     local now = time()
     if (now - lastScanTime) < SCAN_COOLDOWN then
         VM:Print("Please wait a moment before scanning again.")
@@ -347,6 +425,13 @@ function Scanner:ForceScan()
 end
 
 function Scanner:RunFullScanPass(isFinal)
+    if VM.Fulfillment and VM.Fulfillment.isWithdrawing then
+        scanDebounceIsFinal = isFinal
+        scanDebounceTimeLeft = 0.5
+        scanDebounceFrame:Show()
+        return
+    end
+
     isScanning = true
     ignoreEventsUntil = GetTime() + 2.0
     scanDebounceFrame:Hide()
@@ -517,6 +602,7 @@ function Scanner:ScanBank()
         local m = GetGuildBankMoney()
         if type(m) == "number" and m >= 0 then
             bankMoney = m
+            lastObservedBankMoney = m
         end
     end
 
@@ -752,7 +838,7 @@ function Scanner:ScanLogs()
                     existingCounts[entry.matchKey] = existingM + 1
                     addedCount = addedCount + 1
                 elseif ConsumeAccountedOfficerItem(officerItemPool, entry.normName, entry.itemKey, entry.count) then
-                    -- Already accounted for by an officer's PREPARED or Mail/Trade FULFILLED request
+                    -- Already accounted for by an officer's PREPARED or FULFILLED request
                     existingCounts[entry.matchKey] = existingM + 1
                 elseif entry.isFFA then
                     local tx = {
@@ -965,7 +1051,7 @@ function Scanner:ScanMoneyLogs()
                     existingGoldCounts[entry.matchKey] = existingM + 1
                     addedCount = addedCount + 1
                 elseif ConsumeAccountedOfficerGold(officerGoldPool, entry.normName, entry.copper) then
-                    -- Already accounted for by an officer's PREPARED or Mail/Trade FULFILLED gold request
+                    -- Already accounted for by an officer's PREPARED or FULFILLED gold request
                     existingGoldCounts[entry.matchKey] = existingM + 1
                 else
                     local tx = VM.Ledger:RecordGoldWithdrawal(entry.normName, entry.copper, "BANK_MONEY_LOG", entry.computedTimestamp, entry.normName, entry.normName)
@@ -992,6 +1078,7 @@ function Scanner:ScanMoneyLogs()
             local m = GetGuildBankMoney and GetGuildBankMoney()
             if type(m) == "number" and m >= 0 then
                 VM.db.inventory.gold = m
+                lastObservedBankMoney = m
             end
         end
         if VM.db.scanMetadata then

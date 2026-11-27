@@ -496,15 +496,34 @@ function VM:MigrateMainsFormat()
     end
 end
 
+-- Resolves character to its canonical guild-roster name (merges first-word log names with two-word roster names) and main link
 function VM:GetMainFor(charName)
     local norm = self:NormalizeName(charName)
     if norm == "" or norm == "GUILD" or norm == "UNATTRIBUTED" then return norm end
-    local visited = {}
-    while self.db.mains[norm] and self.db.mains[norm].main and self.db.mains[norm].main ~= "" and not visited[norm] do
-        visited[norm] = true
-        norm = self:NormalizeName(self.db.mains[norm].main)
+
+    local function Canonicalize(n)
+        if self.db and self.db.rosterCache then
+            local rKey = self:ResolveNameKey(self.db.rosterCache, n)
+            if rKey then return rKey end
+        end
+        return n
     end
-    return norm
+
+    local visited = {}
+    local curr = norm
+    while not visited[curr] do
+        visited[curr] = true
+        local canonical = Canonicalize(curr)
+        visited[canonical] = true
+
+        local entry = self.db and self.db.mains and (self.db.mains[canonical] or self.db.mains[curr])
+        if entry and entry.main and entry.main ~= "" then
+            curr = self:NormalizeName(entry.main)
+        else
+            return canonical
+        end
+    end
+    return Canonicalize(curr)
 end
 
 function VM:SetMainCharacter(newMain, charsToLink)
@@ -651,14 +670,20 @@ function VM:GetGuildRosterNames(includeLegacy)
         local legacy = {}
         for char in pairs(self.db.mains) do
             if char ~= "UNATTRIBUTED" and char ~= "GUILD" and not seen[char] then
-                table.insert(legacy, char)
-                seen[char] = true
+                local canon = self:GetMainFor(char)
+                if not seen[canon] then
+                    table.insert(legacy, char)
+                    seen[char] = true
+                end
             end
         end
         for _, tx in pairs(self.db.ledger) do
             if tx.player and tx.player ~= "UNATTRIBUTED" and tx.player ~= "GUILD" and not seen[tx.player] then
-                table.insert(legacy, tx.player)
-                seen[tx.player] = true
+                local canon = self:GetMainFor(tx.player)
+                if not seen[canon] then
+                    table.insert(legacy, tx.player)
+                    seen[tx.player] = true
+                end
             end
         end
         table.sort(legacy)
@@ -1387,7 +1412,6 @@ function VM:SwitchGuildContext(triggerEvent)
     local pName = self:GetPlayerName()
     local charKey = pName
 
-    -- Clean up and normalize split character keys
     if pName ~= "" then
         for cKey, gKey in pairs(VaultManagerDB.charGuilds) do
             local cleanC = self:NormalizeName(cKey)
@@ -1408,7 +1432,6 @@ function VM:SwitchGuildContext(triggerEvent)
         end
     end
 
-    -- Automatically merge split guild buckets across VaultManagerDB.guilds
     self:MergeAllSplitBuckets()
 
     local liveGuildName = GetGuildInfo("player")
@@ -1421,7 +1444,6 @@ function VM:SwitchGuildContext(triggerEvent)
             guildKey = self:NormalizeGuildKey(gName)
         end
     else
-        -- Fall back to stored guild key for this character from VaultManagerDB.charGuilds
         local storedKey = self:GetStoredGuildKeyForPlayer()
         if storedKey and storedKey ~= "" then
             local gName = storedKey

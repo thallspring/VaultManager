@@ -695,6 +695,7 @@ function Comms:OnMessageReceived(msg, sender)
             local rawCat = UnescapeStr(parts[25])
             guildCategory = (VM.Ledger and VM.Ledger.NormalizeGuildCategory) and VM.Ledger:NormalizeGuildCategory(rawCat) or rawCat
         end
+        local deliveryPref = (#parts >= 26 and parts[26] ~= "") and UnescapeStr(parts[26]) or nil
 
         local rawItemID = UnescapeStr(parts[4])
         local parsedItemID = isGoldRequest and 0 or (tonumber(rawItemID) or rawItemID)
@@ -727,6 +728,7 @@ function Comms:OnMessageReceived(msg, sender)
             itemName = itemName,
             itemLink = resolvedLink,
             reason = reason,
+            deliveryPref = deliveryPref,
         }
         if req.isGoldRequest then
             req.itemLink = "GOLD"
@@ -748,8 +750,16 @@ function Comms:OnMessageReceived(msg, sender)
                 and req.status == "REJECTED" and req.completedMethod == "CANCELLED"
             if not isNewOwn and not isOwnCancel then return end
         end
-        if not existing or req.updatedAt > (existing.updatedAt or 0) then
+        -- Withdraw claims (APPROVED + preparedBy) racing in the same second: lowest name wins everywhere
+        local tieWin = existing and req.updatedAt == (existing.updatedAt or 0)
+            and req.status == "APPROVED" and existing.status == "APPROVED"
+            and (req.preparedBy or "") ~= "" and (existing.preparedBy or "") ~= ""
+            and req.preparedBy < existing.preparedBy
+        if not existing or req.updatedAt > (existing.updatedAt or 0) or tieWin then
             VM.db.requests[req.id] = req
+            if VM.Delivery and VM.Delivery.OnRequestUpdated then
+                VM.Delivery:OnRequestUpdated(existing, req)
+            end
             if VM:IsOfficer() and req.status == "PENDING" and not existing then
                 if req.isGoldRequest then
                     VM:Print(string.format("New gold request from |cffffff00%s|r: %s (%s)",
@@ -1149,6 +1159,7 @@ function Comms:BroadcastRequest(req)
             EscapeStr(req.preparedBy or ""),
             math.floor(tonumber(req.preparedAt) or 0),
             EscapeStr(req.guildCategory or ""))
+            .. ((req.deliveryPref and req.deliveryPref ~= "") and ("|" .. EscapeStr(req.deliveryPref)) or "")
     end
 
     local linkStr = req.itemLink or ""

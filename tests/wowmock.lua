@@ -290,4 +290,60 @@ end
 function M.dumpErrors(label)
     if #M.errors > 0 then print("!! ERRORS " .. (label or "") .. ":") for _, e in ipairs(M.errors) do io.write("   ", e, "\n") end M.errors = {} end
 end
+
+-- ===== Mail / Trade / Inbox / Chat extensions =====
+M.whispers = {}
+M.offlineNames = {}          -- names for which whispers fail with "player not found"
+M.mail = { items = {}, money = 0 }
+M.inbox = {}
+M.trade = { items = {}, myMoney = 0, targetMoney = 0 }
+_G.SendMailNameEditBox = Proxy("EditBox", "SendMailNameEditBox")
+_G.SendMailSubjectEditBox = Proxy("EditBox", "SendMailSubjectEditBox")
+_G.SendMailCODButton = Proxy("CheckButton", "SendMailCODButton")
+_G.SendMailSendMoneyButton = Proxy("CheckButton", "SendMailSendMoneyButton")
+_G.SendMailMoney = Proxy("Frame", "SendMailMoney")
+_G.SendMailFrame = Proxy("Frame", "SendMailFrame")
+_G.MoneyInputFrame_SetCopper = function(frame, amt) M.mail.money = amt end
+_G.GetSendMailMoney = function() if SendMailCODButton:GetChecked() then return 0 end return M.mail.money end
+_G.GetSendMailCOD = function() if SendMailCODButton:GetChecked() then return M.mail.money end return 0 end
+_G.ClickSendMailItemButton = function(i) if M.cursor and M.cursor.fromBag then M.mail.items[i] = { id = M.cursor.id, count = M.cursor.count }; M.cursor = nil end end
+_G.GetSendMailItem = function(i) local it = M.mail.items[i]; if it then return M.items[it.id].name, it.id, "tex", it.count, 2 end end
+_G.GetSendMailItemLink = function(i) local it = M.mail.items[i]; if it then return M.items[it.id].link end end
+_G.SendMail = function(target, subject, body)
+    M.lastMail = { target = target, subject = subject, items = M.mail.items, money = M.mail.money, cod = GetSendMailCOD() }
+    if M.mailFailTargets and M.mailFailTargets[target] then
+        M.queueFn(function() M.fire("UI_ERROR_MESSAGE", 0, "Cannot find player") end, 0.2)
+        return
+    end
+    M.queueFn(function() M.mail = { items = {}, money = 0 }; SendMailCODButton:SetChecked(false); M.fire("MAIL_SEND_SUCCESS") end, 0.3)
+end
+_G.GetInboxNumItems = function() return #M.inbox end
+_G.GetInboxHeaderInfo = function(i) local m = M.inbox[i]; return "pkg", "st", m.sender, m.subject, m.money or 0, 0, 30, m.hasItem, false, m.wasReturned end
+_G.SendChatMessage = function(msg, chan, lang, target)
+    table.insert(M.whispers, { msg = msg, target = target })
+    if M.offlineNames[target] then
+        M.queueFn(function() M.fire("CHAT_MSG_SYSTEM", "No player named '" .. target .. "' is currently playing.") end, 0.2)
+    end
+end
+_G.ERR_CHAT_PLAYER_NOT_FOUND_S = "No player named '%s' is currently playing."
+_G.GetTradePlayerItemInfo = function(slot) local it = M.trade.items[slot]; if it then return M.items[it.id].name, "tex", it.count end end
+_G.GetTradePlayerItemLink = function(slot) local it = M.trade.items[slot]; if it then return M.items[it.id].link end end
+_G.ClickTradeButton = function(slot) if M.cursor and M.cursor.fromBag then M.trade.items[slot] = { id = M.cursor.id, count = M.cursor.count }; M.cursor = nil end end
+_G.SetTradeMoney = function(a) M.trade.myMoney = a end
+_G.GetPlayerTradeMoney = function() return M.trade.myMoney end
+_G.GetTargetTradeMoney = function() return M.trade.targetMoney end
+_G.UIErrorsFrame = Proxy("Frame", "UIErrorsFrame")
+function M.doTrade(target, targetMoney)
+    M.tradeTarget = target
+    M.trade = { items = {}, myMoney = 0, targetMoney = 0 }
+    M.fire("TRADE_SHOW")
+end
+function M.finishTrade(targetMoney)
+    M.trade.targetMoney = targetMoney or 0
+    M.fire("TRADE_MONEY_CHANGED")
+    M.fire("TRADE_ACCEPT_UPDATE", 1, 1)
+    M.fire("UI_INFO_MESSAGE", 0, "Trade complete.")
+    M.trade = { items = {}, myMoney = 0, targetMoney = 0 }
+    M.fire("TRADE_CLOSED")
+end
 return M

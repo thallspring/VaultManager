@@ -12,6 +12,7 @@ BankScanner.lua
 Comms.lua
 Ledger.lua
 Fulfillment.lua
+Delivery.lua
 Ranking.lua
 Minimap.lua
 UI.lua

@@ -28,19 +28,27 @@ local function GenerateTxID(prefix)
 end
 
 function Ledger:RecordFulfillment(req, officerName, customTimestamp)
+    -- The member is charged the price locked at approval (the same amount CoD/Trade asks them to pay)
     local livePrice = VM:GetEffectiveLivePrice(req.itemID, req.itemLink, req.priceAtRequest or req.quotedUnitPrice)
+    local unitAH = (tonumber(req.priceAtRequest) and tonumber(req.priceAtRequest) > 0) and tonumber(req.priceAtRequest) or livePrice
     local qty = tonumber(req.count) or 1
     local rule = { mode = req.priceMode or "FREE", percent = req.pricePercent or 50 }
-    local totalCharged = VM:CalculateMemberTotalPrice(livePrice, qty, rule)
+    local totalCharged = (req.quotedTotalPrice ~= nil) and tonumber(req.quotedTotalPrice) or VM:CalculateMemberTotalPrice(unitAH, qty, rule)
+    if rule.mode == "FREE" then totalCharged = 0 end
+    livePrice = unitAH
     local unitCharged = (qty > 0) and math.floor(totalCharged / qty) or totalCharged
 
     local now = time()
     local txTimestamp = customTimestamp or now
+    -- rawSender = who physically took it out of the bank (the officer), so the bank-log dedupe matches the
+    -- officer's log line and never swallows the member's own later withdrawals of the same item
+    local mover = VM:NormalizeName((req.preparedBy and req.preparedBy ~= "") and req.preparedBy or officerName)
+    if mover == "" then mover = VM:NormalizeName(req.requester) end
     local tx = {
         id = GenerateTxID("OUT"),
         type = "OUT",
         player = VM:NormalizeName(req.requester),
-        rawSender = VM:NormalizeName(req.requester),
+        rawSender = mover,
         attributedTo = VM:NormalizeName(req.requester),
         itemID = req.itemID,
         itemLink = req.itemLink,
@@ -78,11 +86,13 @@ function Ledger:RecordGoldFulfillment(req, officerName, customTimestamp)
     local txTimestamp = customTimestamp or now
     local requesterNorm = VM:NormalizeName(req.requester)
     local guildCat = self:NormalizeGuildCategory(req.guildCategory) or "RAID"
+    local mover = VM:NormalizeName((req.preparedBy and req.preparedBy ~= "") and req.preparedBy or officerName)
+    if mover == "" then mover = requesterNorm end
     local tx = {
         id = GenerateTxID("GOLD_OUT"),
         type = "OUT",
         player = "GUILD",
-        rawSender = requesterNorm,
+        rawSender = mover,
         attributedTo = "GUILD",
         guildCategory = guildCat,
         itemID = 0,
@@ -622,6 +632,17 @@ function Ledger:AssignUnattributed(txID, memberName, guildCategory)
     if VM.UI then VM.UI:RefreshAll() end
 end
 
+-- Tombstone without the UI officer check (used by internal reconciliation that already checked rights)
+function Ledger:TombstoneTransaction(tx, note)
+    if not tx or tx.deleted or tx.isDerived or tx.type == "SUMMARY" then return end
+    local now = time()
+    if tx.pairId then self:ClearPair(tx, now) end
+    tx.deleted = true
+    tx.updatedAt = now
+    if note and note ~= "" then tx.note = note end
+    VM.Comms:BroadcastTransaction(tx)
+end
+
 function Ledger:CanDeleteTransaction(tx)
     return tx ~= nil and not tx.deleted and not tx.isDerived and tx.type ~= "SUMMARY"
 end
@@ -684,6 +705,30 @@ function Ledger:FindPairCandidate(tx)
                 if not bestGap or absGap < bestGap then
                     best, bestGap = other, absGap
                 end
+            end
+        end
+    end
+    return best
+end
+
+-- Withdrawal (direct/FFA) by the same canonical actor, same item and count, within 6 hours before a deposit
+local QUICK_RETURN_WINDOW = 6 * 3600
+function Ledger:FindQuickReturnMatch(depTx)
+    if not IsPairableTx(depTx) or depTx.type ~= "IN" then return nil end
+    local actor = VM:CanonicalActor(depTx.rawSender or depTx.player)
+    local itemKey = VM:NormalizeItemKey(depTx.itemID, depTx.itemLink, depTx.itemName)
+    local count = tonumber(depTx.count) or 1
+    local ts = depTx.timestamp or 0
+    local best, bestTs = nil, nil
+    for _, tx in pairs(VM.db.ledger) do
+        if tx ~= depTx and tx.type == "OUT" and IsPairableTx(tx) and not tx.voided
+            and (tx.source == "BANK_LOG" or tx.source == "FFA_SCAN")
+            and (tonumber(tx.count) or 1) == count
+            and VM:CanonicalActor(tx.rawSender or tx.player) == actor
+            and VM:NormalizeItemKey(tx.itemID, tx.itemLink, tx.itemName) == itemKey then
+            local d = ts - (tx.timestamp or 0)
+            if d >= -3600 and d <= QUICK_RETURN_WINDOW and (not bestTs or (tx.timestamp or 0) > bestTs) then
+                best, bestTs = tx, tx.timestamp or 0
             end
         end
     end

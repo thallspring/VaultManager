@@ -1088,7 +1088,15 @@ function Scanner:ScanLogs()
         local existingM = existingCounts[entry.matchKey] or 0
         if entry.occIndex > existingM then
             if entry.isDeposit then
-                VM.Ledger:RecordDeposit(entry.normName, entry.itemID, entry.cleanLink, entry.count, "BANK_LOG", entry.computedTimestamp, entry.tab, entry.isFFA)
+                local depTx = VM.Ledger:RecordDeposit(entry.normName, entry.itemID, entry.cleanLink, entry.count, "BANK_LOG", entry.computedTimestamp, entry.tab, entry.isFFA)
+                -- Quick return: the same person put back exactly what they took out shortly before => void both
+                if depTx and isOfficer and VM.Ledger.FindQuickReturnMatch then
+                    local outTx = VM.Ledger:FindQuickReturnMatch(depTx)
+                    if outTx then
+                        VM.Ledger:PairTransactions(outTx.id, depTx.id)
+                        VM:LogDebug("Auto-paired quick return: " .. tostring(depTx.itemName))
+                    end
+                end
                 existingCounts[entry.matchKey] = existingM + 1
                 addedCount = addedCount + 1
             else
@@ -1103,7 +1111,13 @@ function Scanner:ScanLogs()
                 if matchedReq then
                     local effMode = matchedReq.priceMode or (entry.rule and entry.rule.mode) or "FREE"
                     local effPct = matchedReq.pricePercent or (entry.rule and entry.rule.percent) or 50
-                    local totalCharged = VM:CalculateMemberTotalPrice(ahPrice, entry.count, { mode = effMode, percent = effPct })
+                    -- Locked price from approval (falls back to live price for old requests)
+                    if tonumber(matchedReq.priceAtRequest) and tonumber(matchedReq.priceAtRequest) > 0 then
+                        ahPrice = tonumber(matchedReq.priceAtRequest)
+                    end
+                    local totalCharged = (matchedReq.quotedTotalPrice ~= nil) and tonumber(matchedReq.quotedTotalPrice)
+                        or VM:CalculateMemberTotalPrice(ahPrice, entry.count, { mode = effMode, percent = effPct })
+                    if effMode == "FREE" then totalCharged = 0 end
                     local unitCharged = (entry.count > 0) and math.floor(totalCharged / entry.count) or totalCharged
                     local targetPlayer = VM:NormalizeName(matchedReq.requester)
 

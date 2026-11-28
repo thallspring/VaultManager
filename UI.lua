@@ -99,6 +99,24 @@ if StaticPopupDialogs then
         hideOnEscape = true,
         preferredIndex = 3,
     }
+    StaticPopupDialogs["VAULTMANAGER_COMPLETE_MANUAL"] = {
+        text = "Mark as delivered?\n\n%s\n\nHas the member already paid %s?",
+        button1 = "Paid",
+        button2 = "Cancel",
+        button3 = "Not Paid",
+        OnAccept = function(self, data)
+            local d = data or self.data
+            if d and d.reqID then VM.Fulfillment:CompleteManually(d.reqID, true) end
+        end,
+        OnAlt = function(self, data)
+            local d = data or self.data
+            if d and d.reqID then VM.Fulfillment:CompleteManually(d.reqID, false) end
+        end,
+        timeout = 0,
+        whileDead = true,
+        hideOnEscape = true,
+        preferredIndex = 3,
+    }
     StaticPopupDialogs["VAULTMANAGER_WRITEOFF_DEBT"] = {
         text = "Write off unpaid amount?\n\n%s\n\nThe loss is charged to GUILD (Member) and stays visible as unpaid on %s in the Ledger.",
         button1 = "Write Off",
@@ -631,7 +649,7 @@ end
 --------------------------------------------------------------------------------
 function UI:CreateRequestsHelpModal()
     requestsHelpFrame = CreateFrame("Frame", "VaultManagerRequestsHelpModal", UIParent, "BackdropTemplate")
-    requestsHelpFrame:SetSize(480, 390)
+    requestsHelpFrame:SetSize(520, 460)
     requestsHelpFrame:SetPoint("CENTER")
     requestsHelpFrame:SetFrameStrata("FULLSCREEN_DIALOG")
     requestsHelpFrame:SetFrameLevel(210)
@@ -667,9 +685,11 @@ function UI:CreateRequestsHelpModal()
         "• |cff999999HISTORY|r — Fulfilled, rejected, cancelled, or written off (pruned after 30 days).\n" ..
         "Members can cancel their own pending/approved requests. One request holds at most 6 stacks.\n\n" ..
         "|cff26a6f2Officer Workflow|r (only the next step is active; finished steps turn green)\n" ..
+        "• |cff26a6f2Approve + Withdraw|r / |cff26a6f2Withdraw All|r — Approve and take out in one click, or take out every approved request in a row.\n" ..
         "• |cff26a6f2Withdraw|r — Takes the items/gold out of the Guild Bank (any tab) into your bags.\n" ..
-        "• |cff26a6f2Fulfill|r — Places them in the open Mail or Trade window. You click Send/Trade.\n" ..
-        "• |cff44dd77Complete|r — Happens automatically when the mail is sent or the trade finishes.\n" ..
+        "• |cff26a6f2Fulfill|r — Fills the open Mail or Trade with all your prepared orders for that member. You click Send/Trade; after Send the next member is filled automatically.\n" ..
+        "• |cff44dd77Complete|r — Automatic on Send / finished trade. Clicking it asks whether the member paid.\n" ..
+        "• |cffffaa00Awaiting CoD|r — Paid when the CoD money arrives in your mailbox; a returned mail puts the order back to PREPARED.\n" ..
         "• |cffffd700Return|r — Puts the items/gold back in the Guild Bank; request goes back to APPROVED.\n" ..
         "• |cffff5555Cancel|r — Cancels the request (items you keep are charged to you).\n" ..
         "• |cff44dd77Paid|r / |cffff5555Write Off|r — Settle an unpaid trade; write-offs are charged to GUILD (Member) and shown on the member.\n" ..
@@ -2199,6 +2219,19 @@ local function CreateInventoryRow(content)
     row.assignBtn = CreateModernButton(row, 68, 22, "Assign", { 0.20, 0.60, 0.80, 1 })
     row.assignBtn:SetPoint("LEFT", 612, 0)
 
+    row.cancelBtn = CreateModernButton(row, 46, 22, "Cancel", THEME.red)
+    row.cancelBtn:SetPoint("LEFT", 486, 0)
+    row.cancelBtn:Hide()
+    row.cancelBtn:SetScript("OnClick", function()
+        if row.openReqId and VM.Fulfillment then VM.Fulfillment:CancelOwnRequest(row.openReqId) end
+    end)
+    row.cancelBtn:HookScript("OnEnter", function(selfBtn)
+        GameTooltip:SetOwner(selfBtn, "ANCHOR_TOP")
+        GameTooltip:SetText("Cancel your open request for this item", 1, 1, 1, 1, true)
+        GameTooltip:Show()
+    end)
+    row.cancelBtn:HookScript("OnLeave", function() GameTooltip:Hide() end)
+
     local function OnRowEnter(anchor)
         row:SetBackdropColor(THEME.rowHover[1], THEME.rowHover[2], THEME.rowHover[3], THEME.rowHover[4])
         local itm = row.itemData
@@ -2425,7 +2458,8 @@ function UI:RefreshInventory()
                     row.available = available
                     local maxReq = VM:GetMaxRequestQty(item.itemID, item.itemLink or item.link)
                     row.maxPick = maxReq and math.min(available, maxReq) or available
-                    local myOpenQty = VM.Fulfillment:GetMyOpenRequestCount(itemKey, STATE.selectedBankTab)
+                    local myOpenQty, myOpenReq = VM.Fulfillment:GetMyOpenRequestCount(itemKey, STATE.selectedBankTab)
+                    row.openReqId = (myOpenReq and (myOpenReq.status == "PENDING" or myOpenReq.status == "APPROVED")) and myOpenReq.id or nil
 
                     local qtyStateKey = tostring(STATE.selectedBankTab) .. ":" .. tostring(itemKey)
                     row.qtyStateKey = qtyStateKey
@@ -2466,12 +2500,14 @@ function UI:RefreshInventory()
                     end
 
                     row.reqBtn.tooltipText = nil
+                    row.cancelBtn:Hide()
                     if myOpenQty > 0 then
                         -- Immediate feedback + protection against duplicate requests
                         row.reqBtn:SetText("Requested")
                         ApplyButtonState(row.reqBtn, "done")
-                        row.reqBtn.tooltipText = "You already have an open request for this item. Cancel it in the Requests tab to change the amount."
+                        row.reqBtn.tooltipText = "You already have an open request for this item. Cancel it to change the amount."
                         row.qtyBtn:Hide()
+                        if row.openReqId then row.cancelBtn:Show() end
                     elseif rule.mode == "LOCKED" or available <= 0 then
                         row.reqBtn:SetText("Request")
                         row.reqBtn:SetModernEnabled(false)
@@ -2508,7 +2544,7 @@ local REQ_SECTIONS = {
     { key = "PENDING", title = "Pending Approval", color = "|cffffcc33" },
     { key = "APPROVED", title = "Approved — Ready for Bank Withdrawal", color = "|cff26a6f2" },
     { key = "PREPARED", title = "Prepared — Withdrawn & Awaiting Delivery", color = "|cff44dd77" },
-    { key = "UNPAID", title = "Unpaid — Delivered but Not Paid", color = "|cffff5555" },
+    { key = "UNPAID", title = "Unpaid & Awaiting Payment", color = "|cffff5555" },
     { key = "HISTORY", title = "History — Fulfilled, Rejected & Written Off", color = "|cff999999" },
 }
 
@@ -2556,8 +2592,22 @@ function UI:BuildRequestsPanel(panel)
     end)
     panel.toggleAllBtn = toggleAllBtn
 
+    local withdrawAllBtn = CreateModernButton(topBar, 110, 24, "Withdraw All", THEME.accent)
+    withdrawAllBtn:SetPoint("RIGHT", toggleAllBtn, "LEFT", -6, 0)
+    withdrawAllBtn:SetScript("OnClick", function(selfBtn)
+        if selfBtn:IsEnabled() and VM.Delivery then VM.Delivery:WithdrawAllApproved() end
+    end)
+    withdrawAllBtn:HookScript("OnEnter", function(selfBtn)
+        GameTooltip:SetOwner(selfBtn, "ANCHOR_BOTTOM")
+        GameTooltip:SetText("Withdraw every approved request from the open Guild Bank, one after another (each one is verified).", 1, 1, 1, 1, true)
+        GameTooltip:Show()
+    end)
+    withdrawAllBtn:HookScript("OnLeave", function() GameTooltip:Hide() end)
+    withdrawAllBtn:Hide()
+    panel.withdrawAllBtn = withdrawAllBtn
+
     local summaryText = topBar:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    summaryText:SetPoint("RIGHT", toggleAllBtn, "LEFT", -10, 0)
+    summaryText:SetPoint("RIGHT", withdrawAllBtn, "LEFT", -10, 0)
     summaryText:SetPoint("LEFT", helpBtn, "RIGHT", 8, 0)
     summaryText:SetJustifyH("RIGHT")
     panel.summaryText = summaryText
@@ -2652,8 +2702,19 @@ local function CreateRequestRow(content)
             local desc = string.format("%s owes %s for %dx %s", req.requester or "?", VM:FormatMoneyPlain(owed), req.count or 1, req.itemName or "Item")
             local dlg = StaticPopup_Show and StaticPopup_Show("VAULTMANAGER_WRITEOFF_DEBT", desc, req.requester or "?")
             if dlg then dlg.data = { reqID = req.id } end
+        elseif actionKey == "APPROVE_WITHDRAW" then
+            VM.Fulfillment:ApproveAndWithdraw(req.id)
+        elseif actionKey == "COD_RETURNED" then
+            VM.Fulfillment:MarkCodReturned(req.id)
         elseif actionKey == "COMPLETE" then
-            VM.Fulfillment:CompleteRequest(req.id)
+            local due = req.isGoldRequest and 0 or VM.Fulfillment:GetExpectedMemberPayment(req)
+            if due > 0 and StaticPopup_Show then
+                local desc = string.format("%dx %s for %s", req.count or 1, req.itemName or "Item", req.requester or "?")
+                local dlg = StaticPopup_Show("VAULTMANAGER_COMPLETE_MANUAL", desc, VM:FormatMoneyPlain(due))
+                if dlg then dlg.data = { reqID = req.id } end
+            else
+                VM.Fulfillment:CompleteManually(req.id, true)
+            end
         elseif actionKey == "RELEASE" then
             VM.Fulfillment:ReleasePreparedRequest(req.id)
         elseif actionKey == "WRITEOFF" then
@@ -2779,6 +2840,17 @@ function UI:RefreshRequests()
     local me = VM:GetPlayerName()
     local y = 0
     local rowIdx = 0
+
+    if panel.withdrawAllBtn then
+        local n = (isOff and VM.Delivery) and #VM.Delivery:GetWithdrawableApproved() or 0
+        if isOff then
+            panel.withdrawAllBtn:SetText(string.format("Withdraw All (%d)", n))
+            ApplyButtonState(panel.withdrawAllBtn, (n > 0 and not (VM.Delivery and VM.Delivery.batch)) and "active" or "disabled")
+            panel.withdrawAllBtn:Show()
+        else
+            panel.withdrawAllBtn:Hide()
+        end
+    end
 
     for _, sec in ipairs(REQ_SECTIONS) do
         local list = buckets[sec.key]
@@ -2919,7 +2991,14 @@ function UI:RefreshRequests()
                     end
                     local metaStr = "|cff999999" .. table.concat(metaParts, "  |  ") .. "|r"
                     if owed > 0 then
-                        metaStr = metaStr .. string.format("  |cffff5555Owes %s|r", VM:FormatMoney(owed))
+                        if req.completedMethod == "MAIL" then
+                            metaStr = metaStr .. string.format("  |cffffaa00Awaiting CoD payment %s|r", VM:FormatMoney(owed))
+                        else
+                            metaStr = metaStr .. string.format("  |cffff5555Owes %s|r", VM:FormatMoney(owed))
+                        end
+                    end
+                    if req.deliveryPref == "MAIL" or req.deliveryPref == "TRADE" then
+                        metaStr = metaStr .. string.format("  |cff8899aa[%s]|r", req.deliveryPref == "MAIL" and "Mail" or "Trade")
                     end
                     row.meta:SetText(metaStr)
 
@@ -2931,23 +3010,31 @@ function UI:RefreshRequests()
                     end
 
                     local specs = {}
-                    local function AddBtn(label, key, state, accent, tip)
-                        table.insert(specs, { label = label, key = key, state = state, accent = accent, tip = tip })
+                    local function AddBtn(label, key, state, accent, tip, width)
+                        table.insert(specs, { label = label, key = key, state = state, accent = accent, tip = tip, width = width })
                     end
                     local isOwnReq = VM:IsSameCharacter(req.requester, me)
                     local deliverHint = req.isGoldRequest and "gold" or "items"
 
                     if req.status == "PENDING" then
                         if isOff then
-                            AddBtn("Approve", "APPROVE", "active", THEME.green, "Approve request and reserve stock in the Vault.")
+                            AddBtn("Approve", "APPROVE", "active", THEME.green, "Approve request, lock the price and reserve stock in the Vault.")
+                            AddBtn("Approve + Withdraw", "APPROVE_WITHDRAW", "active", THEME.accent, "Approve and immediately withdraw it from the open Guild Bank.", 116)
                             AddBtn("Reject", "REJECT", "active", THEME.red, "Decline this pending request.")
                         elseif isOwnReq then
                             AddBtn("Cancel", "CANCEL_OWN", "active", THEME.red, "Cancel your request.")
                         end
                     elseif req.status == "APPROVED" then
                         if isOff then
-                            AddBtn("Withdraw", "WITHDRAW", "active", THEME.accent,
-                                string.format("Withdraw the %s from the Guild Bank into your bags (switches to the right tab automatically).", deliverHint))
+                            local claim = VM.Fulfillment:GetActiveClaim(req)
+                            if claim and not IsSameOfficerName(claim, me) then
+                                AddBtn("Withdraw", "WITHDRAW", "disabled", THEME.accent, string.format("%s is withdrawing this request right now.", claim))
+                            elseif claim then
+                                AddBtn("Withdrawing", "WITHDRAW", "disabled", THEME.accent, "Withdrawal in progress...")
+                            else
+                                AddBtn("Withdraw", "WITHDRAW", "active", THEME.accent,
+                                    string.format("Withdraw the %s from the Guild Bank into your bags (switches to the right tab automatically).", deliverHint))
+                            end
                             AddBtn("Fulfill", "FULFILL", "disabled", THEME.accent, "Withdraw first.")
                             AddBtn("Complete", "COMPLETE", "disabled", THEME.green, "Completes automatically when the mail is sent or the trade finishes.")
                             AddBtn("Cancel", "CANCEL", "active", THEME.red, "Cancel this approved request and release reserved stock.")
@@ -2962,10 +3049,10 @@ function UI:RefreshRequests()
                             local started = VM.Fulfillment.fulfillStarted[req.id]
                             AddBtn("Withdraw", "WITHDRAW", "done", THEME.green, "Withdrawn from the Guild Bank.")
                             AddBtn("Fulfill", "FULFILL", started and "done" or "active", THEME.accent,
-                                string.format("Place the %s in the open Mail or Trade window (you click Send / Trade yourself).", deliverHint))
-                            AddBtn("Complete", "COMPLETE", started and "active" or "disabled", THEME.green,
-                                started and "Completes automatically when sent/traded. Click only if you delivered another way."
-                                or "Fulfill first. Completes automatically when the mail is sent or the trade finishes.")
+                                "Fill the open Mail or Trade window with ALL your prepared orders for this member (you click Send / Trade yourself).")
+                            AddBtn("Complete", "COMPLETE", "active", THEME.green,
+                                started and "Completes automatically when sent/traded. Click only if you delivered another way (you will be asked whether it was paid)."
+                                or "Completes automatically when the mail is sent or the trade finishes. Click to mark it delivered by hand (you will be asked whether it was paid).")
                             AddBtn("Return", "RETURN", "active", THEME.gold, "Put the items/gold back in the Guild Bank and set the request back to APPROVED.")
                             AddBtn("Cancel", "CANCEL", "active", THEME.red, "Cancel the request. Items you keep are charged to you — use Return to put them back.")
                         else
@@ -2975,14 +3062,21 @@ function UI:RefreshRequests()
                             AddBtn("Complete", "COMPLETE", "disabled", THEME.green, tip)
                         end
                     elseif req.status == "FULFILLED" and owed > 0 and isOff then
-                        AddBtn("Paid", "DEBT_PAID", "active", THEME.green, "The member paid the outstanding amount to you (recorded as their payment).")
-                        AddBtn("Write Off", "DEBT_WRITEOFF", "active", THEME.red, "Write off the unpaid amount: charged to GUILD (Member), shown as unpaid on the member in the Ledger.")
+                        if req.completedMethod == "MAIL" then
+                            AddBtn("Paid", "DEBT_PAID", "active", THEME.green, "The CoD money arrived (recorded automatically when it shows up in your mailbox).")
+                            AddBtn("Returned", "COD_RETURNED", "active", THEME.gold, "The CoD mail came back unpaid: the request goes back to PREPARED with you and the charge is reversed.")
+                        else
+                            AddBtn("Paid", "DEBT_PAID", "active", THEME.green, "The member paid the outstanding amount to you (recorded as their payment).")
+                            AddBtn("Write Off", "DEBT_WRITEOFF", "active", THEME.red, "Write off the unpaid amount: charged to GUILD (Member), shown as unpaid on the member in the Ledger.")
+                        end
                     end
 
                     local x = 728
                     for i = #specs, 1, -1 do
                         local spec = specs[i]
                         local b = row.btns[i]
+                        local w = spec.width or 58
+                        b:SetSize(w, 22)
                         b:ClearAllPoints()
                         b:SetPoint("RIGHT", row, "LEFT", x, 0)
                         SetButtonAccent(b, spec.accent)
@@ -2991,7 +3085,7 @@ function UI:RefreshRequests()
                         b.tooltipText = spec.tip
                         ApplyButtonState(b, spec.state)
                         b:Show()
-                        x = x - 62
+                        x = x - (w + 4)
                     end
                     local textWidth = (#specs > 0) and (x - 14) or 710
 
@@ -4609,7 +4703,7 @@ function UI:BuildSettingsPanel(panel)
 
     -- Dynamic container for Sections 2, 3, and 4
     local lower = CreateFrame("Frame", nil, panel)
-    lower:SetSize(744, 312)
+    lower:SetSize(744, 338)
     lower:SetPoint("TOPLEFT", 10, -100)
     panel.lowerSections = lower
 
@@ -4830,13 +4924,48 @@ function UI:BuildSettingsPanel(panel)
     maintDesc:SetText("Clears bank & request cache (keeps ledger and rules).")
     panel.maintDesc = maintDesc
 
+    -- Delivery preferences
+    local delivLabel = lower:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    delivLabel:SetPoint("TOPLEFT", 0, -226)
+    delivLabel:SetText("My preferred delivery:")
+    local delivMailBtn = CreateModernButton(lower, 56, 20, "Mail")
+    delivMailBtn:SetPoint("LEFT", delivLabel, "RIGHT", 8, 0)
+    local delivTradeBtn = CreateModernButton(lower, 56, 20, "Trade")
+    delivTradeBtn:SetPoint("LEFT", delivMailBtn, "RIGHT", 4, 0)
+    local function SetDeliv(v)
+        local prefs = GetUIPrefs()
+        prefs.deliveryPref = (prefs.deliveryPref == v) and nil or v
+        UI:RefreshSettings()
+    end
+    delivMailBtn:SetScript("OnClick", function() SetDeliv("MAIL") end)
+    delivTradeBtn:SetScript("OnClick", function() SetDeliv("TRADE") end)
+    panel.delivMailBtn, panel.delivTradeBtn = delivMailBtn, delivTradeBtn
+
+    local whisperCb = CreateFrame("CheckButton", nil, lower, "UICheckButtonTemplate")
+    whisperCb:SetSize(20, 20)
+    whisperCb:SetPoint("LEFT", delivTradeBtn, "RIGHT", 20, 0)
+    whisperCb.label = whisperCb:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    whisperCb.label:SetPoint("LEFT", whisperCb, "RIGHT", 4, 0)
+    whisperCb.label:SetText("Whisper members about request status")
+    whisperCb:SetScript("OnClick", function(cb) GetUIPrefs().memberWhispers = cb:GetChecked() and true or false end)
+    panel.whisperCb = whisperCb
+
+    local autoMailCb = CreateFrame("CheckButton", nil, lower, "UICheckButtonTemplate")
+    autoMailCb:SetSize(20, 20)
+    autoMailCb:SetPoint("LEFT", whisperCb.label, "RIGHT", 16, 0)
+    autoMailCb.label = autoMailCb:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    autoMailCb.label:SetPoint("LEFT", autoMailCb, "RIGHT", 4, 0)
+    autoMailCb.label:SetText("Fill next mail after Send")
+    autoMailCb:SetScript("OnClick", function(cb) GetUIPrefs().autoFillNextMail = cb:GetChecked() and true or false end)
+    panel.autoMailCb = autoMailCb
+
     -- Section 5: Officer Ranks (guild-wide, synced between officers)
     local rankTitle = lower:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    rankTitle:SetPoint("TOPLEFT", 0, -224)
+    rankTitle:SetPoint("TOPLEFT", 0, -250)
     rankTitle:SetText("|cff26a6f2Officer Ranks|r  |cff999999— extra ranks that may approve, withdraw and manage the Ledger|r")
 
     local rankNote = lower:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-    rankNote:SetPoint("TOPLEFT", 0, -292)
+    rankNote:SetPoint("TOPLEFT", 0, -318)
     rankNote:SetWidth(744)
     rankNote:SetJustifyH("LEFT")
     rankNote:SetText("The Guild Master and the guild's officer rank (2nd rank) always have full access and are the only ranks that can change these settings and the tab rules. Withdrawing still requires the rank's Guild Bank permissions in WoW.")
@@ -4847,7 +4976,7 @@ function UI:BuildSettingsPanel(panel)
         cb:SetSize(20, 20)
         local col = (i - 1) % 5
         local rowN = math.floor((i - 1) / 5)
-        cb:SetPoint("TOPLEFT", col * 148, -244 - rowN * 22)
+        cb:SetPoint("TOPLEFT", col * 148, -270 - rowN * 22)
         cb.label = cb:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
         cb.label:SetPoint("LEFT", cb, "RIGHT", 2, 0)
         cb.label:SetWidth(122)
@@ -4889,6 +5018,24 @@ function UI:RefreshSettings()
     if panel.autoOpenBankCb then panel.autoOpenBankCb:SetChecked(uiPrefs.autoOpenAtBank ~= false) end
     if panel.chatNotifCb then panel.chatNotifCb:SetChecked(uiPrefs.enableChatNotifications ~= false) end
     if panel.newerVerNotifCb then panel.newerVerNotifCb:SetChecked(uiPrefs.notifyNewerVersion ~= false) end
+
+    if panel.delivMailBtn then
+        local pref = uiPrefs.deliveryPref
+        for _, pair in ipairs({ { panel.delivMailBtn, "MAIL" }, { panel.delivTradeBtn, "TRADE" } }) do
+            local btn, v = pair[1], pair[2]
+            if pref == v then
+                btn.customBg = { 0.15, 0.28, 0.42, 1 }
+                btn:SetBackdropColor(0.15, 0.28, 0.42, 1)
+                btn.label:SetTextColor(1, 0.82, 0)
+            else
+                btn.customBg = nil
+                btn:SetBackdropColor(THEME.btnBg[1], THEME.btnBg[2], THEME.btnBg[3], 1)
+                btn.label:SetTextColor(0.75, 0.75, 0.75)
+            end
+        end
+    end
+    if panel.whisperCb then panel.whisperCb:SetChecked(uiPrefs.memberWhispers ~= false) end
+    if panel.autoMailCb then panel.autoMailCb:SetChecked(uiPrefs.autoFillNextMail ~= false) end
 
     if panel.rankChecks then
         local ranks = VM:GetGuildRankList()
@@ -5078,11 +5225,23 @@ function UI:ShowMailFulfillmentPanel(orders)
         mailPanelFrame:SetPoint("CENTER", 220, 40)
     end
 
+    -- Group item orders per member (one mail each); gold requests get their own row/mail
+    local groups, order = {}, {}
+    for _, req in ipairs(orders) do
+        local key = req.isGoldRequest and ("GOLD:" .. req.id) or ("M:" .. VM:GetMainFor(VM:NormalizeName(req.requester)) .. ":" .. VM:NormalizeName(req.requester))
+        if not groups[key] then
+            groups[key] = { requester = req.requester, reqs = {}, isGold = req.isGoldRequest }
+            table.insert(order, key)
+        end
+        table.insert(groups[key].reqs, req)
+    end
+
     local content = mailPanelFrame.scroll.content
     for _, r in ipairs(mailPanelFrame.scroll.rows) do r:Hide() end
 
     local y = 0
-    for idx, req in ipairs(orders) do
+    for idx, key in ipairs(order) do
+        local grp = groups[key]
         local row = mailPanelFrame.scroll.rows[idx]
         if not row then
             row = CreateFrame("Frame", nil, content, "BackdropTemplate")
@@ -5091,59 +5250,63 @@ function UI:ShowMailFulfillmentPanel(orders)
 
             row.line1 = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
             row.line1:SetPoint("TOPLEFT", 6, -4)
-            row.line1:SetWidth(190)
+            row.line1:SetWidth(170)
             row.line1:SetJustifyH("LEFT")
 
             row.line2 = row:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
             row.line2:SetPoint("TOPLEFT", 6, -20)
-            row.line2:SetWidth(190)
+            row.line2:SetWidth(170)
             row.line2:SetJustifyH("LEFT")
 
             row.fillBtn = CreateModernButton(row, 62, 22, "Fill Mail", THEME.accent)
-            row.fillBtn:SetPoint("RIGHT", -28, 0)
+            row.fillBtn:SetPoint("RIGHT", -52, 0)
             row.fillBtn:SetScript("OnClick", function()
-                local r = row.reqData
-                if r and VM.Fulfillment then
-                    VM.Fulfillment:PopulateMail(r)
-                    VM.Fulfillment.fulfillStarted[r.id] = true
-                    UI:RefreshRequests()
+                local g = row.group
+                if not g or not VM.Fulfillment then return end
+                if g.isGold then
+                    VM.Fulfillment:PopulateMail(g.reqs[1])
+                    VM.Fulfillment.fulfillStarted[g.reqs[1].id] = true
+                else
+                    VM.Fulfillment:PopulateMailFor(g.requester)
                 end
+                UI:RefreshRequests()
             end)
 
-            row.releaseBtn = CreateModernButton(row, 20, 22, "X", THEME.red)
-            row.releaseBtn:SetPoint("RIGHT", -4, 0)
-            row.releaseBtn:SetScript("OnClick", function()
-                local r = row.reqData
-                if r and VM.Fulfillment then
-                    VM.Fulfillment:ReleasePreparedRequest(r.id)
-                    local rem = VM.Fulfillment:GetMyPreparedOrders()
-                    UI:ShowMailFulfillmentPanel(rem)
+            row.nameBtn = CreateModernButton(row, 44, 22, "Name", THEME.border)
+            row.nameBtn:SetPoint("RIGHT", -4, 0)
+            row.nameBtn:SetScript("OnClick", function()
+                if VM.Delivery and not VM.Delivery:SwapMailRecipient() then
+                    VM:Print("Fill the mail first; then this switches between full name and first name.")
                 end
             end)
-            row.releaseBtn:HookScript("OnEnter", function(selfBtn)
+            row.nameBtn:HookScript("OnEnter", function(selfBtn)
                 GameTooltip:SetOwner(selfBtn, "ANCHOR_TOP")
-                GameTooltip:SetText("Release order back to APPROVED")
+                GameTooltip:SetText("Switch the recipient between the full name and the first name", 1, 1, 1, 1, true)
                 GameTooltip:Show()
             end)
-            row.releaseBtn:HookScript("OnLeave", function() GameTooltip:Hide() end)
+            row.nameBtn:HookScript("OnLeave", function() GameTooltip:Hide() end)
 
             mailPanelFrame.scroll.rows[idx] = row
         end
 
         local bg = (idx % 2 == 0) and THEME.rowEven or THEME.rowOdd
-        row.reqData = req
+        row.group = grp
         row:SetBackdropColor(bg[1], bg[2], bg[3], bg[4])
         row:ClearAllPoints()
         row:SetPoint("TOPLEFT", 0, -y)
         row:Show()
 
-        if req.isGoldRequest then
+        if grp.isGold then
+            local req = grp.reqs[1]
             local gAmt = tonumber(req.goldAmount or req.quotedTotalPrice or req.quotedUnitPrice) or 0
             row.line1:SetText(string.format("%s — |cffffd700%s|r", VM:ColorizeName(req.requester), VM:FormatMoneyShort(gAmt)))
             row.line2:SetText("Send Money: " .. (req.reason or "Guild expense"))
         else
-            local cod = VM.Fulfillment and VM.Fulfillment:GetExpectedMemberPayment(req) or 0
-            row.line1:SetText(string.format("%s — %dx %s", VM:ColorizeName(req.requester), req.count or 1, req.itemLink or req.itemName or "Item"))
+            local cod = 0
+            for _, r in ipairs(grp.reqs) do cod = cod + (VM.Fulfillment:GetExpectedMemberPayment(r) or 0) end
+            local what = (#grp.reqs == 1) and string.format("%dx %s", grp.reqs[1].count or 1, grp.reqs[1].itemLink or grp.reqs[1].itemName or "Item")
+                or string.format("%d requests", #grp.reqs)
+            row.line1:SetText(string.format("%s — %s", VM:ColorizeName(grp.requester), what))
             row.line2:SetText(cod > 0 and ("CoD: " .. VM:FormatMoneyShort(cod)) or "Free-for-All (No CoD)")
         end
 
@@ -5191,16 +5354,43 @@ function UI:CreateTradeFulfillmentPrompt()
     promptText:SetJustifyH("LEFT")
     tradePromptFrame.promptText = promptText
 
+    local fillAllBtn = CreateModernButton(tradePromptFrame, 96, 20, "Fill All", THEME.green)
+    fillAllBtn:SetPoint("TOPRIGHT", -34, -8)
+    fillAllBtn:SetScript("OnClick", function()
+        local target = tradePromptFrame.targetName
+        if not target or not VM.Fulfillment then return end
+        if tradePromptFrame.hasOrders then
+            VM.Fulfillment:PopulateTradeAll(target)
+        elseif VM.Delivery then
+            VM.Delivery:WhisperDebtReminder(target)
+        end
+        UI:RefreshRequests()
+    end)
+    fillAllBtn:HookScript("OnEnter", function(selfBtn)
+        GameTooltip:SetOwner(selfBtn, "ANCHOR_TOP")
+        GameTooltip:SetText(tradePromptFrame.hasOrders
+            and "Place all prepared orders for this member in the trade and whisper the total to pay (incl. older debt)."
+            or "Whisper the member how much they still owe.", 1, 1, 1, 1, true)
+        GameTooltip:Show()
+    end)
+    fillAllBtn:HookScript("OnLeave", function() GameTooltip:Hide() end)
+    tradePromptFrame.fillAllBtn = fillAllBtn
+
     tradePromptFrame.scroll = CreateScrollArea(tradePromptFrame, -62, 8)
     tradePromptFrame.scroll.content:SetSize(312, 1)
 end
 
-function UI:ShowTradeFulfillmentPrompt(targetName, orders)
+function UI:ShowTradeFulfillmentPrompt(targetName, orders, outstanding)
     if not tradePromptFrame then self:CreateTradeFulfillmentPrompt() end
-    if not orders or #orders == 0 then
+    orders = orders or {}
+    outstanding = tonumber(outstanding) or 0
+    if #orders == 0 and outstanding <= 0 then
         tradePromptFrame:Hide()
         return
     end
+    tradePromptFrame.targetName = targetName
+    tradePromptFrame.hasOrders = (#orders > 0)
+    tradePromptFrame.fillAllBtn:SetText(#orders > 0 and "Fill All" or "Remind")
 
     tradePromptFrame:ClearAllPoints()
     if TradeFrame and TradeFrame:IsVisible() then
@@ -5210,8 +5400,13 @@ function UI:ShowTradeFulfillmentPrompt(targetName, orders)
     end
 
     local countWord = (#orders == 1) and "a prepared request" or string.format("%d prepared requests", #orders)
-    tradePromptFrame.promptText:SetText(string.format("%s has %s in your inventory. Fulfill now?",
-        VM:ColorizeName(targetName), countWord))
+    local debtTxt = (outstanding > 0) and string.format("  |cffff5555Still owes %s from earlier.|r", VM:FormatMoney(outstanding)) or ""
+    if #orders > 0 then
+        tradePromptFrame.promptText:SetText(string.format("%s has %s in your inventory. Fulfill now?%s",
+            VM:ColorizeName(targetName), countWord, debtTxt))
+    else
+        tradePromptFrame.promptText:SetText(string.format("%s has no prepared orders.%s", VM:ColorizeName(targetName), debtTxt))
+    end
 
     local content = tradePromptFrame.scroll.content
     for _, r in ipairs(tradePromptFrame.scroll.rows) do r:Hide() end

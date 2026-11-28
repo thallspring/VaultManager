@@ -9,8 +9,16 @@ All notable changes to **Vault Manager** will be documented in this file.
 ### Added
 - **Officer Request Workflow:** Approved requests show the buttons *Withdraw*, *Fulfill*, *Complete*, *Return* and *Cancel*. Only the next step can be clicked; finished steps turn green and dim. *Withdraw* takes the items from the right bank tab automatically, *Fulfill* fills the open Mail or Trade window, *Complete* happens automatically when the mail is sent or the trade finishes, and *Return* puts the items or gold back in the Guild Bank and sets the request back to *Approved*.
 - **Cancel Your Own Requests:** Members can cancel their own pending or approved requests (and no one else's).
+- **Cancel from the Vault:** Your open request can be cancelled directly from the item row in *Vault & Requests*.
 - **Request Feedback:** The *Request* button changes to *Requested* right away and shows how many you have requested. A second request for the same item is blocked until the first one is cancelled, and pending requests reserve stock so nobody can request more than the bank holds.
 - **Request Size Limit:** One request can hold at most 6 stacks, the most a trade window can hold (for example 6 for gear or 120 for items that stack to 20).
+- **Delivery per Member:** *Fulfill* fills one mail (up to 12 attachments, combined Cash on Delivery) or one trade window with all of your prepared orders for that member. After you click *Send*, the next member's mail is filled automatically.
+- **Approve + Withdraw and Withdraw All:** Approve and take out a request in one click, or take out every approved request one after another. Each one is checked, and the run stops with a clear message if one fails.
+- **No Double Withdrawals:** When an officer starts a withdrawal, the request is reserved for them across the guild, so two officers can never take out the same order.
+- **Payment Status:** Delivered requests are paid, awaiting payment or owed. A Cash on Delivery mail stays *awaiting payment* until the money arrives in the officer's mailbox and is then recorded automatically. If the mail comes back unpaid, the request returns to *Prepared* and the charge is reversed. *Complete* asks whether the member has already paid.
+- **Member Updates:** Members see a message in Vault Manager when their request is approved, ready, sent, delivered or declined. They also get a whisper on their character or an online alt, which can be turned off in *Settings*.
+- **Trade Payment Messages:** After a trade the member is told what was received and what they still owe. When they trade an officer again, older debt is shown, included in the amount to pay and settled automatically.
+- **Preferred Delivery:** Members can choose *Mail* or *Trade* in *Settings*. The choice is shown on their requests.
 - **Unpaid Trades:** If a member pays less than the price in the trade, the request moves to a new *Unpaid* section and shows the amount still owed. Officers can mark it *Paid* or *Write Off* the debt. Written-off amounts are charged to the guild account (*Member*) and stay visible as unpaid on that member in the *Ledger*.
 - **Bank Tab on Requests:** Every item request shows which Guild Bank tab the item is in.
 - **Configurable Officer Ranks:** *Settings > Officer Ranks* lets the Guild Master and the guild's officer rank give officer functions (approve, withdraw, Ledger) to additional ranks, for example *Raid Leader* or *Officer Alt*. The choice is shared with all guild members. Only the Guild Master and the officer rank can change this setting and the bank tab rules.
@@ -34,6 +42,8 @@ All notable changes to **Vault Manager** will be documented in this file.
 - `/vm diag` command that shows Guild Bank detection, sync queue and payment status, to help with troubleshooting.
 
 ### Changed
+- **Price Lock at Approval:** The member price is fixed when a request is approved and used for the Ledger, Cash on Delivery, trade messages and debt alike.
+- **Full Names First:** Mail recipients and whispers use the full two-word character name and automatically fall back to the first name if the server does not accept it. The working form is remembered.
 - **Zero-Sum Guild Accounting:** On *% of AH* tabs the member is charged the discounted price (rounded to the nearest gold, minimum 1g). The rest is shown on the guild account as a *[SUBSIDY]*, or as a *[SURPLUS]* when the 1g minimum is more than the item is worth.
 - **Free-for-All and Direct Withdrawals:** Items taken from Free-for-All tabs, or withdrawn without an approved request, are tracked at 100% of their auction value in the *Ledger* and *Ranking*, so taking an item out and putting it back nets to 0g.
 - **Reassign** now works on every non-derived Ledger entry, including item deposits (for example raid loot) moved to the guild account with an expense category.
@@ -56,6 +66,11 @@ All notable changes to **Vault Manager** will be documented in this file.
 - Fixed two identical transactions by the same member within two days being merged into one.
 - Fixed a member with no bank data being able to wipe the vault view for the whole guild.
 - Fixed attaching several stacks to Send Mail overwriting the first attachment.
+- Fixed members being charged a different price in the Ledger than the amount they were asked to pay.
+- Fixed Mail and Trade completing approved requests that were never withdrawn through Vault Manager.
+- Fixed a member's own withdrawal being ignored for three days after a request for the same item was delivered to them.
+- Fixed items taken out by hand and then completed being charged twice; an item taken out and put back shortly after now cancels out automatically.
+- Fixed the *X* in the mail panel releasing an order while the items stayed in the officer's bags.
 - Fixed pressing Escape in Vault Manager also opening the game menu.
 - Fixed a double click on a request button triggering the next action after the button changed.
 - Fixed the relog reminder sometimes not appearing because guild rank information was not loaded yet.

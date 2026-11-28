@@ -311,6 +311,20 @@ function MM:Create()
             else
                 GameTooltip:AddLine("No open requests", 0.6, 0.6, 0.6)
             end
+            if VM.Fulfillment and VM.Fulfillment.GetOwedAmount and VM.db and VM.db.requests then
+                local unpaidN, unpaidSum = 0, 0
+                local myMain = VM:GetMainFor(VM:GetPlayerName())
+                for _, req in pairs(VM.db.requests) do
+                    local owed = VM.Fulfillment:GetOwedAmount(req)
+                    if owed > 0 and (isOff or VM:GetMainFor(VM:NormalizeName(req.requester)) == myMain) then
+                        unpaidN = unpaidN + 1
+                        unpaidSum = unpaidSum + owed
+                    end
+                end
+                if unpaidN > 0 then
+                    GameTooltip:AddLine(string.format("  |cffff5555%d Unpaid / awaiting payment (%s)|r", unpaidN, VM:FormatMoneyShort(unpaidSum)))
+                end
+            end
 
             local inv = VM.db and VM.db.inventory
             local lastScan = inv and inv.lastScan or 0

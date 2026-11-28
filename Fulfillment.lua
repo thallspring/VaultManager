@@ -20,6 +20,29 @@ Fulfillment.fulfillStarted = {}
 
 local OPEN_STATUSES = { PENDING = true, APPROVED = true, PREPARED = true }
 
+-- Payment tracking for Mail (CoD) and manual completions starts with this build (older requests are not
+-- retroactively shown as unpaid). Generic timestamp, not guild-specific.
+VM.PAYMENT_TRACKING_SINCE = 1764288000
+local CLAIM_TTL = 120
+Fulfillment.prepareBusy = false
+
+-- Another officer is currently withdrawing this APPROVED request (claim broadcast before withdrawing)
+function Fulfillment:GetActiveClaim(req)
+    if not req or req.status ~= "APPROVED" then return nil end
+    local by = req.preparedBy or ""
+    if by == "" then return nil end
+    if (time() - (tonumber(req.preparedAt) or 0)) > CLAIM_TTL then return nil end
+    return by
+end
+
+local function SetClaim(req, name)
+    local now = time()
+    req.preparedBy = name or ""
+    req.preparedAt = name and now or 0
+    req.updatedAt = now
+    VM.Comms:BroadcastRequest(req)
+end
+
 local function IsBankCurrentlyOpen()
     if VM.BankScanner and VM.BankScanner.IsBankOpen then
         return VM.BankScanner:IsBankOpen()
@@ -166,7 +189,7 @@ function Fulfillment:GetExpectedMemberPayment(req)
     return 0
 end
 
-local function CaptureMailSnapshot(target)
+local function CaptureMailSnapshot(target, subject)
     if not VM:IsOfficer() then
         pendingMailSnapshot = nil
         return
@@ -217,6 +240,7 @@ local function CaptureMailSnapshot(target)
         recipient = recip,
         money = sentMoney,
         cod = codAmount,
+        subject = subject or (SendMailSubjectEditBox and SendMailSubjectEditBox:GetText()) or "",
         items = itemsByKey,
         timestamp = time()
     }
@@ -416,9 +440,9 @@ function Fulfillment:FindMatchingDeliverableRequest(recipientName, itemID, itemN
         return bestExact or bestCover
     end
 
-    local preparedMatch = SearchByStatus("PREPARED", true)
-    if preparedMatch then return preparedMatch end
-    return SearchByStatus("APPROVED", false)
+    -- Only orders this officer withdrew from the bank are completed automatically; anything else
+    -- (own items, approved-but-not-withdrawn orders) needs a deliberate Complete click.
+    return SearchByStatus("PREPARED", true)
 end
 
 function Fulfillment:CompleteFromTransfer(recipient, itemsByKey, moneySent, method)
@@ -466,8 +490,8 @@ function Fulfillment:Init()
 
     if not sendMailHooked and hooksecurefunc and type(SendMail) == "function" then
         sendMailHooked = true
-        hooksecurefunc("SendMail", function(target)
-            CaptureMailSnapshot(target)
+        hooksecurefunc("SendMail", function(target, subject)
+            CaptureMailSnapshot(target, subject)
         end)
     end
 
@@ -512,6 +536,7 @@ function Fulfillment:Init()
             self:CheckWithdrawVerification()
         elseif event == "UI_ERROR_MESSAGE" then
             self:NoteWithdrawError(arg1, arg2)
+            if VM.Delivery then VM.Delivery:OnUIError((type(arg2) == "string" and arg2) or (type(arg1) == "string" and arg1) or "") end
             self:NoteReturnError((type(arg2) == "string" and arg2) or (type(arg1) == "string" and arg1) or nil)
         elseif event == "MAIL_SHOW" then
             self.isMailOpen = true
@@ -529,16 +554,20 @@ function Fulfillment:Init()
             end
         elseif event == "MAIL_FAILED" then
             pendingMailSnapshot = nil
+            if VM.Delivery then VM.Delivery:OnMailFailed() end
         elseif event == "MAIL_SEND_SUCCESS" then
             local snap = pendingMailSnapshot
             pendingMailSnapshot = nil
             if snap and (time() - (snap.timestamp or 0)) <= 30 then
                 local done, reqs = self:CompleteFromTransfer(snap.recipient, snap.items, snap.money, "MAIL")
+                if VM.Delivery then VM.Delivery:OnMailSent(snap) end
                 if done > 0 then
                     VM:Print(string.format("Mail sent — auto-completed %d request(s).", done))
-                    -- CoD payment is credited to the member at delivery; you now hold it for the guild
-                    if (snap.cod or 0) > 0 then
-                        self:RecordDeliveryPayments(snap.recipient, snap.cod, "MAIL", reqs)
+                    -- CoD stays "awaiting payment" until the CoD money arrives in your mailbox (or the mail comes back)
+                    if VM.Delivery then
+                        if (snap.cod or 0) > 0 then VM.Delivery:TrackCod(snap, reqs) end
+                        VM.Delivery:NotifyMember(reqs, "SENT_MAIL", { cod = snap.cod })
+                        VM.Delivery:ScheduleNextMailFill()
                     end
                 end
                 if VM.UI and VM.UI.ShowMailFulfillmentPanel and self.isMailOpen then
@@ -558,8 +587,9 @@ function Fulfillment:Init()
             whisperedInCurrentTrade = {}
             if VM:IsOfficer() and currentTradeTargetName ~= "" then
                 local matches = self:GetMyPreparedOrders(currentTradeTargetName)
-                if #matches > 0 and VM.UI and VM.UI.ShowTradeFulfillmentPrompt then
-                    VM.UI:ShowTradeFulfillmentPrompt(currentTradeTargetName, matches)
+                local outstanding = self:GetOutstandingFor(currentTradeTargetName)
+                if (#matches > 0 or outstanding > 0) and VM.UI and VM.UI.ShowTradeFulfillmentPrompt then
+                    VM.UI:ShowTradeFulfillmentPrompt(currentTradeTargetName, matches, outstanding)
                 end
             end
         elseif event == "TRADE_MONEY_CHANGED" then
@@ -575,11 +605,14 @@ function Fulfillment:Init()
                 local snap = lastAcceptedTrade
                 lastAcceptedTrade = nil
 
+                local outstandingBefore = self:GetOutstandingFor(snap.recipient)
                 local done, reqs = self:CompleteFromTransfer(snap.recipient, snap.items, snap.playerMoney, "TRADE")
                 if done > 0 then
                     VM:Print(string.format("Trade completed — auto-completed %d request(s).", done))
-                    -- Gold the member put in the trade is their payment, credited to them now.
-                    -- Anything missing stays visible as debt on the request (Requests tab + Ledger).
+                end
+                -- Gold the member put in the trade pays the delivered requests first, then older debts.
+                -- Anything missing stays visible as debt (Requests tab + Ledger) and the member is told.
+                if done > 0 or ((snap.targetMoney or 0) > 0 and outstandingBefore > 0) then
                     self:RecordDeliveryPayments(snap.recipient, snap.targetMoney or 0, "TRADE", reqs)
                 end
             end
@@ -603,33 +636,124 @@ function Fulfillment:RecordDeliveryPayments(payer, amount, method, reqs)
     local remaining = math.floor(tonumber(amount) or 0)
     local holder = VM:GetPlayerName()
     local total = remaining
-    local shortfall = 0
+    local covered = {}
 
+    local function PayInto(req, due)
+        local pay = math.min(due, remaining)
+        if pay > 0 then
+            VM.Ledger:RecordPayment(payer, pay, holder, method, nil, req.id)
+            remaining = remaining - pay
+        end
+    end
+
+    -- 1) The requests delivered right now
     for _, req in ipairs(reqs or {}) do
+        covered[req.id] = true
         if not req.isGoldRequest then
             local due = self:GetOwedAmount(req, true)
-            if due > 0 then
-                local pay = math.min(due, remaining)
-                if pay > 0 then
-                    VM.Ledger:RecordPayment(payer, pay, holder, method, nil, req.id)
-                    remaining = remaining - pay
-                end
-                shortfall = shortfall + (due - pay)
+            if due > 0 then PayInto(req, due) end
+        end
+    end
+    -- 2) Older unpaid trade/manual deliveries of the same member (oldest first)
+    if remaining > 0 then
+        for _, old in ipairs(self:GetOutstandingRequests(payer)) do
+            if remaining <= 0 then break end
+            if not covered[old.id] then
+                PayInto(old, self:GetOwedAmount(old))
             end
         end
     end
+    -- 3) Anything extra is a plain payment (counts as the member's contribution)
     if remaining > 0 then
         VM.Ledger:RecordPayment(payer, remaining, holder, method)
     end
 
+    local stillOwed = self:GetOutstandingFor(payer)
     if total > 0 then
         VM:Print(string.format("Recorded %s payment of %s from |cffffff00%s|r. Deposit it in the Guild Bank as a transfer.",
             method == "MAIL" and "CoD" or method:lower(), VM:FormatMoney(total), VM:NormalizeName(payer)))
     end
-    if shortfall > 0 then
+    if stillOwed > 0 then
         VM:Print(string.format("|cffff5555%s still owes %s. It is shown on the request and can be marked Paid or written off.|r",
-            VM:NormalizeName(payer), VM:FormatMoney(shortfall)))
+            VM:NormalizeName(payer), VM:FormatMoney(stillOwed)))
     end
+    if method == "TRADE" and VM.Delivery then
+        VM.Delivery:NotifyTradeResult(payer, total, stillOwed, reqs)
+    end
+    if VM.UI then VM.UI:RefreshAll() end
+end
+
+-- Unpaid trade/manual deliveries of a member (incl. alts of the same main), oldest first.
+-- Mail CoD that is still on its way is "awaiting payment", not debt, and is excluded.
+function Fulfillment:GetOutstandingRequests(name)
+    local list = {}
+    local main = VM:GetMainFor(VM:NormalizeName(name))
+    if not VM.db or not VM.db.requests or main == "" then return list end
+    for _, req in pairs(VM.db.requests) do
+        if req.completedMethod ~= "MAIL" and VM:GetMainFor(VM:NormalizeName(req.requester)) == main and self:GetOwedAmount(req) > 0 then
+            table.insert(list, req)
+        end
+    end
+    table.sort(list, function(a, b) return (a.completedAt or 0) < (b.completedAt or 0) end)
+    return list
+end
+
+function Fulfillment:GetOutstandingFor(name)
+    local total = 0
+    for _, req in ipairs(self:GetOutstandingRequests(name)) do
+        total = total + self:GetOwedAmount(req)
+    end
+    return total
+end
+
+-- Payment state of a delivered request: nil (nothing due), "AWAITING_COD" or "OWES"
+function Fulfillment:GetPaymentState(req)
+    if self:GetOwedAmount(req) <= 0 then return nil end
+    return (req.completedMethod == "MAIL") and "AWAITING_COD" or "OWES"
+end
+
+-- Complete without Mail/Trade: the officer says whether the member already paid
+function Fulfillment:CompleteManually(reqID, paid)
+    local req = VM.db.requests[reqID]
+    if not req then return end
+    local due = req.isGoldRequest and 0 or self:GetExpectedMemberPayment(req)
+    self:CompleteRequest(reqID, { method = "MANUAL" })
+    local live = VM.db.requests[reqID]
+    if live and live.status == "FULFILLED" then
+        if paid and due > 0 then
+            VM.Ledger:RecordPayment(live.requester, due, VM:GetPlayerName(), "MANUAL", nil, live.id)
+        elseif due > 0 then
+            VM:Print(string.format("|cffffaa00%s owes %s for this request (shown under Unpaid).|r", live.requester or "?", VM:FormatMoney(due)))
+        end
+        if VM.Delivery then VM.Delivery:NotifyMember({ live }, "DELIVERED", { owed = paid and 0 or due }) end
+    end
+    if VM.UI then VM.UI:RefreshAll() end
+end
+
+-- CoD mail came back unpaid: the items are with the officer again => back to PREPARED, charge reversed
+function Fulfillment:MarkCodReturned(reqID)
+    if not VM:IsOfficer() then return end
+    local req = VM.db.requests[reqID]
+    if not req or req.status ~= "FULFILLED" or req.completedMethod ~= "MAIL" then return end
+    local now = time()
+    for _, tx in pairs(VM.db.ledger or {}) do
+        if tx.fulfillmentId == req.id and not tx.deleted and (tx.source == "REQUEST" or tx.source == "GOLD_REQUEST") then
+            VM.Ledger:TombstoneTransaction(tx, "CoD returned")
+        end
+    end
+    req.status = "PREPARED"
+    req.preparedBy = VM:GetPlayerName()
+    req.preparedAt = now
+    req.fulfilledBy = ""
+    req.completedAt = 0
+    req.completedMethod = ""
+    req.updatedAt = now
+    VM.Comms:BroadcastRequest(req)
+    if VM.Delivery then
+        VM.Delivery:ForgetCod(req.id)
+        VM.Delivery:NotifyMember({ req }, "COD_RETURNED")
+    end
+    VM:Print(string.format("CoD mail to |cffffff00%s|r came back: %dx %s is prepared by you again.", req.requester or "?", req.count or 1, req.itemName or "Item"))
     if VM.UI then VM.UI:RefreshAll() end
 end
 
@@ -638,7 +762,15 @@ end
 function Fulfillment:GetOwedAmount(req, ignoreStatus)
     if not req or req.isGoldRequest then return 0 end
     if not ignoreStatus then
-        if req.status ~= "FULFILLED" or req.completedMethod ~= "TRADE" then return 0 end
+        if req.status ~= "FULFILLED" then return 0 end
+        local m = req.completedMethod
+        if m == "TRADE" then
+            -- always tracked
+        elseif (m == "MAIL" or m == "MANUAL") and (tonumber(req.completedAt) or 0) >= VM.PAYMENT_TRACKING_SINCE then
+            -- CoD awaiting receipt / manual delivery not (yet) paid
+        else
+            return 0
+        end
     end
     local expected = self:GetExpectedMemberPayment(req)
     if expected <= 0 then return 0 end
@@ -707,9 +839,9 @@ function Fulfillment:FulfillPrepared(reqID)
     if not req or req.status ~= "PREPARED" or not IsSameActor(req.preparedBy, VM:GetPlayerName()) then return end
     local tradeTarget = VM:NormalizeName(UnitName("NPC") or "")
     if self.isTradeOpen and tradeTarget ~= "" and IsSameRecipient(req.requester, tradeTarget) then
-        self:PopulateTrade(req)
+        self:PopulateTradeAll(tradeTarget)
     elseif self.isMailOpen or (MailFrame and MailFrame:IsVisible()) then
-        self:PopulateMail(req)
+        self:PopulateMailFor(req.requester)
     else
         VM:Print(string.format("|cffffaa00Open your mailbox or a trade with %s to fulfill this request.|r", req.requester or "?"))
         return
@@ -790,6 +922,7 @@ function Fulfillment:CreateRequest(tabIndex, itemKey, count)
         priceAtRequest = effectivePrice,
         priceMode = rule.mode,
         pricePercent = rule.percent or 0,
+        deliveryPref = (VM.db.uiPrefs and VM.db.uiPrefs.deliveryPref) or nil,
         reason = ""
     }
 
@@ -865,9 +998,31 @@ function Fulfillment:ApproveRequest(reqID)
     req.approvedAt = now
     req.updatedAt = now
 
+    -- Lock the member price at approval: Ledger, CoD, trade whisper and debt all use this amount
+    if not req.isGoldRequest then
+        local live = VM:GetEffectiveLivePrice(req.itemID, req.itemLink, req.priceAtRequest or req.quotedUnitPrice)
+        if live and live > 0 then
+            local qty = tonumber(req.count) or 1
+            local total = VM:CalculateMemberTotalPrice(live, qty, { mode = req.priceMode or "FREE", percent = req.pricePercent or 50 })
+            req.priceAtRequest = live
+            req.quotedTotalPrice = total
+            req.quotedUnitPrice = (qty > 0) and math.floor(total / qty) or total
+        end
+    end
+
     VM.Comms:BroadcastRequest(req)
     if VM.Minimap and VM.Minimap.UpdateBadge then VM.Minimap:UpdateBadge() end
     if VM.UI then VM.UI:RefreshAll() end
+    if VM.Delivery then VM.Delivery:NotifyMember({ req }, "APPROVED") end
+end
+
+-- Approve and immediately withdraw (one click at the Guild Bank)
+function Fulfillment:ApproveAndWithdraw(reqID)
+    self:ApproveRequest(reqID)
+    local req = VM.db.requests[reqID]
+    if req and req.status == "APPROVED" then
+        self:PrepareRequest(reqID)
+    end
 end
 
 -- Helper to mark request PREPARED (or FULFILLED directly if officer prepared their own/alt request at the bank)
@@ -902,6 +1057,40 @@ function Fulfillment:FinalizePreparedState(req, withdrawnFromBank)
         VM:Print(string.format("Prepared %dx %s for |cffffff00%s|r. Open Mail or Trade to fulfill.",
             req.count or 1, req.itemLink or req.itemName or "Item", req.requester))
     end
+    if VM.Delivery then VM.Delivery:NotifyMember({ req }, "READY") end
+end
+
+-- Merge partial stacks of a withdrawn item so it fits the Trade window (max 6 stacks)
+function Fulfillment:ConsolidateStacks(req)
+    if not req or req.isGoldRequest then return end
+    local maxStack = VM:GetItemMaxStack(tonumber(req.itemID), req.itemLink)
+    if not maxStack or maxStack <= 1 then return end
+    local merges = 0
+    local function Step()
+        if merges >= 8 then return end
+        local partials = {}
+        for bag = 0, 4 do
+            for slot = 1, GetContainerSlotCount(bag) do
+                local link, count, locked = GetBagSlotInfo(bag, slot)
+                if link and count and count > 0 and count < maxStack and not locked then
+                    local id = tonumber(link:match("item:(%d+)")) or 0
+                    if DoesItemMatchRequest(id, link:match("%[(.-)%]") or link, req) then
+                        table.insert(partials, { bag = bag, slot = slot, count = count })
+                    end
+                end
+            end
+        end
+        if #partials < 2 then return end
+        table.sort(partials, function(a, b) return a.count < b.count end)
+        local src, dst = partials[1], partials[#partials]
+        merges = merges + 1
+        ClearCursor()
+        PickupBagSlot(src.bag, src.slot)
+        PickupBagSlot(dst.bag, dst.slot)
+        if CursorHasItem and CursorHasItem() then ClearCursor() end
+        if C_Timer and C_Timer.After then C_Timer.After(0.4, Step) end
+    end
+    if C_Timer and C_Timer.After then C_Timer.After(0.6, Step) end
 end
 
 --------------------------------------------------------------------------------
@@ -955,6 +1144,7 @@ end
 local function EndWithdrawSession()
     withdrawSession = nil
     Fulfillment.isWithdrawing = false
+    Fulfillment.prepareBusy = false
     verifyFrame:Hide()
 end
 
@@ -969,6 +1159,12 @@ function Fulfillment:FailWithdraw(reason)
         gained = math.max(0, ((GetMoney and GetMoney()) or 0) - (s.before or 0))
     end
     EndWithdrawSession()
+
+    -- Release the withdraw claim so the request can be picked up again
+    local liveReq = VM.db.requests[req.id]
+    if liveReq and liveReq.status == "APPROVED" and IsSameActor(liveReq.preparedBy, VM:GetPlayerName()) then
+        SetClaim(liveReq, nil)
+    end
 
     local detail = s.lastError and (" Server: " .. s.lastError) or ""
     VM:Print(string.format("|cffff4444Prepare failed: %s%s Request stays APPROVED.|r", reason or "withdrawal was not confirmed.", detail))
@@ -998,10 +1194,14 @@ function Fulfillment:CheckWithdrawVerification()
 
     if gained >= (s.expected or 0) then
         local req = s.req
+        local kind = s.kind
         EndWithdrawSession()
         local live = VM.db.requests[req.id]
         if live and live.status == "APPROVED" then
             self:FinalizePreparedState(live, true)
+        end
+        if kind == "ITEM" then
+            self:ConsolidateStacks(req)
         end
         if VM.BankScanner and VM.BankScanner.SchedulePostWithdrawScan then
             VM.BankScanner:SchedulePostWithdrawScan()
@@ -1228,25 +1428,43 @@ function Fulfillment:PrepareRequest(reqID)
     local req = VM.db.requests[reqID]
     if not req or req.status ~= "APPROVED" then return end
 
-    if self.isWithdrawing then
+    if self.isWithdrawing or self.prepareBusy then
         VM:Print("|cffffaa00Already withdrawing a request from the Guild Bank. Please wait a moment.|r")
         return
     end
-
-    local function Proceed(ok)
-        if not ok then
-            VM:Print("|cffff4444Open the Guild Bank to prepare and withdraw this request.|r")
-            return
-        end
-        local live = VM.db.requests[reqID]
-        if not live or live.status ~= "APPROVED" or self.isWithdrawing then return end
-        BeginPrepare(self, live)
+    local me = VM:GetPlayerName()
+    local claim = self:GetActiveClaim(req)
+    if claim and not IsSameActor(claim, me) then
+        VM:Print(string.format("|cffffaa00%s is already withdrawing this request.|r", claim))
+        return
     end
 
-    if VM.BankScanner and VM.BankScanner.EnsureBankOpen then
-        VM.BankScanner:EnsureBankOpen(Proceed)
+    -- Claim the request guild-wide first, so two officers never withdraw the same order
+    self.prepareBusy = true
+    SetClaim(req, me)
+
+    local function Proceed()
+        local live = VM.db.requests[reqID]
+        if not live or live.status ~= "APPROVED" or not IsSameActor(live.preparedBy, me) then
+            self.prepareBusy = false
+            local other = live and self:GetActiveClaim(live)
+            VM:Print(string.format("|cffffaa00%s is already withdrawing this request.|r", other or "Another officer"))
+            if VM.UI then VM.UI:RefreshAll() end
+            return
+        end
+        BeginPrepare(self, live)
+        if not withdrawSession then
+            -- A pre-check failed (stock, permissions, bag space): release the claim again
+            self.prepareBusy = false
+            SetClaim(live, nil)
+            if VM.UI then VM.UI:RefreshAll() end
+        end
+    end
+
+    if C_Timer and C_Timer.After then
+        C_Timer.After(1.0, Proceed)
     else
-        Proceed(IsBankCurrentlyOpen())
+        Proceed()
     end
 end
 
@@ -1485,6 +1703,7 @@ function Fulfillment:RejectRequest(reqID)
     VM.Comms:BroadcastRequest(req)
     if VM.Minimap and VM.Minimap.UpdateBadge then VM.Minimap:UpdateBadge() end
     if VM.UI then VM.UI:RefreshAll() end
+    if VM.Delivery then VM.Delivery:NotifyMember({ req }, "REJECTED") end
 end
 
 -- Mark order as fulfilled -> Record in ledger (unless skipLedger) & release soft-lock
@@ -1497,6 +1716,8 @@ function Fulfillment:CompleteRequest(reqID, opts)
     local completedBy = VM:NormalizeName((opts and opts.completedBy) or VM:GetPlayerName())
     local completedAt = (opts and opts.completedAt) or now
     local method = (opts and opts.method) or "MANUAL"
+    -- Not withdrawn through Vault Manager => the officer took the goods by hand (reconcile below)
+    local wasApproved = (req.status == "APPROVED")
 
     self.fulfillStarted[req.id] = nil
     req.status = "FULFILLED"
@@ -1511,6 +1732,9 @@ function Fulfillment:CompleteRequest(reqID, opts)
         else
             VM.Ledger:RecordFulfillment(req, completedBy, completedAt)
         end
+        if method ~= "BANK" and wasApproved then
+            self:ReconcileDirectWithdrawal(req, completedBy)
+        end
     end
 
     if self.activeOrder and self.activeOrder.id == req.id then
@@ -1520,6 +1744,32 @@ function Fulfillment:CompleteRequest(reqID, opts)
     VM.Comms:BroadcastRequest(req)
     if VM.Minimap and VM.Minimap.UpdateBadge then VM.Minimap:UpdateBadge() end
     if VM.UI then VM.UI:RefreshAll() end
+end
+
+-- The officer withdrew the items/gold by hand before completing: that bank-log withdrawal was booked on
+-- the officer at 100% (OUT_DIR / gold OUT). It is the same goods as this request => tombstone it.
+function Fulfillment:ReconcileDirectWithdrawal(req, officerName)
+    local actor = VM:CanonicalActor(officerName)
+    local now = time()
+    local WINDOW = 48 * 3600
+    local best = nil
+    for _, tx in pairs(VM.db.ledger or {}) do
+        if tx.type == "OUT" and not tx.deleted and not tx.voided and math.abs(now - (tx.timestamp or 0)) <= WINDOW
+            and VM:CanonicalActor(tx.rawSender or tx.player) == actor then
+            if req.isGoldRequest then
+                local amt = tonumber(req.goldAmount or req.quotedTotalPrice) or 0
+                if tx.source == "BANK_MONEY_LOG" and (tx.unitPriceAtTime or 0) * (tx.count or 1) == amt then best = tx end
+            elseif (tx.source == "BANK_LOG" or tx.source == "FFA_SCAN") and (tonumber(tx.count) or 1) == (tonumber(req.count) or 1)
+                and VM:NormalizeItemKey(tx.itemID, tx.itemLink, tx.itemName) == VM:NormalizeItemKey(req.itemID, req.itemLink, req.itemName) then
+                best = tx
+            end
+        end
+        if best then break end
+    end
+    if best then
+        VM.Ledger:TombstoneTransaction(best, "Reconciled with request " .. tostring(req.id))
+        VM:LogDebug("Reconciled direct withdrawal with request " .. tostring(req.id))
+    end
 end
 
 function Fulfillment:GetApprovedOrders()
@@ -1665,7 +1915,8 @@ function Fulfillment:PopulateMail(req)
     end
 
     if SendMailNameEditBox then
-        SendMailNameEditBox:SetText(req.requester or "")
+        local recipName = VM.Delivery and VM.Delivery:BeginMailRecipient(req.requester) or req.requester
+        SendMailNameEditBox:SetText(recipName or "")
     end
 
     if req.isGoldRequest then
@@ -1717,6 +1968,169 @@ function Fulfillment:PopulateMail(req)
         VM:Print(string.format("|cffffaa00Attached available items, but %d more %s missing from bags.|r",
             left, req.itemLink or req.itemName or "Item"))
     end
+end
+
+--------------------------------------------------------------------------------
+-- Delivery per member: all of this officer's prepared orders for one member in one Mail / one Trade
+--------------------------------------------------------------------------------
+local function StacksNeeded(req)
+    if req.isGoldRequest then return 0 end
+    local maxStack = VM:GetItemMaxStack(tonumber(req.itemID), req.itemLink) or 1
+    return math.max(1, math.ceil((tonumber(req.count) or 1) / maxStack))
+end
+
+local function MailHasContent()
+    local maxSlots = ATTACHMENTS_MAX_SEND or 12
+    for i = 1, maxSlots do
+        if (GetSendMailItemLink and GetSendMailItemLink(i)) or (GetSendMailItem and GetSendMailItem(i)) then
+            return true
+        end
+    end
+    return ((GetSendMailMoney and GetSendMailMoney()) or 0) > 0
+end
+
+local function AttachToMail()
+    local maxSlots = ATTACHMENTS_MAX_SEND or 12
+    for i = 1, maxSlots do
+        local occupied = (GetSendMailItemLink and GetSendMailItemLink(i)) or (GetSendMailItem and GetSendMailItem(i))
+        if not occupied then
+            ClickSendMailItemButton(i)
+            return true
+        end
+    end
+    return false
+end
+
+-- Fills ONE mail with as many of the member's prepared item orders as fit (12 attachments) and the
+-- combined CoD. Gold requests go in their own mail (Send Money cannot be combined with CoD).
+function Fulfillment:PopulateMailFor(requester)
+    local orders = self:GetMyPreparedOrders(requester)
+    if #orders == 0 then return end
+    if not SendMailFrame or not SendMailFrame:IsVisible() then
+        if MailFrameTab_OnClick then MailFrameTab_OnClick(nil, 2) end
+    end
+    if MailHasContent() then
+        VM:Print("|cffffaa00Clear existing attachments or gold in Send Mail before filling another request.|r")
+        return
+    end
+
+    local items, gold = {}, nil
+    local slotsLeft = ATTACHMENTS_MAX_SEND or 12
+    for _, req in ipairs(orders) do
+        if req.isGoldRequest then
+            gold = gold or req
+        else
+            local need = StacksNeeded(req)
+            if need <= slotsLeft then
+                table.insert(items, req)
+                slotsLeft = slotsLeft - need
+            end
+        end
+    end
+    if #items == 0 then
+        if gold then self:PopulateMail(gold) end
+        return
+    end
+
+    local recipName = VM.Delivery and VM.Delivery:BeginMailRecipient(items[1].requester) or items[1].requester
+    if SendMailNameEditBox then SendMailNameEditBox:SetText(recipName or "") end
+    if SendMailSubjectEditBox then
+        local subj = (#items == 1)
+            and string.format("Guild Bank: %dx %s", items[1].count or 1, CleanItemDisplay(items[1].itemName or items[1].itemLink))
+            or string.format("Guild Bank: %d requests", #items)
+        SendMailSubjectEditBox:SetText(subj)
+    end
+
+    local totalCOD = 0
+    for _, req in ipairs(items) do totalCOD = totalCOD + self:GetExpectedMemberPayment(req) end
+    if totalCOD > 0 then
+        if SendMailSendMoneyButton then SendMailSendMoneyButton:SetChecked(false) end
+        if SendMailCODButton then SendMailCODButton:SetChecked(true) end
+    else
+        if SendMailCODButton then SendMailCODButton:SetChecked(false) end
+        if SendMailSendMoneyButton then SendMailSendMoneyButton:SetChecked(true) end
+    end
+    if SendMailMoney and MoneyInputFrame_SetCopper then MoneyInputFrame_SetCopper(SendMailMoney, totalCOD) end
+
+    -- Attach one order at a time (stack splits need a moment to settle)
+    local idx = 0
+    local function Next()
+        idx = idx + 1
+        local req = items[idx]
+        if not req then return end
+        self.fulfillStarted[req.id] = true
+        local left = AttachItemsFromBags(req, AttachToMail)
+        if left > 0 then
+            VM:Print(string.format("|cffffaa00Attached available items, but %d more %s missing from bags.|r",
+                left, req.itemLink or req.itemName or "Item"))
+        end
+        if C_Timer and C_Timer.After then C_Timer.After(0.45, Next) else Next() end
+    end
+    Next()
+    if #items < #orders - (gold and 1 or 0) then
+        VM:Print("|cffffaa00More orders for this member are waiting — they will be filled into the next mail after you click Send.|r")
+    end
+    if VM.UI then VM.UI:RefreshRequests() end
+end
+
+-- Fills the Trade window with all of this officer's prepared orders for the trade partner (up to the
+-- 6 item slots; gold requests are added as one gold amount) and whispers one combined summary.
+function Fulfillment:PopulateTradeAll(targetName)
+    local rawTarget = UnitName("NPC") or ""
+    local tradeTarget = VM:NormalizeName(rawTarget)
+    if tradeTarget == "" then return end
+    local orders = self:GetMyPreparedOrders(tradeTarget)
+    if #orders == 0 then
+        if VM.Delivery then VM.Delivery:WhisperTradeSummary(rawTarget, tradeTarget, {}) end
+        return
+    end
+
+    local goldTotal = 0
+    local items = {}
+    for _, req in ipairs(orders) do
+        if req.isGoldRequest then
+            goldTotal = goldTotal + (tonumber(req.goldAmount or req.quotedTotalPrice or req.quotedUnitPrice) or 0)
+        else
+            table.insert(items, req)
+        end
+        self.fulfillStarted[req.id] = true
+    end
+    if goldTotal > 0 and SetTradeMoney then
+        local existing = (GetPlayerTradeMoney and GetPlayerTradeMoney()) or 0
+        if existing == 0 then SetTradeMoney(goldTotal) end
+    end
+
+    local nextTradeSlot = 1
+    local function AttachToTrade()
+        while nextTradeSlot <= 6 do
+            local existingName = GetTradePlayerItemInfo and GetTradePlayerItemInfo(nextTradeSlot)
+            if not existingName then
+                ClickTradeButton(nextTradeSlot)
+                nextTradeSlot = nextTradeSlot + 1
+                return true
+            end
+            nextTradeSlot = nextTradeSlot + 1
+        end
+        return false
+    end
+
+    local idx = 0
+    local function Next()
+        idx = idx + 1
+        local req = items[idx]
+        if not req then return end
+        local left = AttachItemsFromBags(req, AttachToTrade)
+        if left > 0 then
+            VM:Print(string.format("|cffffaa00Trade window is full or %d %s missing — deliver the rest in the next trade.|r",
+                left, req.itemLink or req.itemName or "Item"))
+        end
+        if C_Timer and C_Timer.After then C_Timer.After(0.45, Next) else Next() end
+    end
+    Next()
+
+    for _, req in ipairs(orders) do whisperedInCurrentTrade[req.id] = true end
+    if VM.Delivery then VM.Delivery:WhisperTradeSummary(rawTarget, tradeTarget, orders) end
+    if VM.UI then VM.UI:RefreshRequests() end
 end
 
 -- Plain-text whisper sent to trade partner when officer clicks "Fill Trade"

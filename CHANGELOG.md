@@ -9,10 +9,13 @@ All notable changes to **Vault Manager** will be documented in this file.
 ### Added
 - **Officer Request Workflow:** Approved requests show the buttons *Withdraw*, *Fulfill*, *Complete*, *Return* and *Cancel*. Only the next step can be clicked; finished steps turn green and dim. *Withdraw* takes the items from the right bank tab automatically, *Fulfill* fills the open Mail or Trade window, *Complete* happens automatically when the mail is sent or the trade finishes, and *Return* puts the items or gold back in the Guild Bank and sets the request back to *Approved*.
 - **Cancel Your Own Requests:** Members can cancel their own pending or approved requests (and no one else's).
-- **Request Feedback:** The *Request* button changes to *Requested* right away and shows how many you have requested. A second request for the same item is blocked until the first one is cancelled.
+- **Request Feedback:** The *Request* button changes to *Requested* right away and shows how many you have requested. A second request for the same item is blocked until the first one is cancelled, and pending requests reserve stock so nobody can request more than the bank holds.
 - **Request Size Limit:** One request can hold at most 6 stacks, the most a trade window can hold (for example 6 for gear or 120 for items that stack to 20).
 - **Unpaid Trades:** If a member pays less than the price in the trade, the request moves to a new *Unpaid* section and shows the amount still owed. Officers can mark it *Paid* or *Write Off* the debt. Written-off amounts are charged to the guild account (*Member*) and stay visible as unpaid on that member in the *Ledger*.
 - **Bank Tab on Requests:** Every item request shows which Guild Bank tab the item is in.
+- **Configurable Officer Ranks:** *Settings > Officer Ranks* lets officers choose which guild ranks count as officers (for example *Raid Leader* or *Officer Alt*). The choice is shared with all guild members. The Guild Master is always included.
+- **Resizable Window:** Drag the corner of the Vault Manager window to make it taller. The height is remembered.
+- **Guild Bank Reminder:** Officers get a short reminder of pending, approved and prepared requests when they open the Guild Bank. If auto-open is turned off, a small pop-up with an *Open Requests* button is shown instead.
 - **Prepared Requests with Officer Ownership:** Officers can now *Prepare* an approved request, which withdraws the exact items (splitting stacks into free bag slots when needed) or gold from the open Guild Bank and assigns the delivery to that officer. Officers are never asked to deliver another officer's prepared orders.
 - **Verified Guild Bank Withdrawals:** *Prepare* only marks a request as prepared (or fulfilled, for your own request) after the items have actually arrived in your bags or the gold in your purse. Failed withdrawals leave the request approved and explain why (daily withdrawal limit, missing permission, missing stock, no free bag slots).
 - **Write Off for Departed Officers:** Orders held by an officer who has left the guild can be written off and charged to that officer, or released back to *Approved*.
@@ -43,7 +46,9 @@ All notable changes to **Vault Manager** will be documented in this file.
 - **Monthly Ledger Compaction** is paused for now so that all clients keep identical Ledger data. Old deletion records are still cleaned up after 90 days.
 
 ### Fixed
-- Vault Manager now detects an open Guild Bank on clients and bag addons that do not report it (no Guild Bank open event, hidden default Guild Bank window). It also notices when the bank is closed or the player walks away.
+- Fixed Vault Manager failing to start its Guild Bank, sync and delivery features on clients that do not know the old Guild Bank open/close events.
+- Vault Manager now detects an open Guild Bank on clients and bag addons that do not report it (no Guild Bank open event, hidden default Guild Bank window). Withdraw, Return and scanning no longer depend on that detection: they are attempted directly and checked afterwards.
+- Fixed Vault Manager closing again right after opening automatically at the Guild Bank.
 - Fixed *Prepare* doing nothing, and fixed requests being marked as fulfilled without the items or gold actually being withdrawn.
 - Fixed a Guild Bank withdrawal by an officer with a different number of items being auto-matched to an approved request.
 - Fixed gold deposits and withdrawals only appearing in the *Ledger* after closing and reopening the Guild Bank.

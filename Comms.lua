@@ -125,7 +125,7 @@ function Comms:GetMaxTimestamp(tbl, field)
 end
 
 function Comms:GetRulesMaxTimestamp(tbl)
-    local maxTs = 0
+    local maxTs = (VM.db and type(VM.db.officerRanks) == "table" and tonumber(VM.db.officerRanks.updatedAt)) or 0
     for _, v in pairs(tbl or {}) do
         if type(v) == "table" and not v.tampered then
             local ts = v.updatedAt or 0
@@ -791,7 +791,7 @@ function Comms:OnMessageReceived(msg, sender)
         if VM.db.rosterCache and next(VM.db.rosterCache) then
             local rKey = VM:ResolveNameKey(VM.db.rosterCache, normBy)
             local rankIdx = rKey and VM.db.rosterCache[rKey] or nil
-            if rankIdx ~= nil and rankIdx > VM.OFFICER_MAX_RANK_INDEX and rankIdx ~= 0 then
+            if rankIdx ~= nil and not VM:IsOfficerRank(rankIdx) then
                 return
             end
         end
@@ -816,6 +816,28 @@ function Comms:OnMessageReceived(msg, sender)
         end
 
         VM.db.tabRules[tabIdx] = ruleData
+        MarkDataReceived()
+        ScheduleUIRefresh()
+
+    elseif cmd == "ORANKS" then
+        -- Guild-wide officer rank set; only accepted from someone who is an officer under our current set
+        if not fromOfficer then return end
+        local csv = UnescapeStr(parts[2] or "")
+        local updatedAt = tonumber(parts[3]) or 0
+        local updatedBy = UnescapeStr(parts[4] or sender)
+        if updatedAt >= recentPeerBroadcasts.ruleTs then
+            recentPeerBroadcasts.ruleTs = updatedAt
+            recentPeerBroadcasts.ruleAt = nowGT
+        end
+        local existing = VM.db.officerRanks
+        if type(existing) == "table" and (tonumber(existing.updatedAt) or 0) >= updatedAt then return end
+        local ranks = {}
+        for idx in csv:gmatch("%d+") do
+            local n = tonumber(idx)
+            if n and n > 0 then ranks[n] = true end
+        end
+        VM.db.officerRanks = { ranks = ranks, updatedAt = updatedAt, updatedBy = updatedBy }
+        VM:ValidateTabRules()
         MarkDataReceived()
         ScheduleUIRefresh()
 
@@ -1150,8 +1172,22 @@ function Comms:BroadcastRequest(req)
     self:SendRaw(payload)
 end
 
+function Comms:BroadcastOfficerRanks(sinceTs)
+    local cfg = VM.db and VM.db.officerRanks
+    if type(cfg) ~= "table" or type(cfg.ranks) ~= "table" then return end
+    local minTs = tonumber(sinceTs) or 0
+    if minTs > 0 and (tonumber(cfg.updatedAt) or 0) <= minTs then return end
+    local idx = {}
+    for r, on in pairs(cfg.ranks) do
+        if on then table.insert(idx, tonumber(r)) end
+    end
+    table.sort(idx)
+    self:SendRaw(string.format("ORANKS|%s|%d|%s", table.concat(idx, ","), math.floor(tonumber(cfg.updatedAt) or 0), EscapeStr(cfg.updatedBy or "")))
+end
+
 function Comms:BroadcastTabRules(sinceTs)
     if not VM.db or not VM.db.tabRules then return end
+    self:BroadcastOfficerRanks(sinceTs)
     local minTs = tonumber(sinceTs) or 0
     local guildName = GetGuildInfo("player") or VM:GetActiveGuildKey() or ""
     for tabIdx, rule in pairs(VM.db.tabRules) do

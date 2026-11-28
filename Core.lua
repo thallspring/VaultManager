@@ -3,6 +3,8 @@ _G.VaultManager = VM
 
 VM.PREFIX = "VMGR_V1"
 VM.VERSION = 7
+-- Development build marker (the .toc version stays at the last release until in-game tests pass)
+VM.BUILD = "1.5.0-dev.4 (2026-11-28)"
 VM.OFFICER_MAX_RANK_INDEX = 1
 -- Monthly compaction is paused until P2P ledger state is stable across clients (tombstone purge still runs)
 VM.COMPACTION_ENABLED = false
@@ -395,9 +397,56 @@ function VM:GetPlayerName()
     return self:NormalizeName(UnitName("player"))
 end
 
--- Single source of truth for officer ranks (used locally, for peers, for tab rules and P2P trust)
+-- Single source of truth for officer ranks (used locally, for peers, for tab rules and P2P trust).
+-- Guild Master (rank 0) is always an officer. Other ranks come from the guild-wide officer rank
+-- setting (Settings > Officer Ranks, synced between officers); default = ranks 0 and 1.
 function VM:IsOfficerRank(rankIndex)
-    return type(rankIndex) == "number" and rankIndex >= 0 and rankIndex <= VM.OFFICER_MAX_RANK_INDEX
+    if type(rankIndex) ~= "number" or rankIndex < 0 then return false end
+    if rankIndex == 0 then return true end
+    local cfg = self.db and self.db.officerRanks
+    if type(cfg) == "table" and type(cfg.ranks) == "table" then
+        return cfg.ranks[rankIndex] == true
+    end
+    return rankIndex <= VM.OFFICER_MAX_RANK_INDEX
+end
+
+-- Guild ranks as { index = 0.., name = "..." } (index 0 = Guild Master)
+function VM:GetGuildRankList()
+    local list = {}
+    local num = (GuildControlGetNumRanks and GuildControlGetNumRanks()) or 0
+    if num <= 0 and self.db and self.db.rankNames then
+        for idx in pairs(self.db.rankNames) do
+            if type(idx) == "number" and idx + 1 > num then num = idx + 1 end
+        end
+    end
+    for i = 0, math.max(0, num - 1) do
+        local name = (self.db and self.db.rankNames and self.db.rankNames[i]) or nil
+        if (not name or name == "") and GuildControlGetRankName then
+            local ok, n = pcall(GuildControlGetRankName, i + 1)
+            if ok and n and n ~= "" then name = n end
+        end
+        table.insert(list, { index = i, name = name or ("Rank " .. i) })
+    end
+    return list
+end
+
+-- Officer: choose which guild ranks count as officers (e.g. "Raid Leader", "Officer Alt")
+function VM:SetOfficerRank(rankIndex, isOfficer)
+    if not self:IsOfficer() or type(rankIndex) ~= "number" or rankIndex <= 0 then return end
+    local _, _, myRank = GetGuildInfo("player")
+    if rankIndex == myRank and not isOfficer then
+        self:Print("|cffffaa00You cannot remove officer rights from your own rank.|r")
+        return
+    end
+    local ranks = {}
+    for _, r in ipairs(self:GetGuildRankList()) do
+        if r.index > 0 and self:IsOfficerRank(r.index) then ranks[r.index] = true end
+    end
+    ranks[rankIndex] = isOfficer and true or nil
+    self.db.officerRanks = { ranks = ranks, updatedAt = time(), updatedBy = self:GetPlayerName() }
+    if self.Comms and self.Comms.BroadcastOfficerRanks then self.Comms:BroadcastOfficerRanks() end
+    self:ValidateTabRules()
+    if self.UI then self.UI:RefreshAll() end
 end
 
 function VM:IsOfficer()
@@ -1141,11 +1190,12 @@ function VM:ValidateTabRules()
     end
 end
 
--- Only APPROVED items still sitting in the bank are soft-locked; PREPARED items have already been withdrawn
+-- PENDING and APPROVED items still sitting in the bank are reserved, so nobody can request more than
+-- the bank actually holds; PREPARED items have already been withdrawn
 function VM:GetReservedCount(itemID, tabIndex)
     local reserved = 0
     for _, req in pairs(self.db.requests) do
-        if req.status == "APPROVED" and not req.isGoldRequest and (req.itemID == itemID or req.itemName == itemID) then
+        if (req.status == "APPROVED" or req.status == "PENDING") and not req.isGoldRequest and (req.itemID == itemID or req.itemName == itemID) then
             if not tabIndex or req.tab == tabIndex then
                 reserved = reserved + (req.count or 0)
             end
@@ -1635,6 +1685,7 @@ SlashCmdList["VAULTMANAGER"] = function(msg)
         local S = VM.BankScanner
         local p = function(k, v) print(string.format("  %s: |cffffff00%s|r", k, tostring(v))) end
         print("|cff00ccff[Vault Manager Diagnostics]|r")
+        p("Build", VM.BUILD)
         p("Bank open (detected)", S and S:IsBankOpen())
         p("Bank open reason", S and S.bankOpenReason)
         p("Last bank activity (s ago)", S and S.lastBankActivityAt and string.format("%.1f", GetTime() - S.lastBankActivityAt) or "never")
@@ -1853,7 +1904,7 @@ initFrame:SetScript("OnEvent", function(_, event, arg1)
             VM.Ledger:CompactMonthlyHistory()
         end
 
-        print("|cff00ccff[Vault Manager]|r Loaded. Type |cffffff00/vm|r to open.")
+        print("|cff00ccff[Vault Manager]|r Loaded (build " .. tostring(VM.BUILD) .. "). Type |cffffff00/vm|r to open.")
     elseif event == "GUILD_ROSTER_UPDATE" then
         if not rosterUpdatePending then
             rosterUpdatePending = true

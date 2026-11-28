@@ -1010,7 +1010,7 @@ function Fulfillment:CheckWithdrawVerification()
     end
 
     if GetTime() > (s.deadline or 0) then
-        self:FailWithdraw("the items/gold did not arrive in your bags in time.")
+        self:FailWithdraw("the items/gold did not arrive in your bags in time (is the Guild Bank open?).")
     end
 end
 
@@ -1022,12 +1022,9 @@ local function StartVerification(s, extraSec)
     Fulfillment:CheckWithdrawVerification()
 end
 
--- Bank closed (detected by BankScanner): abort queued steps; keep verifying what is already in flight
+-- Bank closed (explicit close signal): queued steps fail on their own (empty cursor); in-flight
+-- withdrawals keep verifying until their timeout.
 function Fulfillment:OnGuildBankClosed()
-    local s = withdrawSession
-    if s and not s.verifying then
-        self:FailWithdraw("the Guild Bank closed before the withdrawal finished.")
-    end
 end
 
 -- Executes Guild Bank item withdrawal steps into reserved empty bag slots, then verifies arrival
@@ -1043,11 +1040,6 @@ function Fulfillment:ExecuteBankWithdrawSteps(req, tab, steps)
             return
         end
 
-        if not IsBankCurrentlyOpen() then
-            Fulfillment:FailWithdraw("the Guild Bank closed before the withdrawal finished.")
-            return
-        end
-
         ClearCursor()
         if step.isFullStack then
             if PickupGuildBankItem then
@@ -1059,7 +1051,9 @@ function Fulfillment:ExecuteBankWithdrawSteps(req, tab, steps)
             end
         end
         if GetCursorInfo and not GetCursorInfo() then
-            s.lastError = s.lastError or "nothing was picked up from the Guild Bank slot (permission, daily limit or locked slot)."
+            -- Nothing landed on the cursor: the bank is not reachable (closed/out of range) or the slot is locked
+            Fulfillment:FailWithdraw("nothing could be picked up from the Guild Bank. Make sure the Guild Bank window is open and you are standing at the banker.")
+            return
         end
         PickupBagSlot(step.destBag, step.destSlot)
         -- If the drop was rejected the item is still on the cursor: return it instead of leaving it there
@@ -1142,10 +1136,6 @@ local function BeginPrepare(self, req)
 
     local function ScanAndWithdrawFromTab(attempt)
         if withdrawSession ~= session then return end
-        if not IsBankCurrentlyOpen() then
-            Fulfillment:FailWithdraw("the Guild Bank is not open.")
-            return
-        end
 
         local matchingSlots = {}
         local totalAvailable = 0
@@ -1169,7 +1159,7 @@ local function BeginPrepare(self, req)
                 C_Timer.After(0.6, function() ScanAndWithdrawFromTab(attempt + 1) end)
                 return
             end
-            Fulfillment:FailWithdraw(string.format("only %d of %d %s found in Tab %d.",
+            Fulfillment:FailWithdraw(string.format("only %d of %d %s found in Tab %d (is the Guild Bank open?).",
                 totalAvailable, needed, req.itemLink or req.itemName or "Item", targetTab))
             return
         end
@@ -1337,7 +1327,7 @@ returnFrame:SetScript("OnUpdate", function(selfFrame, elapsed)
     if done then
         FinishReturn(true)
     elseif GetTime() > s.deadline then
-        FinishReturn(false, "the Guild Bank did not receive the items/gold in time.")
+        FinishReturn(false, "the Guild Bank did not receive the items/gold in time (is the Guild Bank open?).")
     end
 end)
 
@@ -1545,23 +1535,33 @@ end
 
 -- Auto-opens VM when Guild Bank opens: Requests tab if officer has open orders, otherwise Vault & Requests
 function Fulfillment:OnGuildBankOpened()
-    if not IsBankCurrentlyOpen() then return end
+    if not IsBankCurrentlyOpen() or not VM.UI then return end
     local prefs = VM.db and VM.db.uiPrefs
-    if prefs and prefs.autoOpenAtBank == false then return end
+    local autoOpen = not (prefs and prefs.autoOpenAtBank == false)
 
-    if VM:IsOfficer() then
-        local pendingCount, approvedCount = self:GetPendingAndApprovedCounts()
-        local myPrepared = self:GetMyPreparedOrders()
-        if (pendingCount > 0 or approvedCount > 0 or #myPrepared > 0) and VM.UI and VM.UI.OpenToRequestsTab then
-            VM.UI:OpenToRequestsTab()
-            return
-        end
+    local isOff = VM:IsOfficer()
+    local pendingCount, approvedCount, preparedCount = 0, 0, 0
+    if isOff then
+        pendingCount, approvedCount = self:GetPendingAndApprovedCounts()
+        preparedCount = #self:GetMyPreparedOrders()
+    end
+    local hasWork = (pendingCount + approvedCount + preparedCount) > 0
+
+    if hasWork then
+        VM:Print(string.format("Guild Bank: %d pending, %d approved, %d prepared by you.", pendingCount, approvedCount, preparedCount))
     end
 
-    if VM.UI and VM.UI.OpenToVaultTab then
-        VM.UI:OpenToVaultTab()
-    elseif VM.UI and VM.UI.OpenToRequestsTab then
-        VM.UI:OpenToRequestsTab()
+    if not autoOpen then
+        if hasWork and VM.UI.ShowBankReminder then
+            VM.UI:ShowBankReminder(pendingCount, approvedCount, preparedCount)
+        end
+        return
+    end
+
+    if hasWork and VM.UI.OpenToRequestsTab then
+        VM.UI:OpenToRequestsTab(true)
+    elseif VM.UI.OpenToVaultTab then
+        VM.UI:OpenToVaultTab(true)
     end
 end
 

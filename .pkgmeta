@@ -13,6 +13,7 @@ ignore:
   - CHANGELOG.md
   - CLAUDE.md
   - GEMINI.md
+  - tests
   - README.md
   - "*.bak"
   - "*.tmp"

@@ -26,18 +26,17 @@ Scanner.scanState = "READY" -- "READY" | "SCANNING" | "COMPLETE" | "STALE"
 
 -- Bank session detection (WoW Forever 1.15.x fires neither GUILDBANKFRAME_OPENED nor
 -- PLAYER_INTERACTION_MANAGER_FRAME_SHOW for the Guild Bank, and bag addons hide GuildBankFrame).
--- A session is opened by server responses (GUILDBANKBAGSLOTS_CHANGED / GUILDBANKLOG_UPDATE) and
--- closed by close hooks/events or by an unanswered heartbeat probe.
-local PROBE_IDLE_SEC = 20      -- send a heartbeat probe after this many seconds without bank traffic
-local PROBE_TIMEOUT_SEC = 4    -- no server answer within this window => bank is closed
+-- A session is opened by any Guild Bank server event and closed only by real close signals
+-- (CloseGuildBankFrame hook, frame hide, close events, loading screens) or a long idle timeout.
+-- No active probing: this server does not reliably answer repeated tab/log queries, and a missed
+-- answer must never block withdrawals or money log updates. Actions (Withdraw/Return/Scan) are
+-- always attempted directly and verified afterwards.
+local IDLE_CLOSE_SEC = 600     -- treat the session as ended after 10 minutes without any bank traffic
 local LOGIN_GUARD_SEC = 4      -- ignore bank traffic right after a loading screen
-local AUTO_OPEN_SUPPRESS_SEC = 90
+local AUTO_OPEN_SUPPRESS_SEC = 300
 local lastBankClosedAt = 0
 local lastCloseReason = nil
 local loginGuardUntil = 0
-local probeSentAt = nil
-local lastProbeAt = 0
-local probeCallbacks = {}
 local pendingRescan = false
 local pendingRescanChain = 0   -- caps back-to-back follow-up scans so echo events can never loop
 local moneyFollowupLeft = 0
@@ -334,16 +333,7 @@ function Scanner:GetScanStatus()
     end
 end
 
-local function FireProbeCallbacks(ok)
-    if #probeCallbacks == 0 then return end
-    local cbs = probeCallbacks
-    probeCallbacks = {}
-    for _, cb in ipairs(cbs) do
-        pcall(cb, ok)
-    end
-end
-
--- Heartbeat: keeps the bank session alive, detects closing via unanswered probes, runs money-log follow-ups
+-- Heartbeat: idle timeout, visible-frame keepalive and money-log follow-ups (no server probing)
 local heartbeatFrame = CreateFrame("Frame")
 heartbeatFrame:Hide()
 local heartbeatAccum = 0
@@ -352,86 +342,49 @@ heartbeatFrame:SetScript("OnUpdate", function(selfFrame, elapsed)
         moneyFollowupLeft = moneyFollowupLeft - elapsed
         if moneyFollowupLeft <= 0 then
             moneyFollowupLeft = 0
-            if Scanner.isBankOpen and QueryGuildBankLog then
+            if QueryGuildBankLog then
                 lastMoneyLogQueryAt = GetTime()
                 QueryGuildBankLog(GetMoneyLogTab())
-                Scanner:TriggerDebouncedScan(false, 0.9)
             end
+            Scanner:TriggerDebouncedScan(false, 0.9)
         end
     end
 
     heartbeatAccum = heartbeatAccum + elapsed
-    if heartbeatAccum < 0.5 then return end
+    if heartbeatAccum < 1 then return end
     heartbeatAccum = 0
 
-    local now = GetTime()
-    if not Scanner.isBankOpen and not probeSentAt and moneyFollowupLeft <= 0 then
-        selfFrame:Hide()
+    if not Scanner.isBankOpen then
+        if moneyFollowupLeft <= 0 then selfFrame:Hide() end
         return
     end
-
-    -- A visible default Guild Bank frame is proof enough that the session is alive
-    if Scanner.isBankOpen and GuildBankFrame and GuildBankFrame:IsVisible() then
+    local now = GetTime()
+    if GuildBankFrame and GuildBankFrame:IsVisible() then
         Scanner.lastBankActivityAt = now
     end
-
-    if probeSentAt then
-        if (now - probeSentAt) > PROBE_TIMEOUT_SEC then
-            probeSentAt = nil
-            FireProbeCallbacks(false)
-            if Scanner.isBankOpen then
-                Scanner:SetBankOpen(false, "probe-timeout")
-            end
-        end
-    elseif Scanner.isBankOpen and (now - (Scanner.lastBankActivityAt or now)) > PROBE_IDLE_SEC then
-        Scanner:SendProbe()
+    if (now - (Scanner.lastBankActivityAt or now)) > IDLE_CLOSE_SEC then
+        Scanner:SetBankOpen(false, "idle")
     end
 end)
 
-function Scanner:SendProbe()
-    if not QueryGuildBankTab and not QueryGuildBankLog then return end
-    local now = GetTime()
-    probeSentAt = now
-    lastProbeAt = now
-    local curTab = (GetCurrentGuildBankTab and GetCurrentGuildBankTab()) or 1
-    if not curTab or curTab < 1 then curTab = 1 end
-    if QueryGuildBankTab then QueryGuildBankTab(curTab) end
-    if QueryGuildBankLog then
-        lastMoneyLogQueryAt = now
-        QueryGuildBankLog(GetMoneyLogTab())
-    end
-    heartbeatFrame:Show()
-end
-
--- Confirms the Guild Bank is reachable (server answers a tab query) before running callback(true/false)
+-- Kept for compatibility: actions no longer wait for a probe, they are attempted and verified.
 function Scanner:EnsureBankOpen(callback)
-    local now = GetTime()
-    if self.isBankOpen and self.lastBankActivityAt and (now - self.lastBankActivityAt) <= 5 then
-        if callback then callback(true) end
-        return
-    end
-    if callback then table.insert(probeCallbacks, callback) end
-    if not probeSentAt then
-        self:SendProbe()
-    end
+    if callback then callback(true) end
 end
 
--- Called for every server-originated Guild Bank event. canOpen = event proves an open bank session.
-function Scanner:MarkBankActivity(reason, canOpen)
+-- Called for every Guild Bank server event. Any of them proves the bank is reachable.
+-- quiet = open the session without auto-opening the window (money/tab updates).
+function Scanner:MarkBankActivity(reason, quiet)
     if VM.isUnguilded or not IsInGuild() then return end
     local now = GetTime()
     if not self.isBankOpen and now < loginGuardUntil then return end
     self.lastBankActivityAt = now
-    if probeSentAt then
-        probeSentAt = nil
+    if not self.isBankOpen then
+        self:SetBankOpen(true, reason, quiet)
     end
-    if not self.isBankOpen and canOpen then
-        self:SetBankOpen(true, reason)
-    end
-    FireProbeCallbacks(true)
 end
 
-function Scanner:SetBankOpen(open, reason)
+function Scanner:SetBankOpen(open, reason, quiet)
     if open then
         if self.isBankOpen then return end
         self.isBankOpen = true
@@ -444,8 +397,8 @@ function Scanner:SetBankOpen(open, reason)
         lastBankMoneyDrop = { amount = 0, at = 0 }
         heartbeatFrame:Show()
 
-        -- Do not re-pop the window if a heartbeat timeout falsely ended the previous session moments ago
-        local suppressAuto = (lastCloseReason == "probe-timeout") and ((GetTime() - lastBankClosedAt) < AUTO_OPEN_SUPPRESS_SEC)
+        -- No window pop-up for quiet (money/tab) openings or right after an idle timeout at the same bank
+        local suppressAuto = quiet or ((lastCloseReason == "idle") and ((GetTime() - lastBankClosedAt) < AUTO_OPEN_SUPPRESS_SEC))
         if not suppressAuto and VM.Fulfillment and VM.Fulfillment.OnGuildBankOpened then
             if C_Timer and C_Timer.After then
                 C_Timer.After(0.25, function()
@@ -493,7 +446,7 @@ end
 local function HookGuildBankFrame()
     if GuildBankFrame and not GuildBankFrame.__vmHooked and GuildBankFrame.HookScript then
         GuildBankFrame.__vmHooked = true
-        GuildBankFrame:HookScript("OnShow", function() Scanner:MarkBankActivity("frame-show", true) end)
+        GuildBankFrame:HookScript("OnShow", function() Scanner:MarkBankActivity("frame-show", false) end)
         GuildBankFrame:HookScript("OnHide", function() Scanner:SetBankOpen(false, "frame-hide") end)
     end
 end
@@ -534,7 +487,6 @@ function Scanner:Init()
     SafeRegister(f, "GUILDBANK_UPDATE_WITHDRAWMONEY")
     SafeRegister(f, "GUILDBANK_UPDATE_TABS")
     SafeRegister(f, "PLAYER_ENTERING_WORLD")
-    SafeRegister(f, "PLAYER_STOPPED_MOVING")
     SafeRegister(f, "ADDON_LOADED")
 
     self:InstallCloseHooks()
@@ -553,13 +505,6 @@ function Scanner:Init()
         if VM.isUnguilded then return end
         VM:LogDebug("BankScanner event: " .. tostring(event) .. (arg1 ~= nil and (" " .. tostring(arg1)) or ""))
 
-        if event == "PLAYER_STOPPED_MOVING" then
-            -- Walking away ends the banker interaction without any event: verify sooner
-            if self.isBankOpen and not probeSentAt and (GetTime() - lastProbeAt) > 5 then
-                self:SendProbe()
-            end
-            return
-        end
 
         if event == "GUILDBANKFRAME_CLOSED" then
             self:SetBankOpen(false, event)
@@ -570,19 +515,19 @@ function Scanner:Init()
             return
         end
         if event == "GUILDBANKFRAME_OPENED" then
-            self:MarkBankActivity(event, true)
+            self:MarkBankActivity(event, false)
             return
         end
         if event == "PLAYER_INTERACTION_MANAGER_FRAME_SHOW" then
-            if IsGuildBankerInteraction(arg1) then self:MarkBankActivity(event, true) end
+            if IsGuildBankerInteraction(arg1) then self:MarkBankActivity(event, false) end
             return
         end
 
-        -- Slot/log responses only arrive while the bank is reachable => they open a session.
-        -- Money/tab updates only renew an existing session (they may be pushed guild-wide).
-        local opensSession = (event == "GUILDBANKBAGSLOTS_CHANGED" or event == "GUILDBANKLOG_UPDATE")
+        -- Every Guild Bank event opens/renews the session. Slot/log answers come from opening the
+        -- bank (window may auto-open); money/tab updates open it quietly.
+        local quiet = not (event == "GUILDBANKBAGSLOTS_CHANGED" or event == "GUILDBANKLOG_UPDATE")
         local wasOpen = self.isBankOpen
-        self:MarkBankActivity(event, opensSession)
+        self:MarkBankActivity(event, quiet)
         if not self.isBankOpen then return end
         if not wasOpen then
             -- SetBankOpen already requested all tabs/logs and scheduled the initial scan
@@ -691,7 +636,6 @@ end
 
 -- Called by Fulfillment immediately after a Prepare withdrawal finishes so stock and logs refresh cleanly
 function Scanner:SchedulePostWithdrawScan()
-    if not self:IsBankOpen() then return end
     if VM.Fulfillment and VM.Fulfillment.isWithdrawing then return end
     ignoreSlotEventsUntil = 0
     ignoreLogEventsUntil = 0
@@ -733,16 +677,7 @@ function Scanner:ForceScan()
         VM:Print("Please wait for the active withdrawal to finish before scanning.")
         return
     end
-    if not self:IsBankOpen() then
-        self:EnsureBankOpen(function(ok)
-            if ok then
-                Scanner:ForceScan()
-            else
-                VM:Print("Open the Guild Bank to scan tabs and logs.")
-            end
-        end)
-        return
-    end
+    -- Attempted even when no session was detected: queries are simply ignored if the bank is closed
     local now = time()
     if (now - lastScanTime) < SCAN_COOLDOWN then
         VM:Print("Please wait a moment before scanning again.")

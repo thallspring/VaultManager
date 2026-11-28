@@ -433,6 +433,7 @@ end
 function UI:Toggle()
     if not mainFrame then self:CreateMainFrame() end
     if mainFrame:IsShown() then
+        UI.userClosedAt = GetTime()
         mainFrame:Hide()
         HideAllPopups()
     else
@@ -452,8 +453,16 @@ function UI:Toggle()
     end
 end
 
-function UI:OpenToRequestsTab()
+-- Auto-open at the Guild Bank: keep the window up for a moment in case the bank UI (or a bag addon)
+-- closes special windows while it opens; a deliberate close by the player is always respected.
+local AUTO_OPEN_STICKY_SEC = 2.0
+function UI:MarkAutoOpened()
+    self.autoOpenedAt = GetTime()
+end
+
+function UI:OpenToRequestsTab(isAuto)
     if not mainFrame then self:CreateMainFrame() end
+    if isAuto then self:MarkAutoOpened() end
     if VM.SwitchGuildContext then
         VM:SwitchGuildContext("UI_OPEN_REQUESTS")
     end
@@ -467,8 +476,9 @@ function UI:OpenToRequestsTab()
     self:RefreshAll()
 end
 
-function UI:OpenToVaultTab()
+function UI:OpenToVaultTab(isAuto)
     if not mainFrame then self:CreateMainFrame() end
+    if isAuto then self:MarkAutoOpened() end
     if VM.SwitchGuildContext then
         VM:SwitchGuildContext("UI_OPEN_VAULT")
     end
@@ -1571,6 +1581,15 @@ function UI:CreateMainFrame()
     mainFrame:SetFrameLevel(100)
     mainFrame:SetClampedToScreen(true)
     mainFrame:SetMovable(true)
+    -- Height can be dragged larger for a better overview (width stays fixed: rows use fixed columns)
+    if mainFrame.SetResizable then mainFrame:SetResizable(true) end
+    local maxH = math.max(560, math.floor(((GetScreenHeight and GetScreenHeight()) or 1080) - 40))
+    if mainFrame.SetResizeBounds then
+        mainFrame:SetResizeBounds(800, 560, 800, maxH)
+    else
+        if mainFrame.SetMinResize then mainFrame:SetMinResize(800, 560) end
+        if mainFrame.SetMaxResize then mainFrame:SetMaxResize(800, maxH) end
+    end
     mainFrame:EnableMouse(true)
     mainFrame:EnableKeyboard(true)
     if mainFrame.SetPropagateKeyboardInput then
@@ -1609,6 +1628,7 @@ function UI:CreateMainFrame()
             elseif bankValDropdownFrame and bankValDropdownFrame:IsShown() then
                 bankValDropdownFrame:Hide()
             else
+                UI.userClosedAt = GetTime()
                 mainFrame:Hide()
             end
         elseif key == "TAB" or key == "PADLSHOULDER" or key == "PADRSHOULDER" then
@@ -1655,10 +1675,57 @@ function UI:CreateMainFrame()
     mainFrame:Hide()
     table.insert(UISpecialFrames, "VaultManagerMainFrame")
 
+    mainFrame:SetScript("OnHide", function(selfFrame)
+        local now = GetTime()
+        local autoAt = UI.autoOpenedAt or 0
+        local userAt = UI.userClosedAt or 0
+        if (now - autoAt) < AUTO_OPEN_STICKY_SEC and userAt < autoAt and C_Timer and C_Timer.After then
+            -- Hidden by something else right after auto-opening (CloseSpecialWindows etc.): show again
+            C_Timer.After(0.05, function()
+                if not selfFrame:IsShown() and (UI.userClosedAt or 0) < autoAt then
+                    selfFrame:Show()
+                    UI:RefreshAll()
+                end
+            end)
+        end
+    end)
+
     local prefs = GetUIPrefs()
     if prefs.uiScale then
         mainFrame:SetScale(prefs.uiScale)
     end
+    if prefs.windowHeight and prefs.windowHeight >= 560 then
+        mainFrame:SetHeight(math.min(prefs.windowHeight, maxH))
+    end
+
+    local resizeGrip = CreateFrame("Button", nil, mainFrame)
+    resizeGrip:SetSize(16, 16)
+    resizeGrip:SetPoint("BOTTOMRIGHT", -2, 2)
+    resizeGrip:SetFrameLevel(mainFrame:GetFrameLevel() + 20)
+    if resizeGrip.SetNormalTexture then
+        resizeGrip:SetNormalTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Up")
+        resizeGrip:SetHighlightTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Highlight")
+        resizeGrip:SetPushedTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Down")
+    end
+    resizeGrip:SetScript("OnMouseDown", function()
+        mainFrame:StartSizing("BOTTOM")
+    end)
+    resizeGrip:SetScript("OnMouseUp", function()
+        mainFrame:StopMovingOrSizing()
+        local h = math.floor((mainFrame:GetHeight() or 560) + 0.5)
+        GetUIPrefs().windowHeight = h
+        -- Re-anchor at the top-left so the saved position matches the new size
+        local point, _, relativePoint, xOfs, yOfs = mainFrame:GetPoint()
+        GetUIPrefs().windowPos = { point = point, relativePoint = relativePoint, xOfs = xOfs, yOfs = yOfs }
+        UI:RefreshAll()
+    end)
+    resizeGrip:SetScript("OnEnter", function(selfBtn)
+        GameTooltip:SetOwner(selfBtn, "ANCHOR_TOP")
+        GameTooltip:SetText("Drag to resize height", 1, 1, 1)
+        GameTooltip:Show()
+    end)
+    resizeGrip:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    mainFrame.resizeGrip = resizeGrip
     if prefs.windowPos then
         mainFrame:ClearAllPoints()
         mainFrame:SetPoint(prefs.windowPos.point or "CENTER", UIParent, prefs.windowPos.relativePoint or "CENTER", prefs.windowPos.xOfs or 0, prefs.windowPos.yOfs or 0)
@@ -1679,6 +1746,9 @@ function UI:CreateMainFrame()
     local title = headerBar:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
     title:SetPoint("LEFT", 14, 0)
     local ver = "v" .. (VM.GetAddonVersion and VM:GetAddonVersion() or "1.4.3")
+    if VM.BUILD then
+        ver = ver .. "  |cffffaa00dev " .. tostring(VM.BUILD):match("^(%S+)") .. "|r"
+    end
     title:SetText(string.format("|cff26a6f2VAULT|r |cffffffffMANAGER|r |cff8899aa%s|r", ver))
 
     -- Topbar Guild Sync status button (replaces duplicate Scan Bank button)
@@ -1708,6 +1778,7 @@ function UI:CreateMainFrame()
     local closeBtn = CreateModernButton(headerBar, 24, 24, "X", THEME.red)
     closeBtn:SetPoint("RIGHT", -8, 0)
     closeBtn:SetScript("OnClick", function()
+        UI.userClosedAt = GetTime()
         mainFrame:Hide()
         HideAllPopups()
     end)
@@ -4538,7 +4609,7 @@ function UI:BuildSettingsPanel(panel)
 
     -- Dynamic container for Sections 2, 3, and 4
     local lower = CreateFrame("Frame", nil, panel)
-    lower:SetSize(744, 220)
+    lower:SetSize(744, 300)
     lower:SetPoint("TOPLEFT", 10, -100)
     panel.lowerSections = lower
 
@@ -4758,6 +4829,31 @@ function UI:BuildSettingsPanel(panel)
     maintDesc:SetJustifyH("LEFT")
     maintDesc:SetText("Clears bank & request cache (keeps ledger and rules).")
     panel.maintDesc = maintDesc
+
+    -- Section 5: Officer Ranks (guild-wide, synced between officers)
+    local rankTitle = lower:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    rankTitle:SetPoint("TOPLEFT", 0, -224)
+    rankTitle:SetText("|cff26a6f2Officer Ranks|r  |cff999999— ranks that may approve, withdraw and manage the Ledger (Guild Master always included)|r")
+
+    panel.rankChecks = {}
+    for i = 1, 10 do
+        local cb = CreateFrame("CheckButton", nil, lower, "UICheckButtonTemplate")
+        cb:SetSize(20, 20)
+        local col = (i - 1) % 5
+        local rowN = math.floor((i - 1) / 5)
+        cb:SetPoint("TOPLEFT", col * 148, -244 - rowN * 22)
+        cb.label = cb:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        cb.label:SetPoint("LEFT", cb, "RIGHT", 2, 0)
+        cb.label:SetWidth(122)
+        cb.label:SetJustifyH("LEFT")
+        cb:SetScript("OnClick", function(selfCb)
+            if not selfCb.rankIndex then return end
+            VM:SetOfficerRank(selfCb.rankIndex, selfCb:GetChecked() and true or false)
+            UI:RefreshSettings()
+        end)
+        cb:Hide()
+        panel.rankChecks[i] = cb
+    end
 end
 
 function UI:RefreshSettings()
@@ -4786,6 +4882,25 @@ function UI:RefreshSettings()
     if panel.autoOpenBankCb then panel.autoOpenBankCb:SetChecked(uiPrefs.autoOpenAtBank ~= false) end
     if panel.chatNotifCb then panel.chatNotifCb:SetChecked(uiPrefs.enableChatNotifications ~= false) end
     if panel.newerVerNotifCb then panel.newerVerNotifCb:SetChecked(uiPrefs.notifyNewerVersion ~= false) end
+
+    if panel.rankChecks then
+        local ranks = VM:GetGuildRankList()
+        for i, cb in ipairs(panel.rankChecks) do
+            local r = ranks[i]
+            if r then
+                cb.rankIndex = r.index
+                cb.label:SetText(r.name)
+                cb:SetChecked(VM:IsOfficerRank(r.index))
+                local editable = isOff and r.index ~= 0
+                if cb.SetEnabled then cb:SetEnabled(editable) end
+                cb.label:SetTextColor(editable and 1 or 0.6, editable and 1 or 0.6, editable and 1 or 0.6)
+                cb:Show()
+            else
+                cb.rankIndex = nil
+                cb:Hide()
+            end
+        end
+    end
 
     if panel.diagInfo then
         local gKey = VM:GetActiveGuildKey() or "None"
@@ -5164,6 +5279,49 @@ end
 --------------------------------------------------------------------------------
 -- RELOG REMINDER POPUP (UNFULFILLED PREPARED REQUESTS)
 --------------------------------------------------------------------------------
+-- Small reminder shown to officers at the Guild Bank when auto-open is off (or as a fallback)
+local bankReminderFrame
+function UI:ShowBankReminder(pendingCount, approvedCount, preparedCount)
+    if not bankReminderFrame then
+        bankReminderFrame = CreateFrame("Frame", "VaultManagerBankReminder", UIParent, "BackdropTemplate")
+        bankReminderFrame:SetSize(330, 64)
+        bankReminderFrame:SetPoint("TOP", UIParent, "TOP", 0, -140)
+        bankReminderFrame:SetFrameStrata("DIALOG")
+        bankReminderFrame:SetClampedToScreen(true)
+        bankReminderFrame:SetMovable(true)
+        bankReminderFrame:EnableMouse(true)
+        bankReminderFrame:RegisterForDrag("LeftButton")
+        bankReminderFrame:SetScript("OnDragStart", bankReminderFrame.StartMoving)
+        bankReminderFrame:SetScript("OnDragStop", bankReminderFrame.StopMovingOrSizing)
+        ApplyModernBackdrop(bankReminderFrame, THEME.bg, THEME.gold)
+        bankReminderFrame.text = bankReminderFrame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        bankReminderFrame.text:SetPoint("TOPLEFT", 10, -10)
+        bankReminderFrame.text:SetWidth(310)
+        bankReminderFrame.text:SetJustifyH("LEFT")
+        local openBtn = CreateModernButton(bankReminderFrame, 120, 20, "Open Requests", THEME.accent)
+        openBtn:SetPoint("BOTTOMLEFT", 10, 8)
+        openBtn:SetScript("OnClick", function()
+            bankReminderFrame:Hide()
+            UI:OpenToRequestsTab()
+        end)
+        local closeBtn = CreateModernButton(bankReminderFrame, 60, 20, "Dismiss", THEME.border)
+        closeBtn:SetPoint("BOTTOMRIGHT", -10, 8)
+        closeBtn:SetScript("OnClick", function() bankReminderFrame:Hide() end)
+        bankReminderFrame.elapsed = 0
+        bankReminderFrame:SetScript("OnUpdate", function(selfFrame, elapsed)
+            selfFrame.elapsed = selfFrame.elapsed + elapsed
+            if selfFrame.elapsed > 20 then selfFrame:Hide() end
+        end)
+    end
+    local parts = {}
+    if (pendingCount or 0) > 0 then table.insert(parts, string.format("|cffffcc33%d pending|r", pendingCount)) end
+    if (approvedCount or 0) > 0 then table.insert(parts, string.format("|cff26a6f2%d approved|r", approvedCount)) end
+    if (preparedCount or 0) > 0 then table.insert(parts, string.format("|cff44dd77%d prepared by you|r", preparedCount)) end
+    bankReminderFrame.text:SetText("|cff26a6f2Vault Manager|r — Guild Bank requests: " .. table.concat(parts, ", "))
+    bankReminderFrame.elapsed = 0
+    bankReminderFrame:Show()
+end
+
 function UI:CreateRelogReminderFrame()
     relogReminderFrame = CreateFrame("Frame", "VaultManagerRelogReminder", UIParent, "BackdropTemplate")
     relogReminderFrame:SetSize(400, 220)

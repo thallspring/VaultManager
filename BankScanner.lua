@@ -377,14 +377,42 @@ end
 function Scanner:MarkBankActivity(reason, quiet)
     if VM.isUnguilded or not IsInGuild() then return end
     local now = GetTime()
-    if not self.isBankOpen and now < loginGuardUntil then return end
+    if not self.isBankOpen then
+        if now < loginGuardUntil then return end
+        -- Money/tab updates can arrive without standing at the bank (e.g. after login): they never
+        -- start a session, they only keep an open one alive
+        if quiet then return end
+    end
     self.lastBankActivityAt = now
     if not self.isBankOpen then
-        self:SetBankOpen(true, reason, quiet)
+        self:SetBankOpen(true, reason)
+    elseif reason == "frame-show" and self.autoOpenSessionId ~= self.sessionId then
+        -- The bank window really appeared in a session that had not auto-opened yet
+        self:ScheduleAutoOpen()
     end
 end
 
-function Scanner:SetBankOpen(open, reason, quiet)
+-- Auto-open Vault Manager for the current bank session (once per session, several attempts because
+-- bank/bag addons may hide or re-show frames during the first seconds)
+function Scanner:ScheduleAutoOpen()
+    if not (VM.Fulfillment and VM.Fulfillment.OnGuildBankOpened) then return end
+    self.autoOpenSessionId = self.sessionId
+    local sid = self.sessionId
+    local openedAt = GetTime()
+    local function TryAutoOpen(attempt)
+        if Scanner.sessionId ~= sid then return end
+        VM.Fulfillment:OnGuildBankOpened(attempt, openedAt)
+    end
+    if C_Timer and C_Timer.After then
+        C_Timer.After(0.25, function() TryAutoOpen(1) end)
+        C_Timer.After(1.5, function() TryAutoOpen(2) end)
+        C_Timer.After(3.0, function() TryAutoOpen(3) end)
+    else
+        TryAutoOpen(1)
+    end
+end
+
+function Scanner:SetBankOpen(open, reason)
     if open then
         if self.isBankOpen then return end
         self.isBankOpen = true
@@ -397,27 +425,14 @@ function Scanner:SetBankOpen(open, reason, quiet)
         lastBankMoneyDrop = { amount = 0, at = 0 }
         heartbeatFrame:Show()
 
-        -- No window pop-up for quiet (money/tab) openings or right after an idle timeout at the same bank
-        local suppressAuto = quiet or ((lastCloseReason == "idle") and ((GetTime() - lastBankClosedAt) < AUTO_OPEN_SUPPRESS_SEC))
+        -- No window pop-up right after an idle timeout at the same bank
+        local suppressAuto = (lastCloseReason == "idle") and ((GetTime() - lastBankClosedAt) < AUTO_OPEN_SUPPRESS_SEC)
         self.sessionOpenedAt = GetTime()
         self.sessionId = (self.sessionId or 0) + 1
         if suppressAuto then
-            VM:LogDebug("AutoOpen: suppressed (" .. (quiet and "quiet open" or "recent idle close") .. ")")
-        elseif VM.Fulfillment and VM.Fulfillment.OnGuildBankOpened then
-            -- Several attempts: bank/bag addons may hide or re-show frames during the first second
-            local sid = self.sessionId
-            local openedAt = self.sessionOpenedAt
-            local function TryAutoOpen(attempt)
-                if Scanner.sessionId ~= sid then return end
-                VM.Fulfillment:OnGuildBankOpened(attempt, openedAt)
-            end
-            if C_Timer and C_Timer.After then
-                C_Timer.After(0.25, function() TryAutoOpen(1) end)
-                C_Timer.After(1.5, function() TryAutoOpen(2) end)
-                C_Timer.After(3.0, function() TryAutoOpen(3) end)
-            else
-                TryAutoOpen(1)
-            end
+            VM:LogDebug("AutoOpen: suppressed (recent idle close)")
+        else
+            self:ScheduleAutoOpen()
         end
 
         suppressChatPrint = false

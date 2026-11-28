@@ -313,6 +313,7 @@ end
 -- Peers' data epochs (from HELLO); messages from clients still on an older epoch are ignored so
 -- wiped data can never be pushed back after a guild-wide reset
 local peerEpochs = {}
+Comms.maxSeenEpoch = 0     -- highest data epoch seen from any peer (incl. old 1.4.x resets)
 local lastEpochRelayAt = 0
 local lastResetRelayAt = 0
 
@@ -440,6 +441,7 @@ function Comms:OnMessageReceived(msg, sender)
     if cmd == "EPOCH" then
         -- Accepted only from an admin-rank sender (server-verified) and approved by the Guild Master
         local peerEpoch = tonumber(parts[2]) or 1
+        if peerEpoch > (Comms.maxSeenEpoch or 0) then Comms.maxSeenEpoch = peerEpoch end
         local approvedBy = UnescapeStr(parts[3] or "")
         local approvedAt = tonumber(parts[4]) or 0
         if not VM:IsAdminName(sender) then return end
@@ -524,6 +526,7 @@ function Comms:OnMessageReceived(msg, sender)
         end
 
         peerEpochs[sender] = peerEpoch
+        if peerEpoch > (Comms.maxSeenEpoch or 0) then Comms.maxSeenEpoch = peerEpoch end
         local myEpoch = VM.db.dbEpoch or 1
         if peerEpoch < myEpoch then
             -- Peer missed a reset: admins re-announce the GM-approved epoch so it can catch up

@@ -4,7 +4,7 @@ _G.VaultManager = VM
 VM.PREFIX = "VMGR_V1"
 VM.VERSION = 7
 -- Development build marker (the .toc version stays at the last release until in-game tests pass)
-VM.BUILD = "1.5.0-dev.8 (2026-11-28)"
+VM.BUILD = "1.5.0-dev.9 (2026-11-28)"
 VM.OFFICER_MAX_RANK_INDEX = 1
 -- Admin ranks (by index, never by name): 0 = Guild Master, 1 = the guild's built-in officer rank.
 -- Only admin ranks may change Vault Manager configuration (officer ranks, tab rules, guild reset).
@@ -569,11 +569,24 @@ function VM:ResetGuildData(requestedBy)
         return
     end
     local me = self:CanonicalActor(self:GetPlayerName())
-    self.db.dbEpoch = (self.db.dbEpoch or 1) + 1
+    -- Always above any epoch seen in the guild (older 1.4.x clients could have counted it up themselves),
+    -- otherwise those clients would ignore this reset
+    local seen = (self.Comms and self.Comms.maxSeenEpoch) or 0
+    self.db.dbEpoch = math.max(self.db.dbEpoch or 1, seen) + 1
     self:WipeGuildData()
     self.db.epochApprovedBy = me
     self.db.epochAt = time()
-    if self.Comms then self.Comms:BroadcastEpoch() end
+    if self.Comms then
+        self.Comms:BroadcastEpoch()
+        -- Older 1.4.x clients also wipe tab rules and alt links on a reset: re-send the configuration
+        -- right away (they accept RULE/MAIN from the Guild Master)
+        local comms = self.Comms
+        local function ResendConfig()
+            comms:BroadcastTabRules(0)
+            comms:BroadcastMains(0)
+        end
+        if C_Timer and C_Timer.After then C_Timer.After(3, ResendConfig) else ResendConfig() end
+    end
     self:Print(string.format("|cffffaa00Guild-wide reset done (epoch %d%s). All members' data is cleared; it is rebuilt from the Guild Bank logs on the next scan.|r",
         self.db.dbEpoch, (requestedBy and requestedBy ~= "") and (", requested by " .. requestedBy) or ""))
     if self.BankScanner and self.BankScanner:IsBankOpen() then

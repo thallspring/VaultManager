@@ -33,18 +33,27 @@ recv(string.format("RESETREQ|%s|%s|%d", pending.id, pending.by, pending.at), "Th
 check("GM gets approval popup", M.lastPopup and M.lastPopup.which == "VAULTMANAGER_RESET_APPROVE")
 VM:ApproveGuildReset(pending.id); M.advance(2)
 check("GM reset wipes data, keeps tab rules", ledgerCount() == 0 and next(VM.db.requests) == nil and VM.db.tabRules[1] and VM.db.tabRules[1].mode == "PERCENT")
-check("epoch bumped and announced with GM approval", VM.db.dbEpoch == 2 and sentMatching("^EPOCH|2|Boss Master|") ~= nil)
+local newEpoch = VM.db.dbEpoch
+check("epoch bumped above every epoch seen and announced with GM approval", newEpoch > 50 and sentMatching("^EPOCH|" .. newEpoch .. "|Boss Master|") ~= nil)
+M.advance(15)
+check("config re-sent for older 1.4.x clients (tab rules)", sentMatching("^RULE|1|PERCENT|") ~= nil)
 
 -- 4) A member client (still epoch 1) receives the EPOCH from an admin -> adopts
 M.playerRank = 3; M.playerName = "Mango"
 VM.db.dbEpoch = 1; VM.Ledger:RecordGoldDeposit("Mango", 1234, "MANUAL_GOLD")
-recv("EPOCH|2|Boss Master|1764300000", "Boss")
-check("member adopts GM-approved reset", VM.db.dbEpoch == 2 and ledgerCount() == 0)
+recv("EPOCH|" .. newEpoch .. "|Boss Master|1764300000", "Boss")
+check("member adopts GM-approved reset", VM.db.dbEpoch == newEpoch and ledgerCount() == 0)
 
 -- 5) A peer that missed the reset (epoch 1) cannot push old data back
 recv("HELLO|7|1|0|0|0|0|1764300000|1.4.3", "Raidboss")
 recv("TX|OLD_1|IN|Raidboss Lead|0|1|90000|0|1764200000|Raidboss|BANK_MONEY_LOG|Gold Deposit|GOLD|0|1764200000|||||||0|", "Raidboss")
 check("old-epoch peer data ignored", VM.db.ledger.OLD_1 == nil)
+
+-- 5b) An old 1.4.x client already counted the epoch up to 5: the next GM reset must go above it
+M.playerRank = 0; M.playerName = "Boss"
+recv("HELLO|6|" .. (newEpoch + 3) .. "|0|0|0|0|0|1.4.3", "Mango")
+VM:ResetGuildData(); M.advance(1)
+check("GM reset epoch goes above epochs seen from old clients", VM.db.dbEpoch == newEpoch + 4)
 
 -- 6) Decline path
 M.playerRank = 1; M.playerName = "Thallock"

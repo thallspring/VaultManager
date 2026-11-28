@@ -271,6 +271,18 @@ local function ApplyButtonState(btn, state)
     end
 end
 
+-- Tooltip help on any frame
+local function AttachHelp(frame, text)
+    if not frame or not text then return end
+    frame.helpText = text
+    frame:HookScript("OnEnter", function(selfFrame)
+        GameTooltip:SetOwner(selfFrame, "ANCHOR_TOP")
+        GameTooltip:SetText(selfFrame.helpText, 1, 1, 1, 1, true)
+        GameTooltip:Show()
+    end)
+    frame:HookScript("OnLeave", function() GameTooltip:Hide() end)
+end
+
 local function CreateDebouncer(delaySec, callback)
     local f = CreateFrame("Frame")
     f:Hide()
@@ -707,6 +719,113 @@ end
 --------------------------------------------------------------------------------
 -- REQUESTS HELP MODAL
 --------------------------------------------------------------------------------
+--------------------------------------------------------------------------------
+-- PER-TAB HELP (what everyone can do vs. what officers can do)
+--------------------------------------------------------------------------------
+local TAB_HELP = {
+    VAULT = {
+        title = "Vault & Requests — Help",
+        body =
+            "|cff26a6f2Everyone|r\n" ..
+            "• Shows what is in the Guild Bank, per bank tab and category. Data comes from the last scan by any member with the addon.\n" ..
+            "• The banner shows the tab rule: |cff44dd77Free-for-All|r (you pay nothing), |cffffcc33% of AH|r (you pay that share of the auction price, min 1g) or |cffff5555Locked|r (no requests).\n" ..
+            "• Pick an amount and click |cff26a6f2Request|r. One request can hold up to 6 stacks. Your open request is shown as |cff44dd77Requested|r with a |cffff5555Cancel|r button.\n" ..
+            "• |cff44dd77Avail|r subtracts items already requested by others (Res).\n" ..
+            "• |cff26a6f2Bank Value|r shows the current worth of the bank at live AH prices.\n\n" ..
+            "|cffffaa00Officers|r\n" ..
+            "• |cff26a6f2Assign|r gives an item to a member directly (logged in the Ledger with the tab's price).\n" ..
+            "• |cff26a6f2Scan Now|r rescans the open Guild Bank (normally automatic).",
+    },
+    LEDGER = {
+        title = "Ledger — Help",
+        body =
+            "|cff26a6f2Everyone|r\n" ..
+            "• Every deposit and withdrawal, grouped by main character (alts are counted under their main).\n" ..
+            "• |cff44dd77Donated|r = what a member gave the bank. |cffff6666Received|r = what they took or bought (at the price they were charged).\n" ..
+            "• Items are valued at the current AH price, so taking something out and putting it back always nets to 0g.\n" ..
+            "• |cff26a6f2GUILD BANK / OPERATIONS|r holds guild expenses (Raid, Member, Tabs). |cff26a6f2SUBSIDY|r = the discount members got on % of AH tabs; |cff44dd77SURPLUS|r = extra from the 1g minimum.\n" ..
+            "• Tags: |cff44dd77[PAYMENT]|r a member's payment for a request, |cff26a6f2[TRANSFER]|r an officer depositing collected payments (not a donation), |cffffd700[RETURN PAIRED]|r a withdrawal and its return cancelled out, |cffff5555[UNPAID]|r a written-off debt.\n" ..
+            "• |cffff5555Unpaid|r next to a member = money they still owe or that was written off.\n\n" ..
+            "|cffffaa00Officers|r\n" ..
+            "• |cff26a6f2Reassign|r moves an entry to another member or to the guild (e.g. raid loot deposited by a raider).\n" ..
+            "• |cffffd700Pair|r cancels a withdrawal against its return. |cffff5555X|r deletes an entry for the whole guild (it is not re-imported from the bank log).\n" ..
+            "• |cffffd700+ Expense|r logs a guild expense; |cff44dd77+ Log Gold|r logs gold given outside the bank.",
+    },
+    RANKING = {
+        title = "Ranking — Help",
+        body =
+            "|cff26a6f2Everyone|r\n" ..
+            "• Contribution per main character: |cff44dd77Contributed|r (deposits and payments) minus |cffff6666Withdrawn|r (items taken or bought).\n" ..
+            "• Values use the current AH price. Click a column to sort, the period button to limit it to this or last month.\n" ..
+            "• |cff999999Free-for-All|r items can be left out with the checkbox. Former members (Legacy) are shown at the bottom.\n" ..
+            "• Click a member to see the entries behind the numbers.\n\n" ..
+            "|cffffaa00Officers|r\n" ..
+            "• Something looks wrong? Fix it in the Ledger with |cff26a6f2Reassign|r, |cffffd700Pair|r or delete.",
+    },
+    ROSTER = {
+        title = "Roster & Mains — Help",
+        body =
+            "|cff26a6f2Everyone|r\n" ..
+            "• Shows guild members grouped by rank, with their alts under the main character.\n" ..
+            "• Linking alts to a main makes the Ledger and Ranking count all characters of one player together.\n\n" ..
+            "|cffffaa00Officers|r\n" ..
+            "• |cff26a6f2Set as Alt|r / |cffff5555Unlink|r manage alt links for the whole guild.\n" ..
+            "• |cff26a6f2Auto-Suggest Alts|r proposes links from matching notes; check them before saving.",
+    },
+}
+
+local tabHelpFrame
+function UI:ShowTabHelp(key)
+    local help = TAB_HELP[key]
+    if not help then return end
+    if not tabHelpFrame then
+        tabHelpFrame = CreateFrame("Frame", "VaultManagerTabHelp", UIParent, "BackdropTemplate")
+        tabHelpFrame:SetSize(520, 380)
+        tabHelpFrame:SetPoint("CENTER")
+        tabHelpFrame:SetFrameStrata("FULLSCREEN_DIALOG")
+        tabHelpFrame:SetFrameLevel(210)
+        tabHelpFrame:SetClampedToScreen(true)
+        tabHelpFrame:SetMovable(true)
+        tabHelpFrame:EnableMouse(true)
+        tabHelpFrame:RegisterForDrag("LeftButton")
+        tabHelpFrame:SetScript("OnDragStart", tabHelpFrame.StartMoving)
+        tabHelpFrame:SetScript("OnDragStop", tabHelpFrame.StopMovingOrSizing)
+        ApplyModernBackdrop(tabHelpFrame, THEME.bg, THEME.accent)
+        table.insert(UISpecialFrames, "VaultManagerTabHelp")
+        tabHelpFrame.title = tabHelpFrame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        tabHelpFrame.title:SetPoint("TOPLEFT", 14, -12)
+        local closeBtn = CreateModernButton(tabHelpFrame, 22, 22, "X", THEME.red)
+        closeBtn:SetPoint("TOPRIGHT", -10, -10)
+        closeBtn:SetScript("OnClick", function() tabHelpFrame:Hide() end)
+        tabHelpFrame.body = tabHelpFrame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        tabHelpFrame.body:SetPoint("TOPLEFT", 14, -38)
+        tabHelpFrame.body:SetPoint("BOTTOMRIGHT", -14, 14)
+        tabHelpFrame.body:SetJustifyH("LEFT")
+        tabHelpFrame.body:SetJustifyV("TOP")
+    end
+    if tabHelpFrame:IsShown() and tabHelpFrame.key == key then
+        tabHelpFrame:Hide()
+        return
+    end
+    tabHelpFrame.key = key
+    tabHelpFrame.title:SetText("|cff26a6f2" .. help.title .. "|r")
+    tabHelpFrame.body:SetText(help.body)
+    tabHelpFrame:Show()
+end
+
+local function AddTabHelpButton(parent, key, anchorTo, anchorPoint, relPoint, x, y)
+    local b = CreateModernButton(parent, 24, 22, "?", THEME.accent)
+    b:SetPoint(anchorPoint, anchorTo, relPoint, x, y)
+    b:SetScript("OnClick", function() UI:ShowTabHelp(key) end)
+    b:HookScript("OnEnter", function(selfBtn)
+        GameTooltip:SetOwner(selfBtn, "ANCHOR_TOP")
+        GameTooltip:SetText("Help: what this tab shows and who can do what", 1, 1, 1, 1, true)
+        GameTooltip:Show()
+    end)
+    b:HookScript("OnLeave", function() GameTooltip:Hide() end)
+    return b
+end
+
 function UI:CreateRequestsHelpModal()
     requestsHelpFrame = CreateFrame("Frame", "VaultManagerRequestsHelpModal", UIParent, "BackdropTemplate")
     requestsHelpFrame:SetSize(520, 460)
@@ -743,8 +862,8 @@ function UI:CreateRequestsHelpModal()
         "• |cff44dd77PREPARED|r — Withdrawn by an officer and awaiting Mail or Trade delivery.\n" ..
         "• |cffff5555UNPAID|r — Delivered by trade but not (fully) paid.\n" ..
         "• |cff999999HISTORY|r — Fulfilled, rejected, cancelled, or written off (pruned after 30 days).\n" ..
-        "Members can cancel their own pending/approved requests. One request holds at most 6 stacks.\n\n" ..
-        "|cff26a6f2Officer Workflow|r (only the next step is active; finished steps turn green)\n" ..
+        "|cff26a6f2Everyone|r — request items in Vault & Requests or gold with + Request Gold; cancel your own pending/approved requests; one request holds at most 6 stacks. You get a message when your request is approved, ready or sent.\n\n" ..
+        "|cffffaa00Officers|r — workflow (only the next step is active; finished steps turn green)\n" ..
         "• |cff26a6f2Approve + Withdraw|r / |cff26a6f2Withdraw All|r — Approve and take out in one click, or take out every approved request in a row.\n" ..
         "• |cff26a6f2Withdraw|r — Takes the items/gold out of the Guild Bank (any tab) into your bags.\n" ..
         "• |cff26a6f2Fulfill|r — Fills the open Mail or Trade with all your prepared orders for that member. You click Send/Trade; after Send the next member is filled automatically.\n" ..
@@ -1869,7 +1988,23 @@ function UI:CreateMainFrame()
     end)
 
     mainFrame.scanInfo = headerBar:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    mainFrame.scanInfo:SetPoint("RIGHT", closeBtn, "LEFT", -12, 0)
+    -- Role badge: makes it obvious which functions are available to you
+    local roleBtn = CreateFrame("Frame", nil, headerBar, "BackdropTemplate")
+    roleBtn:SetSize(96, 20)
+    roleBtn:SetPoint("RIGHT", closeBtn, "LEFT", -10, 0)
+    ApplyModernBackdrop(roleBtn, { 0.08, 0.09, 0.12, 1 }, THEME.border)
+    roleBtn:EnableMouse(true)
+    roleBtn.text = roleBtn:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    roleBtn.text:SetPoint("CENTER", 0, 0)
+    roleBtn:SetScript("OnEnter", function(selfBtn)
+        GameTooltip:SetOwner(selfBtn, "ANCHOR_BOTTOM")
+        GameTooltip:SetText(selfBtn.tip or "", 1, 1, 1, 1, true)
+        GameTooltip:Show()
+    end)
+    roleBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    mainFrame.roleBadge = roleBtn
+
+    mainFrame.scanInfo:SetPoint("RIGHT", roleBtn, "LEFT", -10, 0)
     mainFrame.scanInfo:SetPoint("LEFT", mainFrame.scanStatusBtn, "RIGHT", 12, 0)
     mainFrame.scanInfo:SetJustifyH("RIGHT")
     mainFrame.scanInfo:SetTextColor(0.65, 0.70, 0.78)
@@ -1934,6 +2069,7 @@ function UI:BuildInventoryPanel(panel)
 
     local scanBtn = CreateModernButton(panel, 78, 24, "Scan Now", THEME.green)
     scanBtn:SetPoint("TOPRIGHT", -10, -8)
+    AttachHelp(scanBtn, "Rescans the open Guild Bank (tabs and logs). This happens automatically when you open the bank; use it if something looks out of date.")
     scanBtn:SetScript("OnClick", function()
         if VM.BankScanner and VM.BankScanner.ForceScan then
             if IsBankCurrentlyOpen() then
@@ -1945,6 +2081,7 @@ function UI:BuildInventoryPanel(panel)
     panel.scanBtn = scanBtn
 
     local bankValBtn = CreateModernButton(panel, 145, 24, "Bank Value: 0g (v)", THEME.accent)
+    AttachHelp(bankValBtn, "Total worth of the Guild Bank (gold plus items at current AH prices). Click for a breakdown per tab.")
     bankValBtn:SetPoint("TOPRIGHT", scanBtn, "TOPLEFT", -6, 0)
     bankValBtn:SetScript("OnClick", function()
         if not bankValDropdownFrame then UI:CreateBankValDropdown() end
@@ -2014,6 +2151,7 @@ function UI:BuildInventoryPanel(panel)
 
     local toggleAllBtn = CreateModernButton(filterStrip, 84, 22, "Expand All")
     toggleAllBtn:SetPoint("RIGHT", searchBox, "LEFT", -6, 0)
+    panel.helpBtn = AddTabHelpButton(filterStrip, "VAULT", toggleAllBtn, "RIGHT", "LEFT", -6, 0)
     toggleAllBtn:SetScript("OnClick", function()
         local list = (panel.visibleCategories and #panel.visibleCategories > 0) and panel.visibleCategories or CAT_ORDER
         local anyCollapsed = false
@@ -3304,6 +3442,7 @@ function UI:BuildLedgerPanel(panel)
 
     local toggleAllBtn = CreateModernButton(filterStrip, 84, 22, "Expand All")
     toggleAllBtn:SetPoint("RIGHT", -6, 0)
+    panel.helpBtn = AddTabHelpButton(filterStrip, "LEDGER", toggleAllBtn, "RIGHT", "LEFT", -6, 0)
     toggleAllBtn:SetScript("OnClick", function()
         local anyCollapsed = false
         for _, mainKey in ipairs(panel.visibleMainKeys or {}) do
@@ -3800,6 +3939,7 @@ function UI:BuildRankingPanel(panel)
 
     local exportBtn = CreateModernButton(topBar, 76, 24, "Export", THEME.accent)
     exportBtn:SetPoint("RIGHT", 0, 0)
+    panel.helpBtn = AddTabHelpButton(topBar, "RANKING", exportBtn, "RIGHT", "LEFT", -6, 0)
     exportBtn:SetScript("OnClick", function()
         UI:OpenExportModal()
     end)
@@ -4238,6 +4378,7 @@ function UI:BuildRosterPanel(panel)
 
     local toggleAllBtn = CreateModernButton(topBar, 88, 24, "Expand All")
     toggleAllBtn:SetPoint("RIGHT", 0, 0)
+    panel.helpBtn = AddTabHelpButton(topBar, "ROSTER", toggleAllBtn, "RIGHT", "LEFT", -6, 0)
     toggleAllBtn:SetScript("OnClick", function()
         local anyCollapsed = false
         for _, rk in ipairs(panel.visibleRankKeys or {}) do
@@ -4605,213 +4746,126 @@ local function FormatTabRange(indices)
     return "Tabs " .. table.concat(parts, ", ")
 end
 
-function UI:BuildSettingsPanel(panel)
-    -- Section 1: Guild Bank Tab Rules
-    local ruleTitle = panel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    ruleTitle:SetPoint("TOPLEFT", 10, -10)
-    panel.ruleTitle = ruleTitle
+local function MakeCheck(parent, label, help, onClick)
+    local cb = CreateFrame("CheckButton", nil, parent, "UICheckButtonTemplate")
+    cb:SetSize(20, 20)
+    cb.label = cb:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    cb.label:SetPoint("LEFT", cb, "RIGHT", 4, 0)
+    cb.label:SetText(label)
+    if onClick then cb:SetScript("OnClick", onClick) end
+    AttachHelp(cb, help)
+    return cb
+end
 
-    panel.tabRuleRows = {}
-    for i = 1, 6 do
-        local r = CreateFrame("Frame", nil, panel, "BackdropTemplate")
-        r:SetSize(744, 25)
-        r.tabIndex = i
-        ApplyModernBackdrop(r, (i % 2 == 0) and THEME.rowEven or THEME.rowOdd, { 0, 0, 0, 0 })
-
-        r.label = r:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-        r.label:SetPoint("LEFT", 10, 0)
-        r.label:SetWidth(96)
-        r.label:SetJustifyH("LEFT")
-
-        r.freeBtn = CreateModernButton(r, 80, 20, "Free-for-All")
-        r.freeBtn:SetPoint("LEFT", 110, 0)
-
-        r.pctBtn = CreateModernButton(r, 68, 20, "% of AH")
-        r.pctBtn:SetPoint("LEFT", 194, 0)
-
-        r.pctBox = CreateModernEditBox(r, 36, 20, true)
-        r.pctBox:SetPoint("LEFT", 266, 0)
-        r.pctBox:SetText("50")
-
-        r.lockBtn = CreateModernButton(r, 62, 20, "Locked")
-        r.lockBtn:SetPoint("LEFT", 306, 0)
-
-        r.saveBtn = CreateModernButton(r, 62, 20, "Save", THEME.accent)
-        r.saveBtn:SetPoint("LEFT", 374, 0)
-        r.saveBtn:HookScript("OnEnter", function(selfBtn)
-            GameTooltip:SetOwner(selfBtn, "ANCHOR_TOP")
-            GameTooltip:SetText("Save and broadcast tab rule to guild")
-            GameTooltip:Show()
-        end)
-        r.saveBtn:HookScript("OnLeave", function()
-            GameTooltip:Hide()
-        end)
-
-        r.status = r:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-        r.status:SetPoint("LEFT", 446, 0)
-        r.status:SetWidth(290)
-        r.status:SetJustifyH("LEFT")
-
-        r.freeBtn:SetScript("OnClick", function()
-            if not VM:IsAdmin() then return end
-            r.selectedMode = "FREE"
-            UI:RefreshSettings()
-        end)
-        r.pctBtn:SetScript("OnClick", function()
-            if not VM:IsAdmin() then return end
-            r.selectedMode = "PERCENT"
-            UI:RefreshSettings()
-        end)
-        r.lockBtn:SetScript("OnClick", function()
-            if not VM:IsAdmin() then return end
-            r.selectedMode = "LOCKED"
-            UI:RefreshSettings()
-        end)
-        r.saveBtn:SetScript("OnClick", function()
-            if not VM:IsAdmin() then return end
-            local p = tonumber(r.pctBox:GetText()) or 50
-            if p <= 0 then p = 50; r.pctBox:SetText("50") end
-            r.userEditedPct = false
-            VM:SetTabRule(r.tabIndex, r.selectedMode or "FREE", p)
-        end)
-        r.pctBox:SetScript("OnTextChanged", function()
-            if VM:IsAdmin() then r.userEditedPct = true end
-        end)
-        r.pctBox:SetScript("OnEnterPressed", function(selfBox)
-            selfBox:ClearFocus()
-            if not VM:IsAdmin() then return end
-            local p = tonumber(selfBox:GetText()) or 50
-            if p <= 0 then p = 50; selfBox:SetText("50") end
-            r.userEditedPct = false
-            VM:SetTabRule(r.tabIndex, r.selectedMode or "FREE", p)
-        end)
-
-        r:Hide()
-        panel.tabRuleRows[i] = r
+local function MakeHeader(parent, title, desc, y)
+    local t = parent:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    t:SetPoint("TOPLEFT", 0, y or 0)
+    t:SetText(title)
+    local d
+    if desc then
+        d = parent:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+        d:SetPoint("TOPLEFT", t, "BOTTOMLEFT", 0, -3)
+        d:SetWidth(700)
+        d:SetJustifyH("LEFT")
+        d:SetText(desc)
     end
+    local line = parent:CreateTexture(nil, "ARTWORK")
+    line:SetHeight(1)
+    line:SetPoint("TOPLEFT", t, "BOTTOMLEFT", 0, desc and -18 or -4)
+    line:SetPoint("RIGHT", parent, "RIGHT", -10, 0)
+    line:SetColorTexture(THEME.border[1], THEME.border[2], THEME.border[3], 0.8)
+    return t, d
+end
 
-    local unpurchasedNote = panel:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-    unpurchasedNote:SetJustifyH("LEFT")
-    unpurchasedNote:Hide()
-    panel.unpurchasedNote = unpurchasedNote
+local function MakeSub(parent, text, y)
+    local t = parent:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    t:SetPoint("TOPLEFT", 0, y)
+    t:SetText(text)
+    return t
+end
 
-    -- Dynamic container for Sections 2, 3, and 4
-    local lower = CreateFrame("Frame", nil, panel)
-    lower:SetSize(744, 338)
-    lower:SetPoint("TOPLEFT", 10, -100)
-    panel.lowerSections = lower
+function UI:BuildSettingsPanel(panel)
+    panel.scroll = CreateScrollArea(panel, -6, 6)
+    local content = panel.scroll.content
 
-    -- Section 2: Interface & Notifications
-    local uiPersTitle = lower:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    uiPersTitle:SetPoint("TOPLEFT", 0, 0)
-    uiPersTitle:SetText("|cff26a6f2Interface & Notifications|r")
+    ----------------------------------------------------------------------------
+    -- MEMBER SETTINGS (everyone, own client only)
+    ----------------------------------------------------------------------------
+    local mem = CreateFrame("Frame", nil, content)
+    mem:SetSize(728, 290)
+    mem:SetPoint("TOPLEFT", 6, -4)
+    panel.memberSec = mem
+    MakeHeader(mem, "|cff26a6f2Member Settings|r", "Personal preferences. They only change your own Vault Manager.", 0)
 
-    local scaleLabel = lower:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    scaleLabel:SetPoint("TOPLEFT", 0, -24)
-    scaleLabel:SetText("UI Scale (50% - 200%):")
-
-    local scaleEditBox = CreateModernEditBox(lower, 50, 22, true)
+    local scaleLabel = mem:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    scaleLabel:SetPoint("TOPLEFT", 0, -46)
+    scaleLabel:SetText("Window scale (50% - 200%):")
+    local scaleEditBox = CreateModernEditBox(mem, 50, 22, true)
     scaleEditBox:SetPoint("LEFT", scaleLabel, "RIGHT", 8, 0)
     scaleEditBox:SetText("100")
-
-    local scaleValDisplay = lower:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    local scaleValDisplay = mem:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     scaleValDisplay:SetPoint("LEFT", scaleEditBox, "RIGHT", 8, 0)
-
-    local scaleApplyBtn = CreateModernButton(lower, 55, 22, "Apply", THEME.accent)
+    local scaleApplyBtn = CreateModernButton(mem, 55, 22, "Apply", THEME.accent)
     scaleApplyBtn:SetPoint("LEFT", scaleValDisplay, "RIGHT", 8, 0)
     scaleApplyBtn:SetScript("OnClick", function()
         local val = tonumber(scaleEditBox:GetText()) or 100
         if val < 50 then val = 50 elseif val > 200 then val = 200 end
         scaleEditBox:SetText(tostring(val))
-        local scaleFactor = val / 100
         local prefs = GetUIPrefs()
-        prefs.uiScale = scaleFactor
-        if mainFrame then mainFrame:SetScale(scaleFactor) end
+        prefs.uiScale = val / 100
+        if mainFrame then mainFrame:SetScale(val / 100) end
         scaleValDisplay:SetText(string.format("(%d%%)", val))
     end)
-
+    AttachHelp(scaleApplyBtn, "Changes the size of the Vault Manager window. Drag the bottom-right corner of the window to make it taller. /vm reset restores 100% and centers the window.")
     panel.UpdateScaleButtons = function()
-        local scale = GetUIPrefs().uiScale or 1.0
-        local pct = math.floor(scale * 100 + 0.5)
+        local pct = math.floor((GetUIPrefs().uiScale or 1.0) * 100 + 0.5)
         scaleEditBox:SetText(tostring(pct))
         scaleValDisplay:SetText(string.format("(%d%%)", pct))
     end
 
-    local minimapCb = CreateFrame("CheckButton", nil, lower, "UICheckButtonTemplate")
-    minimapCb:SetSize(20, 20)
-    minimapCb:SetPoint("LEFT", scaleApplyBtn, "RIGHT", 24, 0)
-    minimapCb.label = minimapCb:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    minimapCb.label:SetPoint("LEFT", minimapCb, "RIGHT", 4, 0)
-    minimapCb.label:SetText("Show Minimap Button")
-    minimapCb:SetScript("OnClick", function(cb)
-        local show = cb:GetChecked() and true or false
-        if VM.Minimap and VM.Minimap.SetHidden then
-            VM.Minimap:SetHidden(not show)
-        end
+    panel.minimapCb = MakeCheck(mem, "Show minimap button", "Shows the Vault Manager button on the edge of the minimap. Its badge counts open requests.", function(cb)
+        if VM.Minimap and VM.Minimap.SetHidden then VM.Minimap:SetHidden(not cb:GetChecked()) end
     end)
-    panel.minimapCb = minimapCb
+    panel.minimapCb:SetPoint("TOPLEFT", 0, -74)
+    panel.chatNotifCb = MakeCheck(mem, "Chat messages", "Vault Manager messages in your chat (request updates, payments, scans). Errors are always shown.", function(cb)
+        GetUIPrefs().enableChatNotifications = cb:GetChecked() and true or false
+    end)
+    panel.chatNotifCb:SetPoint("TOPLEFT", 240, -74)
+    panel.newerVerNotifCb = MakeCheck(mem, "Tell me about new versions", "Prints a chat message when a guild member runs a newer Vault Manager version.", function(cb)
+        GetUIPrefs().notifyNewerVersion = cb:GetChecked() and true or false
+    end)
+    panel.newerVerNotifCb:SetPoint("TOPLEFT", 480, -74)
+    panel.legacyFilterCb = MakeCheck(mem, "Include former members in Ranking", "Characters who left the guild (Legacy Members) are listed at the bottom of the Ranking by default. You can also toggle this on the Ranking tab.", function(cb)
+        GetUIPrefs().showLegacyRanking = cb:GetChecked() and true or false
+    end)
+    panel.legacyFilterCb:SetPoint("TOPLEFT", 0, -100)
 
-    local chatNotifCb = CreateFrame("CheckButton", nil, lower, "UICheckButtonTemplate")
-    chatNotifCb:SetSize(20, 20)
-    chatNotifCb:SetPoint("LEFT", minimapCb.label, "RIGHT", 20, 0)
-    chatNotifCb.label = chatNotifCb:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    chatNotifCb.label:SetPoint("LEFT", chatNotifCb, "RIGHT", 4, 0)
-    chatNotifCb.label:SetText("Enable Chat Notifications")
-    chatNotifCb:SetScript("OnClick", function(cb)
+    local delivLabel = mem:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    delivLabel:SetPoint("TOPLEFT", 4, -132)
+    delivLabel:SetText("How I want to receive my requests:")
+    local delivMailBtn = CreateModernButton(mem, 56, 20, "Mail")
+    delivMailBtn:SetPoint("LEFT", delivLabel, "RIGHT", 8, 0)
+    local delivTradeBtn = CreateModernButton(mem, 56, 20, "Trade")
+    delivTradeBtn:SetPoint("LEFT", delivMailBtn, "RIGHT", 4, 0)
+    local function SetDeliv(v)
         local prefs = GetUIPrefs()
-        prefs.enableChatNotifications = cb:GetChecked() and true or false
-    end)
-    panel.chatNotifCb = chatNotifCb
+        prefs.deliveryPref = (prefs.deliveryPref == v) and nil or v
+        UI:RefreshSettings()
+    end
+    delivMailBtn:SetScript("OnClick", function() SetDeliv("MAIL") end)
+    delivTradeBtn:SetScript("OnClick", function() SetDeliv("TRADE") end)
+    AttachHelp(delivMailBtn, "Officers see this on your new requests. Mail: sent to you, usually with Cash on Delivery (you pay when you take it out of the mailbox). Click again to clear.")
+    AttachHelp(delivTradeBtn, "Officers see this on your new requests. Trade: you meet the officer and pay in the trade window. Click again to clear.")
+    panel.delivMailBtn, panel.delivTradeBtn = delivMailBtn, delivTradeBtn
 
-    local newerVerNotifCb = CreateFrame("CheckButton", nil, lower, "UICheckButtonTemplate")
-    newerVerNotifCb:SetSize(20, 20)
-    newerVerNotifCb:SetPoint("TOPLEFT", 0, -50)
-    newerVerNotifCb.label = newerVerNotifCb:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    newerVerNotifCb.label:SetPoint("LEFT", newerVerNotifCb, "RIGHT", 4, 0)
-    newerVerNotifCb.label:SetText("Notify in Chat on Newer Addon Version")
-    newerVerNotifCb:SetScript("OnClick", function(cb)
-        local prefs = GetUIPrefs()
-        prefs.notifyNewerVersion = cb:GetChecked() and true or false
-    end)
-    panel.newerVerNotifCb = newerVerNotifCb
-
-    local legacyFilterCb = CreateFrame("CheckButton", nil, lower, "UICheckButtonTemplate")
-    legacyFilterCb:SetSize(20, 20)
-    legacyFilterCb:SetPoint("TOPLEFT", 0, -78)
-    legacyFilterCb.label = legacyFilterCb:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    legacyFilterCb.label:SetPoint("LEFT", legacyFilterCb, "RIGHT", 4, 0)
-    legacyFilterCb.label:SetText("Include Legacy Members in Ranking by default")
-    legacyFilterCb:SetScript("OnClick", function(cb)
-        local prefs = GetUIPrefs()
-        prefs.showLegacyRanking = cb:GetChecked() and true or false
-    end)
-    panel.legacyFilterCb = legacyFilterCb
-
-    local autoOpenBankCb = CreateFrame("CheckButton", nil, lower, "UICheckButtonTemplate")
-    autoOpenBankCb:SetSize(20, 20)
-    autoOpenBankCb:SetPoint("TOPLEFT", 316, -78)
-    autoOpenBankCb.label = autoOpenBankCb:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    autoOpenBankCb.label:SetPoint("LEFT", autoOpenBankCb, "RIGHT", 4, 0)
-    autoOpenBankCb.label:SetText("Auto-open Vault Manager at Guild Bank")
-    autoOpenBankCb:SetScript("OnClick", function(cb)
-        local prefs = GetUIPrefs()
-        prefs.autoOpenAtBank = cb:GetChecked() and true or false
-    end)
-    panel.autoOpenBankCb = autoOpenBankCb
-
-    -- Section 3: Sync & Diagnostics
-    local diagTitle = lower:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    diagTitle:SetPoint("TOPLEFT", 0, -108)
-    diagTitle:SetText("|cff26a6f2Sync & Diagnostics|r")
-
-    local diagInfo = lower:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    diagInfo:SetPoint("TOPLEFT", 0, -130)
-    diagInfo:SetWidth(590)
+    MakeSub(mem, "|cff26a6f2Sync & Diagnostics|r", -164)
+    local diagInfo = mem:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    diagInfo:SetPoint("TOPLEFT", 0, -184)
+    diagInfo:SetWidth(560)
     diagInfo:SetJustifyH("LEFT")
     panel.diagInfo = diagInfo
-
-    local requestSyncBtn = CreateModernButton(lower, 140, 24, "Request Guild Sync", THEME.accent)
-    requestSyncBtn:SetPoint("TOPRIGHT", 0, -126)
+    local requestSyncBtn = CreateModernButton(mem, 140, 24, "Request Guild Sync", THEME.accent)
+    requestSyncBtn:SetPoint("TOPRIGHT", -10, -180)
     requestSyncBtn:SetScript("OnClick", function()
         if VM.Comms and VM.Comms.RequestManualSync then
             local ok, waitSec = VM.Comms:RequestManualSync()
@@ -4825,27 +4879,21 @@ function UI:BuildSettingsPanel(panel)
             VM.BankScanner:ForceScan()
         end
     end)
-    panel.requestSyncBtn = requestSyncBtn
+    AttachHelp(requestSyncBtn, "Asks online guild members for newer vault, request and ledger data. Data also syncs automatically when you log in. Type /vm diag for technical details.")
 
-    -- Section 4: Local Maintenance
-    local maintTitle = lower:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    maintTitle:SetPoint("TOPLEFT", 0, -168)
-    maintTitle:SetText("|cff26a6f2Local Maintenance|r")
-
-    local resetPosBtn = CreateModernButton(lower, 156, 24, "Reset Window Position")
-    resetPosBtn:SetPoint("TOPLEFT", 0, -190)
+    MakeSub(mem, "|cff26a6f2Local Maintenance|r", -222)
+    local resetPosBtn = CreateModernButton(mem, 156, 24, "Reset Window Position")
+    resetPosBtn:SetPoint("TOPLEFT", 0, -244)
     resetPosBtn:SetScript("OnClick", function()
-        local prefs = GetUIPrefs()
-        prefs.windowPos = nil
+        GetUIPrefs().windowPos = nil
+        GetUIPrefs().windowHeight = nil
+        if mainFrame then mainFrame:SetHeight(560) end
         ApplyDefaultWindowPosition()
-        if VM.Minimap and VM.Minimap.ResetPosition then
-            VM.Minimap:ResetPosition()
-        end
-        VM:Print("Window and minimap button positions reset.")
+        if VM.Minimap and VM.Minimap.ResetPosition then VM.Minimap:ResetPosition() end
+        VM:Print("Window size/position and minimap button position reset.")
     end)
-    panel.resetPosBtn = resetPosBtn
-
-    local clearCacheBtn = CreateModernButton(lower, 136, 24, "Clear Local Cache", { 0.85, 0.35, 0.35, 1 })
+    AttachHelp(resetPosBtn, "Moves the window back to the default position and size, and the minimap button back to its default place.")
+    local clearCacheBtn = CreateModernButton(mem, 136, 24, "Clear Local Cache", { 0.85, 0.35, 0.35, 1 })
     clearCacheBtn:SetPoint("LEFT", resetPosBtn, "RIGHT", 10, 0)
     clearCacheBtn:SetScript("OnClick", function()
         if VM.db then
@@ -4861,13 +4909,141 @@ function UI:BuildSettingsPanel(panel)
             VM.Comms.isSyncingUntil = 0
         end
         if VM.Minimap and VM.Minimap.UpdateBadge then VM.Minimap:UpdateBadge() end
-        VM:Print("Local cache cleared (ledger, roster, and tab rules preserved).")
+        VM:Print("Local cache cleared (ledger, roster, and tab rules preserved). Click Request Guild Sync to reload it.")
         if VM.UI then VM.UI:RefreshAll() end
     end)
-    panel.clearCacheBtn = clearCacheBtn
+    AttachHelp(clearCacheBtn, "Only on YOUR client: forgets the cached vault contents and requests, then reloads them from the guild. Nothing is deleted for anyone else. The Ledger and rules are kept.")
 
-    local resetGuildBtn = CreateModernButton(lower, 132, 24, "Reset Guild Data...", { 0.85, 0.20, 0.20, 1 })
-    resetGuildBtn:SetPoint("LEFT", clearCacheBtn, "RIGHT", 10, 0)
+    ----------------------------------------------------------------------------
+    -- OFFICER SETTINGS (dimmed and locked until you are an officer)
+    ----------------------------------------------------------------------------
+    local off = CreateFrame("Frame", nil, content)
+    off:SetSize(728, 116)
+    panel.officerSec = off
+    local _, offDesc = MakeHeader(off, "|cffffaa00Officer Settings|r", "", 0)
+    panel.officerStatus = offDesc
+
+    MakeSub(off, "|cff26a6f2Officer Workflow|r", -46)
+    panel.autoOpenBankCb = MakeCheck(off, "Open Vault Manager at the Guild Bank", "Opens Vault Manager automatically when you open the Guild Bank: on Requests when orders are waiting, otherwise on Vault & Requests. When off, a small reminder pop-up is shown instead.", function(cb)
+        GetUIPrefs().autoOpenAtBank = cb:GetChecked() and true or false
+    end)
+    panel.autoOpenBankCb:SetPoint("TOPLEFT", 0, -68)
+    panel.whisperCb = MakeCheck(off, "Whisper members about status", "Sends members (or their online alt) a whisper when their request is approved, ready, sent or declined. Payment messages after a trade are always sent.", function(cb)
+        GetUIPrefs().memberWhispers = cb:GetChecked() and true or false
+    end)
+    panel.whisperCb:SetPoint("TOPLEFT", 270, -68)
+    panel.autoMailCb = MakeCheck(off, "Fill next mail after Send", "At the mailbox: after you click Send, the next member's prepared orders are filled in automatically. You still click Send yourself.", function(cb)
+        GetUIPrefs().autoFillNextMail = cb:GetChecked() and true or false
+    end)
+    panel.autoMailCb:SetPoint("TOPLEFT", 510, -68)
+    panel.officerControls = { panel.autoOpenBankCb, panel.whisperCb, panel.autoMailCb }
+
+    ----------------------------------------------------------------------------
+    -- GUILD CONFIGURATION (Guild Master / officer rank only)
+    ----------------------------------------------------------------------------
+    local adm = CreateFrame("Frame", nil, content)
+    adm:SetSize(728, 100)
+    panel.adminSec = adm
+    local admTitle = MakeSub(adm, "|cff26a6f2Guild Configuration|r  |cff999999(Guild Master and the guild's officer rank)|r", 0)
+    panel.adminNote = adm:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+    panel.adminNote:SetPoint("TOPLEFT", admTitle, "BOTTOMLEFT", 0, -3)
+    panel.adminNote:SetWidth(700)
+    panel.adminNote:SetJustifyH("LEFT")
+    panel.adminNote:SetText("These settings apply to the whole guild and are shared with every member automatically.")
+
+    local ruleTitle = adm:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+    ruleTitle:SetPoint("TOPLEFT", 0, -38)
+    ruleTitle:SetText("Guild Bank tab rules")
+    local ruleHelp = adm:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+    ruleHelp:SetPoint("LEFT", ruleTitle, "RIGHT", 8, 0)
+    ruleHelp:SetText("Free-for-All: members pay nothing (100% value still counts in the Ledger).  % of AH: members pay this share of the AH price (min 1g), the rest is a guild subsidy.  Locked: no requests.")
+    ruleHelp:SetWidth(560)
+    ruleHelp:SetJustifyH("LEFT")
+    panel.ruleTitle = ruleTitle
+
+    panel.tabRuleRows = {}
+    for i = 1, 6 do
+        local r = CreateFrame("Frame", nil, adm, "BackdropTemplate")
+        r:SetSize(716, 25)
+        r.tabIndex = i
+        ApplyModernBackdrop(r, (i % 2 == 0) and THEME.rowEven or THEME.rowOdd, { 0, 0, 0, 0 })
+        r.label = r:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        r.label:SetPoint("LEFT", 10, 0)
+        r.label:SetWidth(96)
+        r.label:SetJustifyH("LEFT")
+        r.freeBtn = CreateModernButton(r, 80, 20, "Free-for-All")
+        r.freeBtn:SetPoint("LEFT", 110, 0)
+        r.pctBtn = CreateModernButton(r, 68, 20, "% of AH")
+        r.pctBtn:SetPoint("LEFT", 194, 0)
+        r.pctBox = CreateModernEditBox(r, 36, 20, true)
+        r.pctBox:SetPoint("LEFT", 266, 0)
+        r.pctBox:SetText("50")
+        r.lockBtn = CreateModernButton(r, 62, 20, "Locked")
+        r.lockBtn:SetPoint("LEFT", 306, 0)
+        r.saveBtn = CreateModernButton(r, 62, 20, "Save", THEME.accent)
+        r.saveBtn:SetPoint("LEFT", 374, 0)
+        AttachHelp(r.saveBtn, "Saves the rule for this tab and shares it with the guild. Prices of requests that are already approved do not change.")
+        r.status = r:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        r.status:SetPoint("LEFT", 446, 0)
+        r.status:SetWidth(262)
+        r.status:SetJustifyH("LEFT")
+        r.freeBtn:SetScript("OnClick", function() if VM:IsAdmin() then r.selectedMode = "FREE"; UI:RefreshSettings() end end)
+        r.pctBtn:SetScript("OnClick", function() if VM:IsAdmin() then r.selectedMode = "PERCENT"; UI:RefreshSettings() end end)
+        r.lockBtn:SetScript("OnClick", function() if VM:IsAdmin() then r.selectedMode = "LOCKED"; UI:RefreshSettings() end end)
+        local function SaveRule()
+            if not VM:IsAdmin() then return end
+            local pct = tonumber(r.pctBox:GetText()) or 50
+            if pct <= 0 then pct = 50; r.pctBox:SetText("50") end
+            r.userEditedPct = false
+            VM:SetTabRule(r.tabIndex, r.selectedMode or "FREE", pct)
+        end
+        r.saveBtn:SetScript("OnClick", SaveRule)
+        r.pctBox:SetScript("OnTextChanged", function() if VM:IsAdmin() then r.userEditedPct = true end end)
+        r.pctBox:SetScript("OnEnterPressed", function(selfBox) selfBox:ClearFocus(); SaveRule() end)
+        r:Hide()
+        panel.tabRuleRows[i] = r
+    end
+    local unpurchasedNote = adm:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+    unpurchasedNote:SetJustifyH("LEFT")
+    unpurchasedNote:Hide()
+    panel.unpurchasedNote = unpurchasedNote
+
+    -- Officer ranks + guild reset (positioned below the tab rules)
+    local admLower = CreateFrame("Frame", nil, adm)
+    admLower:SetSize(716, 140)
+    panel.adminLower = admLower
+    local rankTitle = admLower:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+    rankTitle:SetPoint("TOPLEFT", 0, 0)
+    rankTitle:SetText("Officer ranks")
+    local rankHelp = admLower:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+    rankHelp:SetPoint("LEFT", rankTitle, "RIGHT", 8, 0)
+    rankHelp:SetWidth(600)
+    rankHelp:SetJustifyH("LEFT")
+    rankHelp:SetText("Tick extra ranks (e.g. Raid Leader, Officer Alt) that may approve, withdraw and manage the Ledger. They cannot change these settings.")
+    panel.rankChecks = {}
+    for i = 1, 10 do
+        local cb = CreateFrame("CheckButton", nil, admLower, "UICheckButtonTemplate")
+        cb:SetSize(20, 20)
+        cb:SetPoint("TOPLEFT", ((i - 1) % 5) * 143, -20 - math.floor((i - 1) / 5) * 22)
+        cb.label = cb:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        cb.label:SetPoint("LEFT", cb, "RIGHT", 2, 0)
+        cb.label:SetWidth(118)
+        cb.label:SetJustifyH("LEFT")
+        cb:SetScript("OnClick", function(selfCb)
+            if not selfCb.rankIndex then return end
+            VM:SetOfficerRank(selfCb.rankIndex, selfCb:GetChecked() and true or false)
+            UI:RefreshSettings()
+        end)
+        AttachHelp(cb, "Members of this rank get the officer functions in Vault Manager. Withdrawing still needs the rank's Guild Bank rights in WoW. The Guild Master and the 2nd rank always have full access.")
+        cb:Hide()
+        panel.rankChecks[i] = cb
+    end
+
+    local resetTitle = admLower:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+    resetTitle:SetPoint("TOPLEFT", 0, -78)
+    resetTitle:SetText("Guild-wide reset")
+    local resetGuildBtn = CreateModernButton(admLower, 132, 24, "Reset Guild Data...", { 0.85, 0.20, 0.20, 1 })
+    resetGuildBtn:SetPoint("TOPLEFT", 0, -96)
     resetGuildBtn:SetScript("OnClick", function(selfBtn)
         if not selfBtn:IsEnabled() then return end
         local pending = VM:GetPendingReset()
@@ -4877,86 +5053,13 @@ function UI:BuildSettingsPanel(panel)
             UI:ShowResetGuildConfirm()
         end
     end)
-    resetGuildBtn:HookScript("OnEnter", function(selfBtn)
-        GameTooltip:SetOwner(selfBtn, "ANCHOR_TOP")
-        GameTooltip:SetText("Clear ledger, requests and vault data for the whole guild and rebuild from the Guild Bank logs. Requested by the Guild Master or officer rank, approved by the Guild Master.", 1, 1, 1, 1, true)
-        GameTooltip:Show()
-    end)
-    resetGuildBtn:HookScript("OnLeave", function() GameTooltip:Hide() end)
+    AttachHelp(resetGuildBtn, "Clears the Ledger, requests and vault data for EVERY member and rebuilds them from the Guild Bank logs on the next scan. Tab rules, officer ranks and alt links are kept. Needs the Guild Master's approval.")
     panel.resetGuildBtn = resetGuildBtn
-
-    local maintDesc = lower:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+    local maintDesc = admLower:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
     maintDesc:SetPoint("LEFT", resetGuildBtn, "RIGHT", 10, 0)
-    maintDesc:SetWidth(290)
+    maintDesc:SetWidth(560)
     maintDesc:SetJustifyH("LEFT")
-    maintDesc:SetText("Clears bank & request cache (keeps ledger and rules).")
     panel.maintDesc = maintDesc
-
-    -- Delivery preferences
-    local delivLabel = lower:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    delivLabel:SetPoint("TOPLEFT", 0, -226)
-    delivLabel:SetText("My preferred delivery:")
-    local delivMailBtn = CreateModernButton(lower, 56, 20, "Mail")
-    delivMailBtn:SetPoint("LEFT", delivLabel, "RIGHT", 8, 0)
-    local delivTradeBtn = CreateModernButton(lower, 56, 20, "Trade")
-    delivTradeBtn:SetPoint("LEFT", delivMailBtn, "RIGHT", 4, 0)
-    local function SetDeliv(v)
-        local prefs = GetUIPrefs()
-        prefs.deliveryPref = (prefs.deliveryPref == v) and nil or v
-        UI:RefreshSettings()
-    end
-    delivMailBtn:SetScript("OnClick", function() SetDeliv("MAIL") end)
-    delivTradeBtn:SetScript("OnClick", function() SetDeliv("TRADE") end)
-    panel.delivMailBtn, panel.delivTradeBtn = delivMailBtn, delivTradeBtn
-
-    local whisperCb = CreateFrame("CheckButton", nil, lower, "UICheckButtonTemplate")
-    whisperCb:SetSize(20, 20)
-    whisperCb:SetPoint("LEFT", delivTradeBtn, "RIGHT", 20, 0)
-    whisperCb.label = whisperCb:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    whisperCb.label:SetPoint("LEFT", whisperCb, "RIGHT", 4, 0)
-    whisperCb.label:SetText("Whisper members about request status")
-    whisperCb:SetScript("OnClick", function(cb) GetUIPrefs().memberWhispers = cb:GetChecked() and true or false end)
-    panel.whisperCb = whisperCb
-
-    local autoMailCb = CreateFrame("CheckButton", nil, lower, "UICheckButtonTemplate")
-    autoMailCb:SetSize(20, 20)
-    autoMailCb:SetPoint("LEFT", whisperCb.label, "RIGHT", 16, 0)
-    autoMailCb.label = autoMailCb:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    autoMailCb.label:SetPoint("LEFT", autoMailCb, "RIGHT", 4, 0)
-    autoMailCb.label:SetText("Fill next mail after Send")
-    autoMailCb:SetScript("OnClick", function(cb) GetUIPrefs().autoFillNextMail = cb:GetChecked() and true or false end)
-    panel.autoMailCb = autoMailCb
-
-    -- Section 5: Officer Ranks (guild-wide, synced between officers)
-    local rankTitle = lower:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    rankTitle:SetPoint("TOPLEFT", 0, -250)
-    rankTitle:SetText("|cff26a6f2Officer Ranks|r  |cff999999— extra ranks that may approve, withdraw and manage the Ledger|r")
-
-    local rankNote = lower:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-    rankNote:SetPoint("TOPLEFT", 0, -318)
-    rankNote:SetWidth(744)
-    rankNote:SetJustifyH("LEFT")
-    rankNote:SetText("The Guild Master and the guild's officer rank (2nd rank) always have full access and are the only ranks that can change these settings and the tab rules. Withdrawing still requires the rank's Guild Bank permissions in WoW.")
-
-    panel.rankChecks = {}
-    for i = 1, 10 do
-        local cb = CreateFrame("CheckButton", nil, lower, "UICheckButtonTemplate")
-        cb:SetSize(20, 20)
-        local col = (i - 1) % 5
-        local rowN = math.floor((i - 1) / 5)
-        cb:SetPoint("TOPLEFT", col * 148, -270 - rowN * 22)
-        cb.label = cb:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-        cb.label:SetPoint("LEFT", cb, "RIGHT", 2, 0)
-        cb.label:SetWidth(122)
-        cb.label:SetJustifyH("LEFT")
-        cb:SetScript("OnClick", function(selfCb)
-            if not selfCb.rankIndex then return end
-            VM:SetOfficerRank(selfCb.rankIndex, selfCb:GetChecked() and true or false)
-            UI:RefreshSettings()
-        end)
-        cb:Hide()
-        panel.rankChecks[i] = cb
-    end
 end
 
 function UI:RefreshSettings()
@@ -4965,27 +5068,15 @@ function UI:RefreshSettings()
     if not panel or not panel.tabRuleRows then return end
 
     local uiPrefs = GetUIPrefs()
-    -- Configuration (tab rules, officer ranks) is reserved for admin ranks: Guild Master + officer rank
-    local isOff = VM:IsAdmin()
+    local isOfficer = VM:IsOfficer()
+    local isOff = VM:IsAdmin()   -- guild configuration: Guild Master + officer rank
 
-    if panel.ruleTitle then
-        if isOff then
-            panel.ruleTitle:SetText("|cff26a6f2Guild Bank Tab Rules|r  |cff44dd77(Officer Authorized)|r")
-        else
-            panel.ruleTitle:SetText("|cff26a6f2Guild Bank Tab Rules|r  |cffff5555[Read-Only (Guild Master / Officer rank required)]|r")
-        end
-    end
-
+    -- Member settings
     if panel.UpdateScaleButtons then panel.UpdateScaleButtons() end
-    if panel.minimapCb then
-        local showMM = not (VM.db and VM.db.minimap and VM.db.minimap.hide == true)
-        panel.minimapCb:SetChecked(showMM)
-    end
+    if panel.minimapCb then panel.minimapCb:SetChecked(not (VM.db and VM.db.minimap and VM.db.minimap.hide == true)) end
     if panel.legacyFilterCb then panel.legacyFilterCb:SetChecked(uiPrefs.showLegacyRanking ~= false) end
-    if panel.autoOpenBankCb then panel.autoOpenBankCb:SetChecked(uiPrefs.autoOpenAtBank ~= false) end
     if panel.chatNotifCb then panel.chatNotifCb:SetChecked(uiPrefs.enableChatNotifications ~= false) end
     if panel.newerVerNotifCb then panel.newerVerNotifCb:SetChecked(uiPrefs.notifyNewerVersion ~= false) end
-
     if panel.delivMailBtn then
         local pref = uiPrefs.deliveryPref
         for _, pair in ipairs({ { panel.delivMailBtn, "MAIL" }, { panel.delivTradeBtn, "TRADE" } }) do
@@ -5001,17 +5092,49 @@ function UI:RefreshSettings()
             end
         end
     end
-    if panel.whisperCb then panel.whisperCb:SetChecked(uiPrefs.memberWhispers ~= false) end
-    if panel.resetGuildBtn then
-        ApplyButtonState(panel.resetGuildBtn, VM:IsAdmin() and "active" or "disabled")
-        local pending = VM:GetPendingReset()
-        if pending and panel.maintDesc then
-            panel.maintDesc:SetText(string.format("|cffffaa00Reset requested by %s — waiting for Guild Master approval.|r", pending.by or "?"))
-        elseif panel.maintDesc then
-            panel.maintDesc:SetText("Clears bank & request cache (keeps ledger and rules).")
+    if panel.diagInfo then
+        local gKey = VM:GetActiveGuildKey() or "None"
+        local inv = VM.db and VM.db.inventory
+        local lastScan = inv and inv.lastScan or 0
+        local scanTimeStr = lastScan > 0 and date("%d/%m %H:%M", lastScan) or "Never"
+        local scanBy = (inv and (inv.lastScanBy or inv.scannedBy)) or "None"
+        panel.diagInfo:SetText(string.format("Version: |cffffffffv%s|r (build %s)  |  Protocol: |cff26a6f2v%d|r  |  Guild: |cffffffff%s|r\nLast bank scan: |cffffffff%s|r (%s)",
+            VM:GetAddonVersion(), tostring(VM.BUILD or "-"), VM.VERSION or 7, gKey, scanBy, scanTimeStr))
+    end
+
+    -- Officer settings: dimmed and locked until you are an officer
+    if panel.officerStatus then
+        if isOff then
+            panel.officerStatus:SetText("|cff44dd77You have full officer access (Guild Master / officer rank).|r")
+        elseif isOfficer then
+            panel.officerStatus:SetText("|cff44dd77Officer workflow available.|r |cff999999Guild configuration below needs the Guild Master or the guild's officer rank.|r")
+        else
+            panel.officerStatus:SetText("|cffff8844Read-only: these settings are available to officers. Ask an officer if you need a change.|r")
         end
     end
+    panel.officerSec:SetAlpha(isOfficer and 1 or 0.45)
+    for _, cb in ipairs(panel.officerControls or {}) do
+        if cb.SetEnabled then cb:SetEnabled(isOfficer) end
+    end
+    if panel.autoOpenBankCb then panel.autoOpenBankCb:SetChecked(uiPrefs.autoOpenAtBank ~= false) end
+    if panel.whisperCb then panel.whisperCb:SetChecked(uiPrefs.memberWhispers ~= false) end
     if panel.autoMailCb then panel.autoMailCb:SetChecked(uiPrefs.autoFillNextMail ~= false) end
+
+    panel.adminSec:SetAlpha(isOff and 1 or 0.45)
+    if panel.adminNote then
+        panel.adminNote:SetText(isOff and "These settings apply to the whole guild and are shared with every member automatically."
+            or "|cffff8844Locked: only the Guild Master and the guild's officer rank can change these settings.|r")
+    end
+
+    if panel.resetGuildBtn then
+        ApplyButtonState(panel.resetGuildBtn, isOff and "active" or "disabled")
+        local pending = VM:GetPendingReset()
+        if pending then
+            panel.maintDesc:SetText(string.format("|cffffaa00Reset requested by %s — waiting for Guild Master approval.|r", pending.by or "?"))
+        else
+            panel.maintDesc:SetText("Step 1: the Guild Master or officer rank requests it (type RESET). Step 2: the Guild Master approves it (type RESET).")
+        end
+    end
 
     if panel.rankChecks then
         local ranks = VM:GetGuildRankList()
@@ -5019,9 +5142,10 @@ function UI:RefreshSettings()
             local r = ranks[i]
             if r then
                 cb.rankIndex = r.index
-                cb.label:SetText(r.name)
+                local fixed = VM:IsAdminRank(r.index)
+                cb.label:SetText(r.name .. (fixed and " |cff888888(always)|r" or ""))
                 cb:SetChecked(VM:IsOfficerRank(r.index))
-                local editable = isOff and not VM:IsAdminRank(r.index)
+                local editable = isOff and not fixed
                 if cb.SetEnabled then cb:SetEnabled(editable) end
                 cb.label:SetTextColor(editable and 1 or 0.6, editable and 1 or 0.6, editable and 1 or 0.6)
                 cb:Show()
@@ -5030,19 +5154,6 @@ function UI:RefreshSettings()
                 cb:Hide()
             end
         end
-    end
-
-    if panel.diagInfo then
-        local gKey = VM:GetActiveGuildKey() or "None"
-        local protoVer = VM.VERSION or 7
-        local addonVer = VM:GetAddonVersion()
-        local inv = VM.db and VM.db.inventory
-        local lastScan = inv and inv.lastScan or 0
-        local scanTimeStr = lastScan > 0 and date("%d/%m %H:%M", lastScan) or "Never"
-        local scanBy = (inv and (inv.lastScanBy or inv.scannedBy)) or "None"
-
-        panel.diagInfo:SetText(string.format("Addon Version: |cffffffffv%s|r  |  Protocol: |cff26a6f2v%d|r  |  Guild Bucket: |cffffffff%s|r\nLast Bank Scan: |cffffffff%s|r (%s)",
-            addonVer, protoVer, gKey, scanBy, scanTimeStr))
     end
 
     local function StyleButton(btn, isActive, activeBg, activeBorder, activeText)
@@ -5067,9 +5178,9 @@ function UI:RefreshSettings()
         end
     end
 
-    local y = 30
+    -- Tab rule rows (inside Guild Configuration)
+    local y = 60
     local unpurchasedTabs = {}
-
     for i = 1, 6 do
         local r = panel.tabRuleRows[i]
         if not VM:IsTabPurchased(i) then
@@ -5077,7 +5188,7 @@ function UI:RefreshSettings()
             table.insert(unpurchasedTabs, i)
         else
             r:ClearAllPoints()
-            r:SetPoint("TOPLEFT", 10, -y)
+            r:SetPoint("TOPLEFT", 0, -y)
             r:Show()
             y = y + 27
 
@@ -5085,12 +5196,8 @@ function UI:RefreshSettings()
             local tabName = (tabData and tabData.name) or string.format("Tab %d", i)
             local rule = VM:GetTabRule(i)
             r.label:SetText(string.format("Tab %d: %s", i, tabName))
-            if not r.userEditedPct then
-                r.pctBox:SetText(tostring(rule.percent or 50))
-            end
-            if not r.selectedMode then
-                r.selectedMode = rule.mode or "FREE"
-            end
+            if not r.userEditedPct then r.pctBox:SetText(tostring(rule.percent or 50)) end
+            if not r.selectedMode then r.selectedMode = rule.mode or "FREE" end
 
             local mode = rule.mode or "FREE"
             local byStr = (rule.updatedBy and rule.updatedBy ~= "") and (" (set by " .. rule.updatedBy .. ")") or ""
@@ -5106,7 +5213,6 @@ function UI:RefreshSettings()
             StyleButton(r.freeBtn, selMode == "FREE", { 0.10, 0.28, 0.18, 1 }, { 0.20, 0.80, 0.40, 1 }, { 0.3, 0.9, 0.5 })
             StyleButton(r.pctBtn, selMode == "PERCENT", { 0.32, 0.26, 0.10, 1 }, { 0.90, 0.70, 0.20, 1 }, { 1, 0.85, 0.2 })
             StyleButton(r.lockBtn, selMode == "LOCKED", { 0.32, 0.12, 0.12, 1 }, { 0.90, 0.30, 0.30, 1 }, { 1, 0.4, 0.4 })
-
             if not isOff then
                 r.saveBtn.customBg = nil
                 r.saveBtn:Disable()
@@ -5120,7 +5226,6 @@ function UI:RefreshSettings()
                 SetButtonAccent(r.saveBtn, THEME.accent)
                 r.saveBtn.label:SetTextColor(1, 1, 1)
             end
-
             if isOff and selMode == "PERCENT" then
                 r.pctBox:Enable()
                 r.pctBox:SetBackdropColor(0.05, 0.06, 0.08, 1)
@@ -5135,22 +5240,32 @@ function UI:RefreshSettings()
             end
         end
     end
-
     if #unpurchasedTabs > 0 and panel.unpurchasedNote then
         panel.unpurchasedNote:ClearAllPoints()
-        panel.unpurchasedNote:SetPoint("TOPLEFT", 14, -(y + 2))
-        panel.unpurchasedNote:SetText(string.format("|cff888888%s: Not purchased (unlock in Guild Bank to configure rules)|r",
-            FormatTabRange(unpurchasedTabs)))
+        panel.unpurchasedNote:SetPoint("TOPLEFT", 4, -(y + 2))
+        panel.unpurchasedNote:SetText(string.format("|cff888888%s: not purchased (buy them in the Guild Bank to set rules)|r", FormatTabRange(unpurchasedTabs)))
         panel.unpurchasedNote:Show()
         y = y + 20
     elseif panel.unpurchasedNote then
         panel.unpurchasedNote:Hide()
     end
+    panel.adminLower:ClearAllPoints()
+    panel.adminLower:SetPoint("TOPLEFT", 0, -(y + 12))
+    local admHeight = y + 12 + 130
+    panel.adminSec:SetHeight(admHeight)
 
-    if panel.lowerSections then
-        panel.lowerSections:ClearAllPoints()
-        panel.lowerSections:SetPoint("TOPLEFT", 10, -(y + 12))
-    end
+    -- Stack the sections in the scroll area
+    local top = 4
+    panel.memberSec:ClearAllPoints()
+    panel.memberSec:SetPoint("TOPLEFT", 6, -top)
+    top = top + panel.memberSec:GetHeight() + 10
+    panel.officerSec:ClearAllPoints()
+    panel.officerSec:SetPoint("TOPLEFT", 6, -top)
+    top = top + panel.officerSec:GetHeight() + 4
+    panel.adminSec:ClearAllPoints()
+    panel.adminSec:SetPoint("TOPLEFT", 6, -top)
+    top = top + admHeight + 10
+    panel.scroll.content:SetHeight(top)
 end
 
 --------------------------------------------------------------------------------
@@ -5643,7 +5758,23 @@ function UI:SelectTab(tabIndex)
 end
 UI.ShowTab = UI.SelectTab
 
+function UI:UpdateRoleBadge()
+    local badge = mainFrame and mainFrame.roleBadge
+    if not badge then return end
+    if VM:IsAdmin() then
+        badge.text:SetText("|cffffaa00Officer|r |cff888888·|r |cffffd700Admin|r")
+        badge.tip = "You have full access: officer functions (approve, withdraw, deliver, Ledger corrections) and guild configuration (tab rules, officer ranks, guild reset)."
+    elseif VM:IsOfficer() then
+        badge.text:SetText("|cffffaa00Officer|r")
+        badge.tip = "You can approve, withdraw and deliver requests and correct the Ledger. Guild configuration (tab rules, officer ranks, reset) needs the Guild Master or the guild's officer rank."
+    else
+        badge.text:SetText("|cff26a6f2Member|r")
+        badge.tip = "You can browse the vault, request items and gold, cancel your own requests and follow the Ledger and Ranking. Officer buttons are hidden or greyed out."
+    end
+end
+
 function UI:RefreshAll()
+    self:UpdateRoleBadge()
     if VM.Minimap and VM.Minimap.UpdateBadge then
         VM.Minimap:UpdateBadge()
     end

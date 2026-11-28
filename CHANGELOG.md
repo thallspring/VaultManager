@@ -40,6 +40,8 @@ All notable changes to **Vault Manager** will be documented in this file.
 - **Expand / Collapse All** in the *Ledger*, a **? Help** window that explains request statuses and officer buttons, and *(Active)* tab rule tooltips for each bank tab.
 - **Data Synced / Request Sync** status button in the header that checks online guild members for newer data.
 - **Guild-Wide Reset with Guild Master Approval:** *Settings > Reset Guild Data* (or `/vm resetguild`) clears the Ledger, requests and vault data for the whole guild and rebuilds them from the Guild Bank logs on the next scan. Tab rules, officer ranks and alt links are kept. The Guild Master or the officer rank asks for the reset by typing *RESET*. The Guild Master must then approve it by typing *RESET* too; a request waits up to 24 hours. A Guild Master who asks for the reset approves it in the same step.
+- **Help Everywhere:** Each tab has a *?* button explaining what it shows and what members and officers can do. Settings and buttons explain themselves in tooltips.
+- **Role Badge:** The window header shows whether you are a *Member*, an *Officer* or an *Officer · Admin*, with a tooltip listing what that role can do.
 - `/vm diag` command that shows Guild Bank detection, sync queue and payment status, to help with troubleshooting.
 
 ### Changed
@@ -50,7 +52,7 @@ All notable changes to **Vault Manager** will be documented in this file.
 - **Reassign** now works on every non-derived Ledger entry, including item deposits (for example raid loot) moved to the guild account with an expense category.
 - **Two-Word Character Names:** Names that appear only partly in the Guild Bank log (first word only) are matched to the full guild roster name everywhere, including class colors and duplicate detection.
 - **Live Prices Only:** Ledger and Ranking always value items at the current auction house price, so taking an item out and putting it back always nets to 0g. The *Historical price* and *Historical / Current values* options have been removed.
-- **Settings** shows unpurchased Guild Bank tabs in a compact list.
+- **Settings Split into Member and Officer Sections:** Personal preferences are in *Member Settings*. Officer workflow options and guild configuration (tab rules, officer ranks, guild reset) are in *Officer Settings*, which stays greyed out and locked until you have the required rank. Unpurchased Guild Bank tabs are shown in a compact list.
 - **Sync Protocol:** The protocol version is now 7. Request and Ledger messages go out before bulk inventory data, the inventory is only re-sent when its contents change (gold-only changes send a small update), and long messages are shortened to fit the chat channel limit instead of being dropped silently.
 - **Officer Rank Detection:** Officer permissions are now determined the same way for your own client, other members' messages and tab rule checks.
 - **Request Cleanup:** Completed, rejected and written-off requests are removed after 30 days.
@@ -70,6 +72,7 @@ All notable changes to **Vault Manager** will be documented in this file.
 - Fixed attaching several stacks to Send Mail overwriting the first attachment.
 - Fixed members being charged a different price in the Ledger than the amount they were asked to pay.
 - Fixed Mail and Trade completing approved requests that were never withdrawn through Vault Manager.
+- Fixed several gold requests delivered together in one trade not being completed.
 - Fixed a member's own withdrawal being ignored for three days after a request for the same item was delivered to them.
 - Fixed items taken out by hand and then completed being charged twice; an item taken out and put back shortly after now cancels out automatically.
 - Fixed the *X* in the mail panel releasing an order while the items stayed in the officer's bags.

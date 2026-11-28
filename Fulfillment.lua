@@ -452,13 +452,27 @@ function Fulfillment:CompleteFromTransfer(recipient, itemsByKey, moneySent, meth
 
     if moneySent and moneySent > 0 then
         local goldReq = self:FindMatchingDeliverableRequest(recipient, nil, nil, nil, moneySent)
+        local goldList = {}
         if goldReq then
-            self:CompleteRequest(goldReq.id, {
+            goldList = { goldReq }
+        else
+            -- Fill All puts several gold requests into one amount: complete them together if they add up
+            local sum = 0
+            for _, r in ipairs(self:GetMyPreparedOrders(recipient)) do
+                if r.isGoldRequest then
+                    sum = sum + (tonumber(r.goldAmount or r.quotedTotalPrice or r.quotedUnitPrice) or 0)
+                    table.insert(goldList, r)
+                end
+            end
+            if sum ~= moneySent then goldList = {} end
+        end
+        for _, gr in ipairs(goldList) do
+            self:CompleteRequest(gr.id, {
                 completedBy = VM:GetPlayerName(),
                 method = method
             })
             completedCount = completedCount + 1
-            table.insert(completedReqs, goldReq)
+            table.insert(completedReqs, gr)
         end
     end
 

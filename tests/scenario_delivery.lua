@@ -161,3 +161,19 @@ check("member notified in addon", seen)
 
 VM.UI:Toggle(); for i = 1, 6 do VM.UI:SelectTab(i) end; M.advance(1)
 M.dumpErrors("final")
+
+-- 15) Two gold requests delivered in one trade (Fill All sums them)
+M.playerRank = 1; M.playerName = "Thallock"
+recv("REQ|G1|Mango|0|1|0|PENDING|1764299010|1764299010|||20000|GUILD_EXPENSE|0|Gold Request||0|0|20000|1|Raid consumables|||0|RAID", "Mango")
+recv("REQ|G2|Mango|0|1|0|PENDING|1764299011|1764299011|||30000|GUILD_EXPENSE|0|Gold Request||0|0|30000|1|Repairs|||0|RAID", "Mango")
+for _, id in ipairs({ "G1", "G2" }) do
+    local g = VM.db.requests[id]
+    g.status = "PREPARED"; g.preparedBy = VM:GetPlayerName()
+end
+M.doTrade("Mango"); M.advance(0.5)
+VM.Fulfillment:PopulateTradeAll("Mango"); M.advance(1)
+check("fill all puts the summed gold in the trade", M.trade.myMoney == 50000)
+M.trade.myMoney = 50000
+M.fire("TRADE_ACCEPT_UPDATE", 1, 1); M.fire("UI_INFO_MESSAGE", 0, "Trade complete."); M.advance(1)
+check("both gold requests completed by one trade", VM.db.requests.G1.status == "FULFILLED" and VM.db.requests.G2.status == "FULFILLED")
+M.dumpErrors("gold")

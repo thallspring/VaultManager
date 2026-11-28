@@ -41,6 +41,7 @@ All notable changes to **Vault Manager** will be documented in this file.
 - **Data Synced / Request Sync** status button in the header that checks online guild members for newer data.
 - **Guild-Wide Reset with Guild Master Approval:** *Settings > Reset Guild Data* (or `/vm resetguild`) clears the Ledger, requests and vault data for the whole guild and rebuilds them from the Guild Bank logs on the next scan. Tab rules, officer ranks and alt links are kept. The Guild Master or the officer rank asks for the reset by typing *RESET*. The Guild Master must then approve it by typing *RESET* too; a request waits up to 24 hours. A Guild Master who asks for the reset approves it in the same step.
 - **Help Everywhere:** Each tab has a *?* button explaining what it shows and what members and officers can do. Settings and buttons explain themselves in tooltips.
+- **Sync Compatibility:** *Settings > Sync & Diagnostics* shows how many guild members with Vault Manager were seen recently and names anyone on an older version whose data may not sync fully. It replaces the bare protocol number.
 - **Role Badge:** The window header shows whether you are a *Member*, an *Officer* or an *Officer · Admin*, with a tooltip listing what that role can do.
 - `/vm diag` command that shows Guild Bank detection, sync queue and payment status, to help with troubleshooting.
 

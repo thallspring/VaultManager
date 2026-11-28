@@ -4,7 +4,7 @@ _G.VaultManager = VM
 VM.PREFIX = "VMGR_V1"
 VM.VERSION = 7
 -- Development build marker (the .toc version stays at the last release until in-game tests pass)
-VM.BUILD = "1.5.0-dev.14 (2026-11-28)"
+VM.BUILD = "1.5.0-dev.15 (2026-11-28)"
 VM.OFFICER_MAX_RANK_INDEX = 1
 -- Admin ranks (by index, never by name): 0 = Guild Master, 1 = the guild's built-in officer rank.
 -- Only admin ranks may change Vault Manager configuration (officer ranks, tab rules, guild reset).
@@ -1838,6 +1838,7 @@ SlashCmdList["VAULTMANAGER"] = function(msg)
         p("Officer / Admin / GM", tostring(VM:IsOfficer()) .. " / " .. tostring(VM:IsAdmin()) .. " / " .. tostring(VM:IsGuildMaster()))
         p("Data epoch", tostring(VM.db and VM.db.dbEpoch))
         p("Player / canonical", VM:GetPlayerName() .. " / " .. VM:CanonicalActor(VM:GetPlayerName()))
+        p("Sync protocol", "v" .. tostring(VM.VERSION))
         p("Tabs / money log index", tostring(GetNumGuildBankTabs and GetNumGuildBankTabs()) .. " / " .. tostring((MAX_GUILDBANK_TABS or 8) + 1))
         p("Comms queue (high/low)", VM.Comms and VM.Comms.GetQueueSizes and string.format("%d/%d", VM.Comms:GetQueueSizes()) or "?")
         if VM.Ledger and VM.Ledger.GetHeldCash then

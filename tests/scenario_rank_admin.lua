@@ -41,3 +41,12 @@ M.playerRank = 3; M.playerName = "Mango"
 check("member is not officer", not VM:IsOfficer())
 VM.UI:Toggle(); VM.UI:SelectTab(6); M.advance(1)
 M.dumpErrors("final")
+
+-- Sync compatibility line in Settings (replaces the bare protocol number)
+M.playerRank = 1; M.playerName = "Thallock"
+recv("HELLO|7|1|0|0|0|0|0|1.4.3", "Raidboss")
+recv("HELLO|6|1|0|0|0|0|0|1.4.3", "Mango")
+local seen, outdated = VM.Comms:GetPeerCompatibility()
+check("peers seen and outdated member detected", seen == 2 and #outdated == 1 and outdated[1] == "Mango")
+VM.UI:Toggle(); VM.UI:SelectTab(6); M.advance(0.5)
+M.dumpErrors("compat")

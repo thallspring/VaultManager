@@ -5098,8 +5098,23 @@ function UI:RefreshSettings()
         local lastScan = inv and inv.lastScan or 0
         local scanTimeStr = lastScan > 0 and date("%d/%m %H:%M", lastScan) or "Never"
         local scanBy = (inv and (inv.lastScanBy or inv.scannedBy)) or "None"
-        panel.diagInfo:SetText(string.format("Version: |cffffffffv%s|r (build %s)  |  Protocol: |cff26a6f2v%d|r  |  Guild: |cffffffff%s|r\nLast bank scan: |cffffffff%s|r (%s)",
-            VM:GetAddonVersion(), tostring(VM.BUILD or "-"), VM.VERSION or 7, gKey, scanBy, scanTimeStr))
+        -- Sync compatibility instead of a bare protocol number: who else runs Vault Manager and who is outdated
+        local syncLine
+        local seen, outdated = 0, {}
+        if VM.Comms and VM.Comms.GetPeerCompatibility then seen, outdated = VM.Comms:GetPeerCompatibility() end
+        if seen == 0 then
+            syncLine = "Sync: |cff999999no other members with Vault Manager seen yet this session|r"
+        elseif #outdated == 0 then
+            syncLine = string.format("Sync: |cff44dd77%d member(s) with Vault Manager seen recently, all compatible|r", seen)
+        else
+            local names = {}
+            for i = 1, math.min(3, #outdated) do names[i] = outdated[i] end
+            if #outdated > 3 then table.insert(names, string.format("+%d more", #outdated - 3)) end
+            syncLine = string.format("Sync: %d member(s) seen recently, |cffff8844%d on an older version (%s) — their data may not sync fully until they update|r",
+                seen, #outdated, table.concat(names, ", "))
+        end
+        panel.diagInfo:SetText(string.format("Version: |cffffffffv%s|r (build %s)  |  Guild: |cffffffff%s|r  |  Last bank scan: |cffffffff%s|r (%s)\n%s",
+            VM:GetAddonVersion(), tostring(VM.BUILD or "-"), gKey, scanBy, scanTimeStr, syncLine))
     end
 
     -- Officer settings: dimmed and locked until you are an officer

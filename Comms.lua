@@ -161,6 +161,23 @@ function Comms:RequestManualSync()
     return true, 0
 end
 
+-- Members seen with Vault Manager in the last 3 hours, and those whose sync protocol is older than ours
+-- (they cannot read all of our data and should update)
+function Comms:GetPeerCompatibility()
+    local seen, outdated = 0, {}
+    local cutoff = time() - 3 * 3600
+    for name, info in pairs(Comms.peerVersions or {}) do
+        if (info.at or 0) >= cutoff then
+            seen = seen + 1
+            if (tonumber(info.proto) or 0) < (VM.VERSION or 0) then
+                table.insert(outdated, name)
+            end
+        end
+    end
+    table.sort(outdated)
+    return seen, outdated
+end
+
 function Comms:GetSyncButtonStatus()
     if VM.isUnguilded then
         return "NO_GUILD", "No Guild", { 0.35, 0.35, 0.35, 1 }, "Join a guild to sync vault data."
@@ -545,6 +562,10 @@ function Comms:OnMessageReceived(msg, sender)
             lastResetRelayAt = GetTime()
             self:BroadcastResetRequest()
         end
+
+        -- Remember which version each member runs (shown as sync compatibility in Settings)
+        Comms.peerVersions = Comms.peerVersions or {}
+        Comms.peerVersions[sender] = { proto = peerVersion, addon = peerAddonVer, at = time() }
 
         local hasNewerAddon = peerAddonVer and (peerAddonVer ~= "") and VM:IsNewerVersion(peerAddonVer, VM:GetAddonVersion())
         local hasNewerProto = (peerVersion > VM.VERSION)

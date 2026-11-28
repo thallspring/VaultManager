@@ -39,6 +39,7 @@ All notable changes to **Vault Manager** will be documented in this file.
 - **Pair / Void Return:** Officers can pair a withdrawn item with its matching return (same member, item and count within 30 days). Both entries are voided and net to 0g, no matter how the auction price changed in between.
 - **Expand / Collapse All** in the *Ledger*, a **? Help** window that explains request statuses and officer buttons, and *(Active)* tab rule tooltips for each bank tab.
 - **Data Synced / Request Sync** status button in the header that checks online guild members for newer data.
+- **Guild-Wide Reset with Guild Master Approval:** *Settings > Reset Guild Data* (or `/vm resetguild`) clears the Ledger, requests and vault data for the whole guild and rebuilds them from the Guild Bank logs on the next scan. Tab rules, officer ranks and alt links are kept. The Guild Master or the officer rank asks for the reset by typing *RESET*. The Guild Master must then approve it by typing *RESET* too; a request waits up to 24 hours. A Guild Master who asks for the reset approves it in the same step.
 - `/vm diag` command that shows Guild Bank detection, sync queue and payment status, to help with troubleshooting.
 
 ### Changed
@@ -65,6 +66,7 @@ All notable changes to **Vault Manager** will be documented in this file.
 - Fixed deleted Ledger entries coming back after the next bank scan or from other guild members.
 - Fixed two identical transactions by the same member within two days being merged into one.
 - Fixed a member with no bank data being able to wipe the vault view for the whole guild.
+- Fixed any guild member being able to trigger a guild-wide data reset. Resets now need the Guild Master's approval, and members who missed a reset can no longer send old data back.
 - Fixed attaching several stacks to Send Mail overwriting the first attachment.
 - Fixed members being charged a different price in the Ledger than the amount they were asked to pay.
 - Fixed Mail and Trade completing approved requests that were never withdrawn through Vault Manager.

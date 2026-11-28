@@ -283,7 +283,17 @@ function Comms:SendRaw(payload)
 end
 
 function Comms:BroadcastEpoch()
-    self:SendRaw(string.format("EPOCH|%d", VM.db.dbEpoch or 1))
+    self:SendRaw(string.format("EPOCH|%d|%s|%d", VM.db.dbEpoch or 1, EscapeStr(VM.db.epochApprovedBy or ""), math.floor(tonumber(VM.db.epochAt) or 0)))
+end
+
+function Comms:BroadcastResetRequest()
+    local r = VM:GetPendingReset()
+    if not r then return end
+    self:SendRaw(string.format("RESETREQ|%s|%s|%d", EscapeStr(r.id), EscapeStr(r.by or ""), math.floor(tonumber(r.at) or 0)))
+end
+
+function Comms:BroadcastResetDecline(id)
+    self:SendRaw(string.format("RESETDECLINE|%s", EscapeStr(id or "")))
 end
 
 function Comms:SendHello()
@@ -300,20 +310,21 @@ function Comms:SendHello()
         VM.VERSION, epoch, invTs, reqTs, mainTs, ruleTs, txTs, EscapeStr(addonVer)))
 end
 
-local function CheckAndAdoptEpoch(peerEpoch)
+-- Peers' data epochs (from HELLO); messages from clients still on an older epoch are ignored so
+-- wiped data can never be pushed back after a guild-wide reset
+local peerEpochs = {}
+local lastEpochRelayAt = 0
+local lastResetRelayAt = 0
+
+-- Only called for verified EPOCH messages (admin sender, Guild Master approval)
+local function CheckAndAdoptEpoch(peerEpoch, approvedBy, approvedAt)
     if peerEpoch and peerEpoch > (VM.db.dbEpoch or 1) then
         VM.db.dbEpoch = peerEpoch
-        VM.db.inventory = { lastScan = 0, scannedBy = "", gold = 0, tabs = {} }
-        VM.db.vault = VM.db.inventory
-        VM.db.scanMetadata = VM.db.inventory
-        VM.db.ledger = {}
-        VM.db.processedBankLogs = {}
-        VM.db.requests = {}
-        VM.db.fulfillments = VM.db.requests
-        VM.db.tabRules = {}
-        VM.db.mains = {}
-        VM.db.roster = VM.db.mains
-        VM:Print(string.format("Guild reset detected from peer (Epoch %d). Local data reset.", peerEpoch))
+        VM:WipeGuildData()
+        VM.db.epochApprovedBy = approvedBy
+        VM.db.epochAt = approvedAt
+        VM:Print(string.format("|cffffaa00Guild-wide reset by %s (epoch %d). Local data cleared; it is rebuilt from the Guild Bank logs.|r",
+            approvedBy or "the Guild Master", peerEpoch))
         if VM.Minimap and VM.Minimap.UpdateBadge then VM.Minimap:UpdateBadge() end
         ScheduleUIRefresh()
         return true
@@ -427,8 +438,50 @@ function Comms:OnMessageReceived(msg, sender)
     local nowGT = GetTime and GetTime() or 0
 
     if cmd == "EPOCH" then
+        -- Accepted only from an admin-rank sender (server-verified) and approved by the Guild Master
         local peerEpoch = tonumber(parts[2]) or 1
-        CheckAndAdoptEpoch(peerEpoch)
+        local approvedBy = UnescapeStr(parts[3] or "")
+        local approvedAt = tonumber(parts[4]) or 0
+        if not VM:IsAdminName(sender) then return end
+        if approvedBy == "" or not VM:IsGuildMasterName(approvedBy) then return end
+        peerEpochs[sender] = peerEpoch
+        CheckAndAdoptEpoch(peerEpoch, approvedBy, approvedAt)
+        return
+    end
+
+    if cmd == "RESETREQ" then
+        local id = UnescapeStr(parts[2] or "")
+        local by = UnescapeStr(parts[3] or "")
+        local at = tonumber(parts[4]) or 0
+        if id == "" or not VM:IsAdminName(sender) or not VM:IsAdminName(by) then return end
+        if (time() - at) > VM.RESET_REQUEST_TTL then return end
+        local cur = VM:GetPendingReset()
+        if not cur or cur.id ~= id then
+            VM.db.pendingReset = { id = id, by = by, at = at }
+            if VM:IsGuildMaster() then
+                if VM.UI and VM.UI.ShowResetApproval then VM.UI:ShowResetApproval(VM.db.pendingReset) end
+            elseif VM:IsAdmin() then
+                VM:Print(string.format("|cffffaa00%s requested a guild-wide Vault Manager reset. Waiting for the Guild Master.|r", by))
+            end
+            ScheduleUIRefresh()
+        end
+        return
+    end
+
+    if cmd == "RESETDECLINE" then
+        local id = UnescapeStr(parts[2] or "")
+        if not VM:IsGuildMasterName(sender) then return end
+        local cur = VM:GetPendingReset()
+        if cur and cur.id == id then
+            VM.db.pendingReset = nil
+            if VM:IsAdmin() then VM:Print("The Guild Master declined the guild-wide reset request.") end
+            ScheduleUIRefresh()
+        end
+        return
+    end
+
+    -- Ignore data from clients that are still on an older data epoch (not reset yet)
+    if peerEpochs[sender] and peerEpochs[sender] < (VM.db.dbEpoch or 1) and cmd ~= "HELLO" then
         return
     end
 
@@ -470,8 +523,25 @@ function Comms:OnMessageReceived(msg, sender)
             peerTxTs = tonumber(parts[6]) or 0
         end
 
-        if CheckAndAdoptEpoch(peerEpoch) then return end
-        if peerEpoch < (VM.db.dbEpoch or 1) then return end
+        peerEpochs[sender] = peerEpoch
+        local myEpoch = VM.db.dbEpoch or 1
+        if peerEpoch < myEpoch then
+            -- Peer missed a reset: admins re-announce the GM-approved epoch so it can catch up
+            if VM:IsAdmin() and VM.db.epochApprovedBy and (GetTime() - lastEpochRelayAt) > 60 then
+                lastEpochRelayAt = GetTime()
+                self:BroadcastEpoch()
+            end
+            return
+        end
+        if peerEpoch > myEpoch then
+            -- A newer epoch is only adopted from a verified EPOCH message; don't sync old data to them
+            return
+        end
+        -- Guild Master came online: re-announce a pending reset request so they can approve it
+        if VM:GetPendingReset() and VM:IsAdmin() and VM:IsGuildMasterName(sender) and (GetTime() - lastResetRelayAt) > 60 then
+            lastResetRelayAt = GetTime()
+            self:BroadcastResetRequest()
+        end
 
         local hasNewerAddon = peerAddonVer and (peerAddonVer ~= "") and VM:IsNewerVersion(peerAddonVer, VM:GetAddonVersion())
         local hasNewerProto = (peerVersion > VM.VERSION)

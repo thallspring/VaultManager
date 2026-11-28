@@ -4,7 +4,7 @@ _G.VaultManager = VM
 VM.PREFIX = "VMGR_V1"
 VM.VERSION = 7
 -- Development build marker (the .toc version stays at the last release until in-game tests pass)
-VM.BUILD = "1.5.0-dev.6 (2026-11-28)"
+VM.BUILD = "1.5.0-dev.7 (2026-11-28)"
 VM.OFFICER_MAX_RANK_INDEX = 1
 -- Admin ranks (by index, never by name): 0 = Guild Master, 1 = the guild's built-in officer rank.
 -- Only admin ranks may change Vault Manager configuration (officer ranks, tab rules, guild reset).
@@ -518,6 +518,106 @@ end
 
 function VM:IsOfficerName(name)
     return self:IsOfficerRank(self:GetRankIndexForName(name))
+end
+
+function VM:IsGuildMaster()
+    if not IsInGuild() then return false end
+    local _, _, rankIndex = GetGuildInfo("player")
+    if rankIndex == 0 then return true end
+    return (IsGuildLeader and IsGuildLeader()) and true or false
+end
+
+function VM:IsGuildMasterName(name)
+    return self:GetRankIndexForName(name) == 0
+end
+
+--------------------------------------------------------------------------------
+-- Guild-wide data reset (two-step: an admin requests, the Guild Master approves)
+-- Data only (ledger, requests, vault cache, pending CoD); configuration (tab rules, officer ranks,
+-- alt links) is kept. Everything is rebuilt from the visible Guild Bank logs on the next scan.
+--------------------------------------------------------------------------------
+VM.RESET_REQUEST_TTL = 24 * 3600
+
+function VM:WipeGuildData()
+    if not self.db then return end
+    self.db.inventory = { lastScan = 0, scannedBy = "", gold = 0, tabs = {} }
+    self.db.vault = self.db.inventory
+    self.db.scanMetadata = self.db.inventory
+    self.db.ledger = {}
+    self.db.processedBankLogs = {}
+    self.db.requests = {}
+    self.db.fulfillments = self.db.requests
+    self.db.pendingCod = nil
+    self.db.pendingReset = nil
+    if self.Fulfillment then self.Fulfillment.fulfillStarted = {} end
+end
+
+function VM:GetPendingReset()
+    local r = self.db and self.db.pendingReset
+    if type(r) ~= "table" then return nil end
+    if (time() - (tonumber(r.at) or 0)) > VM.RESET_REQUEST_TTL then
+        self.db.pendingReset = nil
+        return nil
+    end
+    return r
+end
+
+-- Guild Master only: performs the reset and announces the new epoch to the guild
+function VM:ResetGuildData(requestedBy)
+    if not self:IsGuildMaster() then
+        self:Print("|cffff4444Only the Guild Master can carry out a guild-wide reset.|r")
+        return
+    end
+    local me = self:CanonicalActor(self:GetPlayerName())
+    self.db.dbEpoch = (self.db.dbEpoch or 1) + 1
+    self:WipeGuildData()
+    self.db.epochApprovedBy = me
+    self.db.epochAt = time()
+    if self.Comms then self.Comms:BroadcastEpoch() end
+    self:Print(string.format("|cffffaa00Guild-wide reset done (epoch %d%s). All members' data is cleared; it is rebuilt from the Guild Bank logs on the next scan.|r",
+        self.db.dbEpoch, (requestedBy and requestedBy ~= "") and (", requested by " .. requestedBy) or ""))
+    if self.BankScanner and self.BankScanner:IsBankOpen() then
+        self.BankScanner:SchedulePostWithdrawScan()
+    end
+    if self.Minimap and self.Minimap.UpdateBadge then self.Minimap:UpdateBadge() end
+    if self.UI then self.UI:RefreshAll() end
+end
+
+-- Step 1 (admin): the Guild Master resets directly; other admins send a request for GM approval
+function VM:RequestGuildReset()
+    if not self:IsAdmin() then
+        self:Print("|cffff4444Only the Guild Master or the guild's officer rank can request a guild-wide reset.|r")
+        return
+    end
+    if self:IsGuildMaster() then
+        self:ResetGuildData()
+        return
+    end
+    local me = self:CanonicalActor(self:GetPlayerName())
+    self.db.pendingReset = {
+        id = string.format("RST_%d_%d", time(), math.random(1000, 9999)),
+        by = me,
+        at = time(),
+    }
+    if self.Comms then self.Comms:BroadcastResetRequest() end
+    self:Print("|cffffaa00Guild-wide reset requested. The Guild Master must approve it (valid for 24 hours).|r")
+    if self.UI then self.UI:RefreshAll() end
+end
+
+-- Step 2 (Guild Master)
+function VM:ApproveGuildReset(id)
+    local r = self:GetPendingReset()
+    if not r or (id and r.id ~= id) then return end
+    self:ResetGuildData(r.by)
+end
+
+function VM:DeclineGuildReset(id)
+    local r = self:GetPendingReset()
+    if not r or (id and r.id ~= id) or not self:IsGuildMaster() then return end
+    self.db.pendingReset = nil
+    if self.Comms then self.Comms:BroadcastResetDecline(r.id) end
+    self:Print("Guild-wide reset request declined.")
+    if self.UI then self.UI:RefreshAll() end
 end
 
 function VM:IsAdminName(name)
@@ -1715,7 +1815,8 @@ SlashCmdList["VAULTMANAGER"] = function(msg)
         p("Last bank activity (s ago)", S and S.lastBankActivityAt and string.format("%.1f", GetTime() - S.lastBankActivityAt) or "never")
         p("Scan state", S and S.scanState)
         p("Withdrawing", VM.Fulfillment and VM.Fulfillment.isWithdrawing)
-        p("Officer / Admin", tostring(VM:IsOfficer()) .. " / " .. tostring(VM:IsAdmin()))
+        p("Officer / Admin / GM", tostring(VM:IsOfficer()) .. " / " .. tostring(VM:IsAdmin()) .. " / " .. tostring(VM:IsGuildMaster()))
+        p("Data epoch", tostring(VM.db and VM.db.dbEpoch))
         p("Player / canonical", VM:GetPlayerName() .. " / " .. VM:CanonicalActor(VM:GetPlayerName()))
         p("Tabs / money log index", tostring(GetNumGuildBankTabs and GetNumGuildBankTabs()) .. " / " .. tostring((MAX_GUILDBANK_TABS or 8) + 1))
         p("Comms queue (high/low)", VM.Comms and VM.Comms.GetQueueSizes and string.format("%d/%d", VM.Comms:GetQueueSizes()) or "?")
@@ -1762,26 +1863,12 @@ SlashCmdList["VAULTMANAGER"] = function(msg)
         print("|cff00ccff[Vault Manager]|r Local cache reset. (Not broadcasted to guild).")
         if VM.UI then VM.UI:RefreshAll() end
     elseif cmd == "resetguild" then
-        if not VM:IsAdmin() then
-            print("|cffff4444[Vault Manager]|r Only the Guild Master or the guild's officer rank can perform a guild-wide reset.")
-            return
+        -- Same two-step flow as Settings: typed confirmation, then Guild Master approval
+        if VM.UI and VM.UI.ShowResetGuildConfirm then
+            VM.UI:ShowResetGuildConfirm()
+        else
+            VM:RequestGuildReset()
         end
-        if VM.db then
-            VM.db.dbEpoch = (VM.db.dbEpoch or 1) + 1
-            VM.db.inventory = { lastScan = 0, scannedBy = "", tabs = {} }
-            VM.db.vault = VM.db.inventory
-            VM.db.ledger = {}
-            VM.db.processedBankLogs = {}
-            VM.db.requests = {}
-            VM.db.fulfillments = VM.db.requests
-            VM.db.tabRules = {}
-            VM.db.mains = {}
-            VM.db.roster = VM.db.mains
-        end
-        if VM.Comms then VM.Comms:BroadcastEpoch() end
-        local epoch = (VM.db and VM.db.dbEpoch) or 1
-        print("|cff00ccff[Vault Manager]|r Guild-wide reset performed (Epoch " .. epoch .. "). Broadcasted to guild.")
-        if VM.UI then VM.UI:RefreshAll() end
     else
         if VM.UI then VM.UI:Toggle() end
     end

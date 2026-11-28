@@ -99,6 +99,80 @@ if StaticPopupDialogs then
         hideOnEscape = true,
         preferredIndex = 3,
     }
+    -- Typed confirmation ("RESET") for guild-wide resets
+    local function ResetEditBox(dialog)
+        return dialog.editBox or dialog.EditBox or (dialog.GetName and _G[(dialog:GetName() or "") .. "EditBox"])
+    end
+    local function ResetTyped(dialog)
+        local eb = ResetEditBox(dialog)
+        return eb and strupper(strtrim(eb:GetText() or "")) == "RESET"
+    end
+    local function ResetOnShow(dialog)
+        local eb = ResetEditBox(dialog)
+        if eb then eb:SetText("") eb:SetFocus() end
+        if dialog.button1 then dialog.button1:Disable() end
+    end
+    local function ResetOnTextChanged(editBox)
+        local dialog = editBox:GetParent()
+        if dialog and dialog.button1 then
+            if strupper(strtrim(editBox:GetText() or "")) == "RESET" then dialog.button1:Enable() else dialog.button1:Disable() end
+        end
+    end
+
+    StaticPopupDialogs["VAULTMANAGER_RESET_REQUEST"] = {
+        text = "Reset ALL Vault Manager data for the whole guild?\n\nLedger, requests and the vault cache are cleared for every member. Tab rules, officer ranks and alt links are kept. Data is rebuilt from the Guild Bank logs on the next scan.\n\n%s\n\nType RESET to confirm.",
+        button1 = "Reset",
+        button2 = "Cancel",
+        hasEditBox = 1,
+        OnShow = ResetOnShow,
+        EditBoxOnTextChanged = ResetOnTextChanged,
+        OnAccept = function(self)
+            if ResetTyped(self) then VM:RequestGuildReset() end
+        end,
+        EditBoxOnEnterPressed = function(editBox)
+            local dialog = editBox:GetParent()
+            if dialog and ResetTyped(dialog) then
+                VM:RequestGuildReset()
+                dialog:Hide()
+            end
+        end,
+        EditBoxOnEscapePressed = function(editBox) editBox:GetParent():Hide() end,
+        timeout = 0,
+        whileDead = true,
+        hideOnEscape = true,
+        preferredIndex = 3,
+    }
+    StaticPopupDialogs["VAULTMANAGER_RESET_APPROVE"] = {
+        text = "%s asks to reset ALL Vault Manager data for the whole guild.\n\nLedger, requests and the vault cache are cleared for every member (tab rules, officer ranks and alt links are kept). Data is rebuilt from the Guild Bank logs.\n\nType RESET to approve.",
+        button1 = "Approve",
+        button2 = "Later",
+        button3 = "Decline",
+        hasEditBox = 1,
+        OnShow = ResetOnShow,
+        EditBoxOnTextChanged = ResetOnTextChanged,
+        OnAccept = function(self, data)
+            local d = data or self.data
+            if ResetTyped(self) and d then VM:ApproveGuildReset(d.id) end
+        end,
+        OnAlt = function(self, data)
+            local d = data or self.data
+            if d then VM:DeclineGuildReset(d.id) end
+        end,
+        EditBoxOnEnterPressed = function(editBox)
+            local dialog = editBox:GetParent()
+            local d = dialog and dialog.data
+            if dialog and ResetTyped(dialog) and d then
+                VM:ApproveGuildReset(d.id)
+                dialog:Hide()
+            end
+        end,
+        EditBoxOnEscapePressed = function(editBox) editBox:GetParent():Hide() end,
+        timeout = 0,
+        whileDead = true,
+        hideOnEscape = true,
+        preferredIndex = 3,
+    }
+
     StaticPopupDialogs["VAULTMANAGER_COMPLETE_MANUAL"] = {
         text = "Mark as delivered?\n\n%s\n\nHas the member already paid %s?",
         button1 = "Paid",
@@ -4917,9 +4991,28 @@ function UI:BuildSettingsPanel(panel)
     end)
     panel.clearCacheBtn = clearCacheBtn
 
+    local resetGuildBtn = CreateModernButton(lower, 132, 24, "Reset Guild Data...", { 0.85, 0.20, 0.20, 1 })
+    resetGuildBtn:SetPoint("LEFT", clearCacheBtn, "RIGHT", 10, 0)
+    resetGuildBtn:SetScript("OnClick", function(selfBtn)
+        if not selfBtn:IsEnabled() then return end
+        local pending = VM:GetPendingReset()
+        if pending and VM:IsGuildMaster() then
+            UI:ShowResetApproval(pending)
+        else
+            UI:ShowResetGuildConfirm()
+        end
+    end)
+    resetGuildBtn:HookScript("OnEnter", function(selfBtn)
+        GameTooltip:SetOwner(selfBtn, "ANCHOR_TOP")
+        GameTooltip:SetText("Clear ledger, requests and vault data for the whole guild and rebuild from the Guild Bank logs. Requested by the Guild Master or officer rank, approved by the Guild Master.", 1, 1, 1, 1, true)
+        GameTooltip:Show()
+    end)
+    resetGuildBtn:HookScript("OnLeave", function() GameTooltip:Hide() end)
+    panel.resetGuildBtn = resetGuildBtn
+
     local maintDesc = lower:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-    maintDesc:SetPoint("LEFT", clearCacheBtn, "RIGHT", 10, 0)
-    maintDesc:SetWidth(425)
+    maintDesc:SetPoint("LEFT", resetGuildBtn, "RIGHT", 10, 0)
+    maintDesc:SetWidth(290)
     maintDesc:SetJustifyH("LEFT")
     maintDesc:SetText("Clears bank & request cache (keeps ledger and rules).")
     panel.maintDesc = maintDesc
@@ -5035,6 +5128,15 @@ function UI:RefreshSettings()
         end
     end
     if panel.whisperCb then panel.whisperCb:SetChecked(uiPrefs.memberWhispers ~= false) end
+    if panel.resetGuildBtn then
+        ApplyButtonState(panel.resetGuildBtn, VM:IsAdmin() and "active" or "disabled")
+        local pending = VM:GetPendingReset()
+        if pending and panel.maintDesc then
+            panel.maintDesc:SetText(string.format("|cffffaa00Reset requested by %s — waiting for Guild Master approval.|r", pending.by or "?"))
+        elseif panel.maintDesc then
+            panel.maintDesc:SetText("Clears bank & request cache (keeps ledger and rules).")
+        end
+    end
     if panel.autoMailCb then panel.autoMailCb:SetChecked(uiPrefs.autoFillNextMail ~= false) end
 
     if panel.rankChecks then
@@ -5481,6 +5583,24 @@ end
 --------------------------------------------------------------------------------
 -- RELOG REMINDER POPUP (UNFULFILLED PREPARED REQUESTS)
 --------------------------------------------------------------------------------
+function UI:ShowResetGuildConfirm()
+    if not VM:IsAdmin() then
+        VM:Print("|cffff4444Only the Guild Master or the guild's officer rank can reset guild data.|r")
+        return
+    end
+    local step = VM:IsGuildMaster() and "You are the Guild Master: the reset happens immediately."
+        or "Step 1 of 2: the Guild Master must approve before anything is deleted."
+    if StaticPopup_Show then StaticPopup_Show("VAULTMANAGER_RESET_REQUEST", step) end
+end
+
+function UI:ShowResetApproval(request)
+    if not request or not VM:IsGuildMaster() then return end
+    if StaticPopup_Show then
+        local dlg = StaticPopup_Show("VAULTMANAGER_RESET_APPROVE", request.by or "An officer")
+        if dlg then dlg.data = { id = request.id } end
+    end
+end
+
 -- Small reminder shown to officers at the Guild Bank when auto-open is off (or as a fallback)
 local bankReminderFrame
 function UI:ShowBankReminder(pendingCount, approvedCount, preparedCount)

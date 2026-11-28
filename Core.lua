@@ -4,8 +4,11 @@ _G.VaultManager = VM
 VM.PREFIX = "VMGR_V1"
 VM.VERSION = 7
 -- Development build marker (the .toc version stays at the last release until in-game tests pass)
-VM.BUILD = "1.5.0-dev.4 (2026-11-28)"
+VM.BUILD = "1.5.0-dev.5 (2026-11-28)"
 VM.OFFICER_MAX_RANK_INDEX = 1
+-- Admin ranks (by index, never by name): 0 = Guild Master, 1 = the guild's built-in officer rank.
+-- Only admin ranks may change Vault Manager configuration (officer ranks, tab rules, guild reset).
+VM.ADMIN_MAX_RANK_INDEX = 1
 -- Monthly compaction is paused until P2P ledger state is stable across clients (tombstone purge still runs)
 VM.COMPACTION_ENABLED = false
 VM.debugLog = {}
@@ -400,9 +403,21 @@ end
 -- Single source of truth for officer ranks (used locally, for peers, for tab rules and P2P trust).
 -- Guild Master (rank 0) is always an officer. Other ranks come from the guild-wide officer rank
 -- setting (Settings > Officer Ranks, synced between officers); default = ranks 0 and 1.
+function VM:IsAdminRank(rankIndex)
+    return type(rankIndex) == "number" and rankIndex >= 0 and rankIndex <= VM.ADMIN_MAX_RANK_INDEX
+end
+
+function VM:IsAdmin()
+    if not IsInGuild() then return false end
+    local _, _, rankIndex = GetGuildInfo("player")
+    if self:IsAdminRank(rankIndex) then return true end
+    return (IsGuildLeader and IsGuildLeader()) and true or false
+end
+
 function VM:IsOfficerRank(rankIndex)
     if type(rankIndex) ~= "number" or rankIndex < 0 then return false end
-    if rankIndex == 0 then return true end
+    -- Admin ranks are always officers; delegated ranks come from the admin-managed setting
+    if self:IsAdminRank(rankIndex) then return true end
     local cfg = self.db and self.db.officerRanks
     if type(cfg) == "table" and type(cfg.ranks) == "table" then
         return cfg.ranks[rankIndex] == true
@@ -430,17 +445,17 @@ function VM:GetGuildRankList()
     return list
 end
 
--- Officer: choose which guild ranks count as officers (e.g. "Raid Leader", "Officer Alt")
+-- Admin (Guild Master / built-in officer rank): choose which additional ranks get officer functions
+-- (e.g. "Raid Leader", "Officer Alt"). Delegated ranks can never change this setting themselves.
 function VM:SetOfficerRank(rankIndex, isOfficer)
-    if not self:IsOfficer() or type(rankIndex) ~= "number" or rankIndex <= 0 then return end
-    local _, _, myRank = GetGuildInfo("player")
-    if rankIndex == myRank and not isOfficer then
-        self:Print("|cffffaa00You cannot remove officer rights from your own rank.|r")
+    if type(rankIndex) ~= "number" or self:IsAdminRank(rankIndex) then return end
+    if not self:IsAdmin() then
+        self:Print("|cffff4444Only the Guild Master and the guild's officer rank can change officer ranks.|r")
         return
     end
     local ranks = {}
     for _, r in ipairs(self:GetGuildRankList()) do
-        if r.index > 0 and self:IsOfficerRank(r.index) then ranks[r.index] = true end
+        if not self:IsAdminRank(r.index) and self:IsOfficerRank(r.index) then ranks[r.index] = true end
     end
     ranks[rankIndex] = isOfficer and true or nil
     self.db.officerRanks = { ranks = ranks, updatedAt = time(), updatedBy = self:GetPlayerName() }
@@ -461,43 +476,50 @@ function VM:IsOfficer()
     return false
 end
 
-function VM:IsOfficerName(name)
+-- Guild rank index of a character (roster cache, then live roster incl. first-word match); nil if unknown
+function VM:GetRankIndexForName(name)
     local norm = self:NormalizeName(name)
-    if norm == "" or norm == "GUILD" or norm == "UNATTRIBUTED" then return false end
+    if norm == "" or norm == "GUILD" or norm == "UNATTRIBUTED" then return nil end
 
     local key = self:ResolveNameKey(self.db.rosterCache, norm)
     local rankIndex = key and self.db.rosterCache[key] or nil
+    if type(rankIndex) == "number" then return rankIndex end
 
-    if type(rankIndex) ~= "number" then
-        if IsInGuild() and GetNumGuildMembers then
-            local total = GetNumGuildMembers() or 0
-            local normLower = norm:lower()
-            local allowPrefix = not norm:find("%s")
-            local prefix = normLower .. " "
-            local prefixLen = #prefix
-            local prefixRank, prefixCount = nil, 0
+    if IsInGuild() and GetNumGuildMembers then
+        local total = GetNumGuildMembers() or 0
+        local normLower = norm:lower()
+        local allowPrefix = not norm:find("%s")
+        local prefix = normLower .. " "
+        local prefixLen = #prefix
+        local prefixRank, prefixCount = nil, 0
 
-            for i = 1, total do
-                local rName, _, rIndex = GetGuildRosterInfo(i)
-                if rName then
-                    local rNorm = self:NormalizeName(rName)
-                    local rLower = rNorm:lower()
-                    if rLower == normLower then
-                        self.db.rosterCache[rNorm] = rIndex or 99
-                        return self:IsOfficerRank(rIndex)
-                    elseif allowPrefix and #rLower > prefixLen and rLower:sub(1, prefixLen) == prefix then
-                        prefixRank = rIndex
-                        prefixCount = prefixCount + 1
-                    end
+        for i = 1, total do
+            local rName, _, rIndex = GetGuildRosterInfo(i)
+            if rName then
+                local rNorm = self:NormalizeName(rName)
+                local rLower = rNorm:lower()
+                if rLower == normLower then
+                    self.db.rosterCache[rNorm] = rIndex or 99
+                    return rIndex
+                elseif allowPrefix and #rLower > prefixLen and rLower:sub(1, prefixLen) == prefix then
+                    prefixRank = rIndex
+                    prefixCount = prefixCount + 1
                 end
             end
-            if prefixCount == 1 and type(prefixRank) == "number" then
-                return self:IsOfficerRank(prefixRank)
-            end
         end
-        return false
+        if prefixCount == 1 and type(prefixRank) == "number" then
+            return prefixRank
+        end
     end
-    return self:IsOfficerRank(rankIndex)
+    return nil
+end
+
+function VM:IsOfficerName(name)
+    return self:IsOfficerRank(self:GetRankIndexForName(name))
+end
+
+function VM:IsAdminName(name)
+    return self:IsAdminRank(self:GetRankIndexForName(name))
 end
 
 function VM:UpdateRosterCache()
@@ -1063,7 +1085,7 @@ function VM:ComputeRuleSignature(guildName, tabIdx, rule)
 end
 
 function VM:SetTabRule(tabIndex, mode, percent)
-    if not self:IsOfficer() then return end
+    if not self:IsAdmin() then return end
     local pName = self:GetPlayerName()
     local pct = tonumber(percent) or 50
     local m = mode or "FREE"
@@ -1113,7 +1135,7 @@ function VM:ValidateTabRules()
     if not IsInGuild() or GetNumGuildMembers() == 0 then return end
     self:UpdateRosterCache()
     local guildName = GetGuildInfo("player") or self:GetActiveGuildKey() or ""
-    local isLocalOfficer = self:IsOfficer()
+    local isLocalOfficer = self:IsAdmin()
 
     for i, rule in pairs(self.db.tabRules) do
         if rule then
@@ -1154,7 +1176,7 @@ function VM:ValidateTabRules()
                     end
 
                     if foundInRoster and rankIndex ~= nil then
-                        if not self:IsOfficerRank(rankIndex) then
+                        if not self:IsAdminRank(rankIndex) then
                             isNonOfficer = true
                         end
                     end
@@ -1691,7 +1713,7 @@ SlashCmdList["VAULTMANAGER"] = function(msg)
         p("Last bank activity (s ago)", S and S.lastBankActivityAt and string.format("%.1f", GetTime() - S.lastBankActivityAt) or "never")
         p("Scan state", S and S.scanState)
         p("Withdrawing", VM.Fulfillment and VM.Fulfillment.isWithdrawing)
-        p("Officer", VM:IsOfficer())
+        p("Officer / Admin", tostring(VM:IsOfficer()) .. " / " .. tostring(VM:IsAdmin()))
         p("Player / canonical", VM:GetPlayerName() .. " / " .. VM:CanonicalActor(VM:GetPlayerName()))
         p("Tabs / money log index", tostring(GetNumGuildBankTabs and GetNumGuildBankTabs()) .. " / " .. tostring((MAX_GUILDBANK_TABS or 8) + 1))
         p("Comms queue (high/low)", VM.Comms and VM.Comms.GetQueueSizes and string.format("%d/%d", VM.Comms:GetQueueSizes()) or "?")
@@ -1738,8 +1760,8 @@ SlashCmdList["VAULTMANAGER"] = function(msg)
         print("|cff00ccff[Vault Manager]|r Local cache reset. (Not broadcasted to guild).")
         if VM.UI then VM.UI:RefreshAll() end
     elseif cmd == "resetguild" then
-        if not VM:IsOfficer() then
-            print("|cffff4444[Vault Manager]|r Only officers or Guild Master can perform a guild-wide reset.")
+        if not VM:IsAdmin() then
+            print("|cffff4444[Vault Manager]|r Only the Guild Master or the guild's officer rank can perform a guild-wide reset.")
             return
         end
         if VM.db then

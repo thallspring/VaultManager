@@ -782,7 +782,7 @@ function Comms:OnMessageReceived(msg, sender)
         local cleanBy = updatedBy:match("^[^-]+") or updatedBy
         cleanBy = VM:NormalizeName(cleanBy)
 
-        if cleanBy == "System(TamperReset)" or not VM:IsOfficerName(cleanBy) then
+        if cleanBy == "System(TamperReset)" or not VM:IsAdminName(cleanBy) then
             return
         end
 
@@ -791,7 +791,7 @@ function Comms:OnMessageReceived(msg, sender)
         if VM.db.rosterCache and next(VM.db.rosterCache) then
             local rKey = VM:ResolveNameKey(VM.db.rosterCache, normBy)
             local rankIdx = rKey and VM.db.rosterCache[rKey] or nil
-            if rankIdx ~= nil and not VM:IsOfficerRank(rankIdx) then
+            if rankIdx ~= nil and not VM:IsAdminRank(rankIdx) then
                 return
             end
         end
@@ -820,8 +820,8 @@ function Comms:OnMessageReceived(msg, sender)
         ScheduleUIRefresh()
 
     elseif cmd == "ORANKS" then
-        -- Guild-wide officer rank set; only accepted from someone who is an officer under our current set
-        if not fromOfficer then return end
+        -- Guild-wide officer rank set; only accepted from an admin rank (Guild Master / officer rank)
+        if not VM:IsAdminName(sender) then return end
         local csv = UnescapeStr(parts[2] or "")
         local updatedAt = tonumber(parts[3]) or 0
         local updatedBy = UnescapeStr(parts[4] or sender)

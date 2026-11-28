@@ -4565,33 +4565,33 @@ function UI:BuildSettingsPanel(panel)
         r.status:SetJustifyH("LEFT")
 
         r.freeBtn:SetScript("OnClick", function()
-            if not VM:IsOfficer() then return end
+            if not VM:IsAdmin() then return end
             r.selectedMode = "FREE"
             UI:RefreshSettings()
         end)
         r.pctBtn:SetScript("OnClick", function()
-            if not VM:IsOfficer() then return end
+            if not VM:IsAdmin() then return end
             r.selectedMode = "PERCENT"
             UI:RefreshSettings()
         end)
         r.lockBtn:SetScript("OnClick", function()
-            if not VM:IsOfficer() then return end
+            if not VM:IsAdmin() then return end
             r.selectedMode = "LOCKED"
             UI:RefreshSettings()
         end)
         r.saveBtn:SetScript("OnClick", function()
-            if not VM:IsOfficer() then return end
+            if not VM:IsAdmin() then return end
             local p = tonumber(r.pctBox:GetText()) or 50
             if p <= 0 then p = 50; r.pctBox:SetText("50") end
             r.userEditedPct = false
             VM:SetTabRule(r.tabIndex, r.selectedMode or "FREE", p)
         end)
         r.pctBox:SetScript("OnTextChanged", function()
-            if VM:IsOfficer() then r.userEditedPct = true end
+            if VM:IsAdmin() then r.userEditedPct = true end
         end)
         r.pctBox:SetScript("OnEnterPressed", function(selfBox)
             selfBox:ClearFocus()
-            if not VM:IsOfficer() then return end
+            if not VM:IsAdmin() then return end
             local p = tonumber(selfBox:GetText()) or 50
             if p <= 0 then p = 50; selfBox:SetText("50") end
             r.userEditedPct = false
@@ -4609,7 +4609,7 @@ function UI:BuildSettingsPanel(panel)
 
     -- Dynamic container for Sections 2, 3, and 4
     local lower = CreateFrame("Frame", nil, panel)
-    lower:SetSize(744, 300)
+    lower:SetSize(744, 312)
     lower:SetPoint("TOPLEFT", 10, -100)
     panel.lowerSections = lower
 
@@ -4833,7 +4833,13 @@ function UI:BuildSettingsPanel(panel)
     -- Section 5: Officer Ranks (guild-wide, synced between officers)
     local rankTitle = lower:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     rankTitle:SetPoint("TOPLEFT", 0, -224)
-    rankTitle:SetText("|cff26a6f2Officer Ranks|r  |cff999999— ranks that may approve, withdraw and manage the Ledger (Guild Master always included)|r")
+    rankTitle:SetText("|cff26a6f2Officer Ranks|r  |cff999999— extra ranks that may approve, withdraw and manage the Ledger|r")
+
+    local rankNote = lower:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+    rankNote:SetPoint("TOPLEFT", 0, -292)
+    rankNote:SetWidth(744)
+    rankNote:SetJustifyH("LEFT")
+    rankNote:SetText("The Guild Master and the guild's officer rank (2nd rank) always have full access and are the only ranks that can change these settings and the tab rules. Withdrawing still requires the rank's Guild Bank permissions in WoW.")
 
     panel.rankChecks = {}
     for i = 1, 10 do
@@ -4862,13 +4868,14 @@ function UI:RefreshSettings()
     if not panel or not panel.tabRuleRows then return end
 
     local uiPrefs = GetUIPrefs()
-    local isOff = VM:IsOfficer()
+    -- Configuration (tab rules, officer ranks) is reserved for admin ranks: Guild Master + officer rank
+    local isOff = VM:IsAdmin()
 
     if panel.ruleTitle then
         if isOff then
             panel.ruleTitle:SetText("|cff26a6f2Guild Bank Tab Rules|r  |cff44dd77(Officer Authorized)|r")
         else
-            panel.ruleTitle:SetText("|cff26a6f2Guild Bank Tab Rules|r  |cffff5555[Read-Only (Officer Rank Required)]|r")
+            panel.ruleTitle:SetText("|cff26a6f2Guild Bank Tab Rules|r  |cffff5555[Read-Only (Guild Master / Officer rank required)]|r")
         end
     end
 
@@ -4891,7 +4898,7 @@ function UI:RefreshSettings()
                 cb.rankIndex = r.index
                 cb.label:SetText(r.name)
                 cb:SetChecked(VM:IsOfficerRank(r.index))
-                local editable = isOff and r.index ~= 0
+                local editable = isOff and not VM:IsAdminRank(r.index)
                 if cb.SetEnabled then cb:SetEnabled(editable) end
                 cb.label:SetTextColor(editable and 1 or 0.6, editable and 1 or 0.6, editable and 1 or 0.6)
                 cb:Show()

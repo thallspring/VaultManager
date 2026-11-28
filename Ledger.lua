@@ -786,14 +786,10 @@ function Ledger:GetFullItemValue(tx, useHistorical, priceMode)
         return (tx.unitPriceAtTime or 0) * (tx.count or 1)
     end
 
-    -- One guild-wide rule (useHistorical/priceMode arguments are ignored on purpose): the view never
-    -- depends on which toggle someone clicked last, and every member sees the same numbers.
-    local mode = VM:GetValuationMode()
+    -- Always the current AH price (useHistorical/priceMode arguments are ignored on purpose);
+    -- the stored price is only a fallback when no current price is known
     local unitVal = 0
-    if mode == "locked" then
-        -- Stored value; the current price is only used when nothing was stored
-        unitVal = (tx.unitPriceAtTime and tx.unitPriceAtTime > 0) and tx.unitPriceAtTime or (VM:GetEffectiveLivePrice(tx.itemID, tx.itemLink, tx.unitPriceAtTime) or 0)
-    else -- "live"
+    do
         local livePrice = VM:GetEffectiveLivePrice(tx.itemID, tx.itemLink, tx.unitPriceAtTime) or 0
         unitVal = (livePrice > 0) and livePrice or (tx.unitPriceAtTime or 0)
     end

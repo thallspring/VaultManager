@@ -21,19 +21,10 @@ local sig = VM:ComputeRuleSignature("Test Guild", 1, { mode = "FREE", percent = 
 recv("RULE|1|FREE|50|1764399999|Raidboss Lead|" .. sig, "Raidboss")
 check("RULE from delegated rank rejected", VM.db.tabRules[1] == nil or VM.db.tabRules[1].updatedBy ~= "Raidboss Lead")
 
--- Guild-wide valuation: default "at time of entry"; admin switches to live and it syncs
-check("default valuation is at time of entry", VM:GetValuationMode() == "locked")
+-- Valuation is always the current AH price (stored price only as fallback)
 local tx = VM.Ledger:RecordDeposit("Mango", 14047, M.items[14047].link, 20, "BANK_LOG")
 tx.unitPriceAtTime = 999
-check("stored value used for display", VM.Ledger:GetTransactionValue(tx) == 999 * 20)
-VM:SetValuationMode("live"); M.advance(5)
-local sentVal = false for _, m in ipairs(M.sent) do if m:find("^VALMODE|live|") then sentVal = true end end
-check("admin switch to live is broadcast", sentVal and VM:GetValuationMode() == "live")
-check("live value used after switch", VM.Ledger:GetTransactionValue(tx) == 400 * 20)
-recv("VALMODE|locked|1764399999|Raidboss Lead", "Raidboss")
-check("valuation change from delegated rank rejected", VM:GetValuationMode() == "live")
-recv("VALMODE|locked|1764399999|Boss Master", "Boss")
-check("valuation change from admin accepted", VM:GetValuationMode() == "locked")
+check("live price used for display", VM.Ledger:GetTransactionValue(tx) == 400 * 20)
 
 -- Local client running as the delegated Raid Leader
 M.playerRank = 2; M.playerName = "Raidboss"
@@ -43,8 +34,7 @@ VM:SetOfficerRank(3, true)
 check("delegated rank cannot change officer ranks", not VM:IsOfficerRank(3))
 VM:SetTabRule(1, "PERCENT", 50)
 check("delegated rank cannot change tab rules", VM.db.tabRules[1] == nil or VM.db.tabRules[1].mode ~= "PERCENT")
-VM:SetValuationMode("live")
-check("delegated rank cannot change valuation", VM:GetValuationMode() == "locked")
+
 
 -- Plain member
 M.playerRank = 3; M.playerName = "Mango"

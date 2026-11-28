@@ -126,8 +126,6 @@ end
 
 function Comms:GetRulesMaxTimestamp(tbl)
     local maxTs = (VM.db and type(VM.db.officerRanks) == "table" and tonumber(VM.db.officerRanks.updatedAt)) or 0
-    local valTs = (VM.db and type(VM.db.valuation) == "table" and tonumber(VM.db.valuation.updatedAt)) or 0
-    if valTs > maxTs then maxTs = valTs end
     for _, v in pairs(tbl or {}) do
         if type(v) == "table" and not v.tampered then
             local ts = v.updatedAt or 0
@@ -904,18 +902,6 @@ function Comms:OnMessageReceived(msg, sender)
         MarkDataReceived()
         ScheduleUIRefresh()
 
-    elseif cmd == "VALMODE" then
-        -- Guild-wide item valuation; only accepted from an admin rank (Guild Master / officer rank)
-        if not VM:IsAdminName(sender) then return end
-        local mode = (UnescapeStr(parts[2] or "") == "live") and "live" or "locked"
-        local updatedAt = tonumber(parts[3]) or 0
-        local updatedBy = UnescapeStr(parts[4] or sender)
-        local existing = VM.db.valuation
-        if type(existing) == "table" and (tonumber(existing.updatedAt) or 0) >= updatedAt then return end
-        VM.db.valuation = { mode = mode, updatedAt = updatedAt, updatedBy = updatedBy }
-        MarkDataReceived()
-        ScheduleUIRefresh()
-
     elseif cmd == "ORANKS" then
         -- Guild-wide officer rank set; only accepted from an admin rank (Guild Master / officer rank)
         if not VM:IsAdminName(sender) then return end
@@ -1283,19 +1269,9 @@ function Comms:BroadcastOfficerRanks(sinceTs)
     self:SendRaw(string.format("ORANKS|%s|%d|%s", table.concat(idx, ","), math.floor(tonumber(cfg.updatedAt) or 0), EscapeStr(cfg.updatedBy or "")))
 end
 
-function Comms:BroadcastValuation(sinceTs)
-    local v = VM.db and VM.db.valuation
-    if type(v) ~= "table" then return end
-    local minTs = tonumber(sinceTs) or 0
-    if minTs > 0 and (tonumber(v.updatedAt) or 0) <= minTs then return end
-    self:SendRaw(string.format("VALMODE|%s|%d|%s", v.mode == "live" and "live" or "locked",
-        math.floor(tonumber(v.updatedAt) or 0), EscapeStr(v.updatedBy or "")))
-end
-
 function Comms:BroadcastTabRules(sinceTs)
     if not VM.db or not VM.db.tabRules then return end
     self:BroadcastOfficerRanks(sinceTs)
-    self:BroadcastValuation(sinceTs)
     local minTs = tonumber(sinceTs) or 0
     local guildName = GetGuildInfo("player") or VM:GetActiveGuildKey() or ""
     for tabIdx, rule in pairs(VM.db.tabRules) do

@@ -371,19 +371,11 @@ local function ShowItemTooltip(selfFrame, itemLink, itemID, itemName, tx, isHist
         end
     end
 
-    if tx and tx.unitPriceAtTime and tx.unitPriceAtTime > 0 then
-        GameTooltip:AddLine(" ")
-        local isLocked = (VM:GetValuationMode() == "locked")
-        local lockedTotal = tx.unitPriceAtTime * (tx.count or 1)
-        local curPrice = (tx.itemID and tx.itemID > 0) and (VM:GetEffectiveLivePrice(tx.itemID, tx.itemLink, tx.unitPriceAtTime) or 0) or tx.unitPriceAtTime
-        local curTotal = curPrice * (tx.count or 1)
-
-        if isLocked then
-            GameTooltip:AddLine(string.format("Locked Value (at time): %s (Active)", VM:FormatMoney(lockedTotal)), 0.9, 0.8, 0.2)
-            GameTooltip:AddLine(string.format("Current AH Value: %s", VM:FormatMoney(curTotal)), 0.6, 0.6, 0.6)
-        else
-            GameTooltip:AddLine(string.format("Locked Value (at time): %s", VM:FormatMoney(lockedTotal)), 0.6, 0.6, 0.6)
-            GameTooltip:AddLine(string.format("Current AH Value: %s (Active)", VM:FormatMoney(curTotal)), 0.2, 0.8, 0.9)
+    if tx and tx.itemID and tonumber(tx.itemID) and tonumber(tx.itemID) > 0 then
+        local curPrice = VM:GetEffectiveLivePrice(tx.itemID, tx.itemLink, tx.unitPriceAtTime) or 0
+        if curPrice > 0 then
+            GameTooltip:AddLine(" ")
+            GameTooltip:AddLine(string.format("Current AH Value: %s", VM:FormatMoney(curPrice * (tx.count or 1))), 0.2, 0.8, 0.9)
         end
     end
 
@@ -1340,7 +1332,7 @@ function UI:RefreshExportContent()
         return tostring(str or ""):gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", "")
     end
 
-    local basisDesc = (priceMode == "locked") and "Value at time of transaction" or "Live AH"
+    local basisDesc = "Live AH"
     local lines = {}
     if isCSV then
         table.insert(lines, string.format("# Valuation Basis: %s | Sort: %s (%s)", basisDesc, sortBy, sortDir))
@@ -3276,12 +3268,6 @@ function UI:BuildLedgerPanel(panel)
     filterStrip:SetPoint("TOPRIGHT", -10, -38)
     ApplyModernBackdrop(filterStrip, { 0.05, 0.06, 0.08, 0.9 }, THEME.border)
 
-    -- Read-only: valuation is a guild-wide setting (Settings), not a per-view toggle
-    local basisText = filterStrip:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-    basisText:SetPoint("LEFT", 10, 0)
-    basisText:SetWidth(130)
-    basisText:SetJustifyH("LEFT")
-    panel.basisText = basisText
 
     local ffaToggle = CreateFrame("CheckButton", nil, filterStrip, "UICheckButtonTemplate")
     ffaToggle:SetSize(20, 20)
@@ -3488,16 +3474,13 @@ function UI:RefreshLedger()
     end
 
     local uiPrefs = GetUIPrefs()
-    if panel.basisText then
-        panel.basisText:SetText(VM:GetValuationMode() == "live" and "Values: live AH" or "Values: at time of entry")
-    end
     if panel.ffaToggle then panel.ffaToggle:SetChecked(uiPrefs.includeFFA ~= false) end
     if panel.hideLegacyCb then panel.hideLegacyCb:SetChecked(uiPrefs.hideLegacyLedger or false) end
 
     for _, r in ipairs(panel.scroll.rows) do r:Hide() end
     if panel.scroll.legacyHeader then panel.scroll.legacyHeader:Hide() end
 
-    local useHist = nil -- valuation follows the guild-wide setting
+    local useHist = nil -- values are always at the current AH price
     local hideLegacy = uiPrefs.hideLegacyLedger or false
     local q = STATE.ledgerSearchQuery or ""
     local allGroups = VM.Ledger:GetAggregatedByMain(useHist)
@@ -3809,19 +3792,6 @@ function UI:BuildRankingPanel(panel)
     topBar:SetPoint("TOPLEFT", 10, -6)
     topBar:SetPoint("TOPRIGHT", -10, -6)
 
-    -- Read-only: valuation is a guild-wide setting (Settings), identical for every member
-    local basisText = topBar:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    basisText:SetPoint("LEFT", 2, 0)
-    basisText:SetJustifyH("LEFT")
-    panel.basisText = basisText
-    panel.UpdateBasisButtons = function()
-        if VM:GetValuationMode() == "live" then
-            basisText:SetText("|cff8899aaValues:|r |cff26a6f2Live AH prices|r")
-        else
-            basisText:SetText("|cff8899aaValues:|r |cffffd700At time of entry|r")
-        end
-    end
-    panel.UpdateBasisButtons()
 
     local exportBtn = CreateModernButton(topBar, 76, 24, "Export", THEME.accent)
     exportBtn:SetPoint("RIGHT", 0, 0)
@@ -4021,7 +3991,6 @@ function UI:RefreshRanking()
     if VM.UpdateRosterCache then VM:UpdateRosterCache() end
 
     local uiPrefs = GetUIPrefs()
-    if panel.UpdateBasisButtons then panel.UpdateBasisButtons() end
     if panel.showLegacyCb then panel.showLegacyCb:SetChecked(uiPrefs.showLegacyRanking ~= false) end
     if panel.hideOfficersCb then panel.hideOfficersCb:SetChecked(uiPrefs.hideOfficers or false) end
     if panel.ffaRankCb then panel.ffaRankCb:SetChecked(uiPrefs.includeFFA ~= false) end
@@ -4181,22 +4150,12 @@ function UI:RefreshRanking()
                         dir = isGold and "|cffffd700[GOLD IN]|r" or "|cff44dd77[IN]|r"
                     end
                     local itemDisplay = isGold and "Gold" or (tx.itemLink or tx.itemName or "Item")
-                    local lockedVal = VM.Ranking:GetTransactionValuation(tx, "locked")
-                    local liveVal = VM.Ranking:GetTransactionValuation(tx, "live")
+                    local liveVal = VM.Ranking:GetTransactionValuation(tx)
                     local charTag = (tx.player ~= grp.mainName and tx.player ~= "UNATTRIBUTED")
                         and (" (" .. VM:ColorizeName(tx.player, grp.isLegacy and "808080" or nil) .. ")") or ""
 
-                    local lockedDisplay, liveDisplay
-                    if priceMode == "locked" then
-                        lockedDisplay = string.format("|cffffcc33Historical: %s (Active)|r", VM:FormatMoney(lockedVal))
-                        liveDisplay = string.format("|cff888888Current: %s|r", VM:FormatMoney(liveVal))
-                    else
-                        lockedDisplay = string.format("|cff888888Historical: %s|r", VM:FormatMoney(lockedVal))
-                        liveDisplay = string.format("|cff26a6f2Current: %s (Active)|r", VM:FormatMoney(liveVal))
-                    end
-
-                    sub.detailText:SetText(string.format("|cff888888%s|r %s %s%s  —  %s  |  %s",
-                        dateStr, dir, itemDisplay, charTag, lockedDisplay, liveDisplay))
+                    sub.detailText:SetText(string.format("|cff888888%s|r %s %s%s  —  %s",
+                        dateStr, dir, itemDisplay, charTag, VM:FormatMoney(liveVal)))
                 end
 
                 y = y + 22
@@ -4799,60 +4758,9 @@ function UI:BuildSettingsPanel(panel)
     end)
     panel.chatNotifCb = chatNotifCb
 
-    local basisLabel = lower:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    basisLabel:SetPoint("TOPLEFT", 0, -52)
-    basisLabel:SetText("Item values (guild-wide):")
-
-    local basisHistBtn = CreateModernButton(lower, 120, 20, "At time of entry")
-    basisHistBtn:SetPoint("LEFT", basisLabel, "RIGHT", 8, 0)
-    basisHistBtn:SetScript("OnClick", function()
-        VM:SetValuationMode("locked")
-        if panel.UpdateBasisButtons then panel.UpdateBasisButtons() end
-    end)
-    panel.basisHistBtn = basisHistBtn
-
-    local basisCurrentBtn = CreateModernButton(lower, 120, 20, "Live AH prices")
-    basisCurrentBtn:SetPoint("LEFT", basisHistBtn, "RIGHT", 4, 0)
-    basisCurrentBtn:SetScript("OnClick", function()
-        VM:SetValuationMode("live")
-        if panel.UpdateBasisButtons then panel.UpdateBasisButtons() end
-    end)
-    panel.basisCurrentBtn = basisCurrentBtn
-    for _, b in ipairs({ basisHistBtn, basisCurrentBtn }) do
-        b:HookScript("OnEnter", function(selfBtn)
-            GameTooltip:SetOwner(selfBtn, "ANCHOR_TOP")
-            GameTooltip:SetText("How Ledger and Ranking value items, for every member. 'At time of entry' keeps the value stored with each transaction (stable, identical for everyone). 'Live AH prices' uses each member's current price data. Only the Guild Master and the officer rank can change this.", 1, 1, 1, 1, true)
-            GameTooltip:Show()
-        end)
-        b:HookScript("OnLeave", function() GameTooltip:Hide() end)
-    end
-
-    panel.UpdateBasisButtons = function()
-        local mode = VM:GetValuationMode()
-        if mode == "locked" then
-            basisHistBtn.customBg = { 0.15, 0.28, 0.42, 1 }
-            basisHistBtn:SetBackdropColor(0.15, 0.28, 0.42, 1)
-            SetButtonAccent(basisHistBtn, THEME.accent)
-            basisHistBtn.label:SetTextColor(1, 0.82, 0)
-            basisCurrentBtn.customBg = nil
-            basisCurrentBtn:SetBackdropColor(THEME.btnBg[1], THEME.btnBg[2], THEME.btnBg[3], 1)
-            SetButtonAccent(basisCurrentBtn, THEME.border)
-            basisCurrentBtn.label:SetTextColor(0.6, 0.6, 0.6)
-        else
-            basisCurrentBtn.customBg = { 0.15, 0.28, 0.42, 1 }
-            basisCurrentBtn:SetBackdropColor(0.15, 0.28, 0.42, 1)
-            SetButtonAccent(basisCurrentBtn, THEME.accent)
-            basisCurrentBtn.label:SetTextColor(1, 0.82, 0)
-            basisHistBtn.customBg = nil
-            basisHistBtn:SetBackdropColor(THEME.btnBg[1], THEME.btnBg[2], THEME.btnBg[3], 1)
-            SetButtonAccent(basisHistBtn, THEME.border)
-            basisHistBtn.label:SetTextColor(0.6, 0.6, 0.6)
-        end
-    end
-
     local newerVerNotifCb = CreateFrame("CheckButton", nil, lower, "UICheckButtonTemplate")
     newerVerNotifCb:SetSize(20, 20)
-    newerVerNotifCb:SetPoint("LEFT", basisCurrentBtn, "RIGHT", 20, 0)
+    newerVerNotifCb:SetPoint("TOPLEFT", 0, -50)
     newerVerNotifCb.label = newerVerNotifCb:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     newerVerNotifCb.label:SetPoint("LEFT", newerVerNotifCb, "RIGHT", 4, 0)
     newerVerNotifCb.label:SetText("Notify in Chat on Newer Addon Version")
@@ -5068,7 +4976,6 @@ function UI:RefreshSettings()
         local showMM = not (VM.db and VM.db.minimap and VM.db.minimap.hide == true)
         panel.minimapCb:SetChecked(showMM)
     end
-    if panel.UpdateBasisButtons then panel.UpdateBasisButtons() end
     if panel.legacyFilterCb then panel.legacyFilterCb:SetChecked(uiPrefs.showLegacyRanking ~= false) end
     if panel.autoOpenBankCb then panel.autoOpenBankCb:SetChecked(uiPrefs.autoOpenAtBank ~= false) end
     if panel.chatNotifCb then panel.chatNotifCb:SetChecked(uiPrefs.enableChatNotifications ~= false) end

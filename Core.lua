@@ -4,7 +4,7 @@ _G.VaultManager = VM
 VM.PREFIX = "VMGR_V1"
 VM.VERSION = 7
 -- Development build marker (the .toc version stays at the last release until in-game tests pass)
-VM.BUILD = "1.5.0-dev.10 (2026-11-28)"
+VM.BUILD = "1.5.0-dev.11 (2026-11-28)"
 VM.OFFICER_MAX_RANK_INDEX = 1
 -- Admin ranks (by index, never by name): 0 = Guild Master, 1 = the guild's built-in officer rank.
 -- Only admin ranks may change Vault Manager configuration (officer ranks, tab rules, guild reset).
@@ -1032,25 +1032,11 @@ function VM:GetMaxRequestQty(itemID, itemLink)
     return stack * VM.MAX_REQUEST_STACKS
 end
 
--- Guild-wide item valuation for Ledger & Ranking (set by the Guild Master / officer rank, synced):
---   "locked" (default) = value stored with each transaction (identical for every member, stable)
---   "live"             = current AH price of the viewing client
+-- Ledger & Ranking always value items at the current (live) AH price, so a withdrawal and a later
+-- return of the same item net to 0g. The value stored with a transaction is only a fallback when
+-- no current price is available.
 function VM:GetValuationMode()
-    local v = self.db and self.db.valuation
-    if type(v) == "table" and v.mode == "live" then return "live" end
-    return "locked"
-end
-
-function VM:SetValuationMode(mode)
-    if not self:IsAdmin() then
-        self:Print("|cffff4444Only the Guild Master and the guild's officer rank can change the item valuation.|r")
-        return
-    end
-    mode = (mode == "live") and "live" or "locked"
-    if mode == self:GetValuationMode() then return end
-    self.db.valuation = { mode = mode, updatedAt = time(), updatedBy = self:GetPlayerName() }
-    if self.Comms and self.Comms.BroadcastValuation then self.Comms:BroadcastValuation() end
-    if self.UI then self.UI:RefreshAll() end
+    return "live"
 end
 
 function VM:GetEffectiveLivePrice(itemID, itemLink, fallbackScanPrice)

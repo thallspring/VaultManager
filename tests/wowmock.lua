@@ -17,6 +17,8 @@ stubMT.__index = function() return setmetatable({}, stubMT) end
 proxyMT.__index = function(t, k)
     local v = rawget(proxyMT, "methods")[k]
     if v then return v end
+    -- Addon-private flags (e.g. __vmHooked) must read as nil like on real frames
+    if type(k) == "string" and k:sub(1, 2) == "__" then return nil end
     return setmetatable({}, stubMT)
 end
 local methods = {}

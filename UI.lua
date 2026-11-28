@@ -533,7 +533,7 @@ end
 
 -- Auto-open at the Guild Bank: keep the window up for a moment in case the bank UI (or a bag addon)
 -- closes special windows while it opens; a deliberate close by the player is always respected.
-local AUTO_OPEN_STICKY_SEC = 2.0
+local AUTO_OPEN_STICKY_SEC = 5.0
 function UI:MarkAutoOpened()
     self.autoOpenedAt = GetTime()
 end
@@ -1759,6 +1759,11 @@ function UI:CreateMainFrame()
         local now = GetTime()
         local autoAt = UI.autoOpenedAt or 0
         local userAt = UI.userClosedAt or 0
+        -- Diagnostics: who hid the window (shown with /vm debug)
+        if userAt < now - 0.2 and debugstack then
+            local stack = tostring(debugstack(2, 4, 0) or ""):gsub("Interface\\AddOns\\", ""):gsub("\n", " < ")
+            VM:LogDebug("MainFrame hidden by: " .. stack:sub(1, 220))
+        end
         if (now - autoAt) < AUTO_OPEN_STICKY_SEC and userAt < autoAt and C_Timer and C_Timer.After then
             -- Hidden by something else right after auto-opening (CloseSpecialWindows etc.): show again
             C_Timer.After(0.05, function()

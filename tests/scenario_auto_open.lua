@@ -18,3 +18,17 @@ VM.BankScanner:SetBankOpen(false, "test"); M.advance(1)
 M.fire("GUILDBANKLOG_UPDATE"); M.advance(1)
 io.write("reminder shown: ", tostring(_G.VaultManagerBankReminder and _G.VaultManagerBankReminder:IsShown()), " main shown: ", tostring(f:IsShown()), "\n")
 M.dumpErrors()
+
+-- Bag addon replaces the default frame: GuildBankFrame shows, is hidden at once, VM must still open
+VM.db.uiPrefs.autoOpenAtBank = true
+VM.BankScanner:SetBankOpen(false, "test"); M.advance(1)
+f:Hide(); VM.UI.userClosedAt = 0
+GuildBankFrame:Hide()
+GuildBankFrame:Show()      -- OnShow -> session opens
+GuildBankFrame:Hide()      -- bag addon hides the default frame immediately
+M.advance(4)
+io.write("bag addon case: session kept: ", tostring(VM.BankScanner:IsBankOpen()), " VM opened: ", tostring(f:IsShown()), "\n")
+-- Something closes the window 1s after auto-open (CloseSpecialWindows) -> re-shown
+f:Hide(); M.advance(1)
+io.write("re-shown after late foreign hide: ", tostring(f:IsShown()), "\n")
+M.dumpErrors()

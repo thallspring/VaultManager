@@ -1784,8 +1784,20 @@ function Fulfillment:GetApprovedOrders()
 end
 
 -- Auto-opens VM when Guild Bank opens: Requests tab if officer has open orders, otherwise Vault & Requests
-function Fulfillment:OnGuildBankOpened()
-    if not IsBankCurrentlyOpen() or not VM.UI then return end
+-- attempt: 1..3 (repeated shortly after the bank opened); openedAt: GetTime() of the bank session start
+function Fulfillment:OnGuildBankOpened(attempt, openedAt)
+    attempt = attempt or 1
+    if not VM.UI then return end
+    local mf = _G["VaultManagerMainFrame"]
+    if attempt > 1 then
+        -- Retries only while the bank is open, the window is not up and the player did not close it
+        if VM.BankScanner and not VM.BankScanner:IsBankOpen() then return end
+        if mf and mf:IsShown() then return end
+        if (VM.UI.userClosedAt or 0) >= (openedAt or 0) then
+            VM:LogDebug("AutoOpen: retry " .. attempt .. " skipped (closed by player)")
+            return
+        end
+    end
     local prefs = VM.db and VM.db.uiPrefs
     local autoOpen = not (prefs and prefs.autoOpenAtBank == false)
 
@@ -1797,21 +1809,26 @@ function Fulfillment:OnGuildBankOpened()
     end
     local hasWork = (pendingCount + approvedCount + preparedCount) > 0
 
-    if hasWork then
+    if hasWork and attempt == 1 then
         VM:Print(string.format("Guild Bank: %d pending, %d approved, %d prepared by you.", pendingCount, approvedCount, preparedCount))
     end
 
     if not autoOpen then
-        if hasWork and VM.UI.ShowBankReminder then
+        VM:LogDebug("AutoOpen: disabled in Settings")
+        if hasWork and attempt == 1 and VM.UI.ShowBankReminder then
             VM.UI:ShowBankReminder(pendingCount, approvedCount, preparedCount)
         end
         return
     end
 
+    VM:LogDebug(string.format("AutoOpen: attempt %d -> %s", attempt, hasWork and "Requests" or "Vault"))
     if hasWork and VM.UI.OpenToRequestsTab then
         VM.UI:OpenToRequestsTab(true)
     elseif VM.UI.OpenToVaultTab then
         VM.UI:OpenToVaultTab(true)
+    end
+    if mf and not mf:IsShown() then
+        VM:LogDebug("AutoOpen: window did not stay open")
     end
 end
 

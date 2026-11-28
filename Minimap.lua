@@ -2,15 +2,49 @@ local _, VM = ...
 VM.Minimap = {}
 local MM = VM.Minimap
 
-local BUTTON_RADIUS = 80
+local EDGE_OFFSET = 5        -- distance outside the minimap edge (same convention as other addon buttons)
 local VAULT_ICON = "Interface\\Icons\\INV_Box_02"
 local minimapBtn
 
+-- Which quadrants are round for each minimap shape (1 = bottom-right, 2 = bottom-left, 3 = top-right, 4 = top-left)
+local MINIMAP_SHAPES = {
+    ["ROUND"] = { true, true, true, true },
+    ["SQUARE"] = { false, false, false, false },
+    ["CORNER-TOPLEFT"] = { false, false, false, true },
+    ["CORNER-TOPRIGHT"] = { false, false, true, false },
+    ["CORNER-BOTTOMLEFT"] = { false, true, false, false },
+    ["CORNER-BOTTOMRIGHT"] = { true, false, false, false },
+    ["SIDE-LEFT"] = { false, true, false, true },
+    ["SIDE-RIGHT"] = { true, false, true, false },
+    ["SIDE-TOP"] = { false, false, true, true },
+    ["SIDE-BOTTOM"] = { true, true, false, false },
+    ["TRICORNER-TOPLEFT"] = { false, true, true, true },
+    ["TRICORNER-TOPRIGHT"] = { true, false, true, true },
+    ["TRICORNER-BOTTOMLEFT"] = { true, true, false, true },
+    ["TRICORNER-BOTTOMRIGHT"] = { true, true, true, false },
+}
+
+-- Places the button on the outer rim of the minimap, following its real size and shape
+-- (round, square or custom shapes from minimap addons)
 local function UpdatePosition(angleDeg)
     if not minimapBtn then return end
     local rad = math.rad(angleDeg or 220)
-    local x = math.cos(rad) * BUTTON_RADIUS
-    local y = math.sin(rad) * BUTTON_RADIUS
+    local x, y = math.cos(rad), math.sin(rad)
+    local q = 1
+    if x < 0 then q = q + 1 end
+    if y > 0 then q = q + 2 end
+    local shape = (GetMinimapShape and GetMinimapShape()) or "ROUND"
+    local quad = MINIMAP_SHAPES[shape] or MINIMAP_SHAPES["ROUND"]
+    local w = ((Minimap:GetWidth() or 140) / 2) + EDGE_OFFSET
+    local h = ((Minimap:GetHeight() or 140) / 2) + EDGE_OFFSET
+    if quad[q] then
+        x, y = x * w, y * h
+    else
+        local diagW = math.sqrt(2 * w * w) - 10
+        local diagH = math.sqrt(2 * h * h) - 10
+        x = math.max(-w, math.min(x * diagW, w))
+        y = math.max(-h, math.min(y * diagH, h))
+    end
     minimapBtn:ClearAllPoints()
     minimapBtn:SetPoint("CENTER", Minimap, "CENTER", x, y)
 end
@@ -204,20 +238,21 @@ function MM:Create()
     local bg = minimapBtn:CreateTexture(nil, "BACKGROUND")
     bg:SetSize(20, 20)
     bg:SetTexture("Interface\\Minimap\\UI-Minimap-Background")
-    bg:SetPoint("CENTER", 0, 0)
+    bg:SetPoint("TOPLEFT", 7, -5)
 
     local icon = minimapBtn:CreateTexture(nil, "ARTWORK")
-    icon:SetSize(18, 18)
+    -- Same layout as other addons' minimap buttons (icon centered inside the tracking border ring)
+    icon:SetSize(17, 17)
     icon:SetTexture(VAULT_ICON)
     icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
-    icon:SetPoint("CENTER", 0, 0)
+    icon:SetPoint("TOPLEFT", 7, -6)
     minimapBtn.icon = icon
 
     local highlight = minimapBtn:CreateTexture(nil, "HIGHLIGHT")
-    highlight:SetSize(24, 24)
+    highlight:SetAllPoints(minimapBtn)
+    highlight:SetSize(31, 31)
     highlight:SetTexture("Interface\\Minimap\\UI-Minimap-ZoomButton-Highlight")
     highlight:SetBlendMode("ADD")
-    highlight:SetPoint("CENTER", 0, 0)
 
     -- Notification badge (open requests count)
     local badge = CreateFrame("Frame", nil, minimapBtn, "BackdropTemplate")
@@ -261,6 +296,13 @@ function MM:Create()
         self.isDragging = false
         self:SetScript("OnUpdate", nil)
     end)
+
+    -- Follow minimap size changes (UI scale, minimap addons)
+    if Minimap.HookScript then
+        Minimap:HookScript("OnSizeChanged", function()
+            UpdatePosition(VM.db and VM.db.minimap and VM.db.minimap.angle or 220)
+        end)
+    end
 
     -- Click actions
     minimapBtn:SetScript("OnClick", function(self, button)

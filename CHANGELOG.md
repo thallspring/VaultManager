@@ -74,6 +74,7 @@ All notable changes to **Vault Manager** will be documented in this file.
 - Fixed items taken out by hand and then completed being charged twice; an item taken out and put back shortly after now cancels out automatically.
 - Fixed the *X* in the mail panel releasing an order while the items stayed in the officer's bags.
 - Fixed pressing Escape in Vault Manager also opening the game menu.
+- Fixed the minimap button sitting inside the minimap. It now sits on the outer edge like other addon buttons and follows the minimap's size and shape.
 - Fixed a double click on a request button triggering the next action after the button changed.
 - Fixed the relog reminder sometimes not appearing because guild rank information was not loaded yet.
 

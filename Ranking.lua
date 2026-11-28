@@ -6,8 +6,7 @@ local Ranking = VM.Ranking
 -- 100% AH, discounted member price on % of AH tabs) so Ranking can never diverge from Ledger totals.
 function Ranking:GetTransactionValuation(tx, priceMode)
     if not tx then return 0 end
-    local mode = priceMode or (VM.db and VM.db.uiPrefs and VM.db.uiPrefs.rankingPriceMode) or "live"
-    return VM.Ledger:GetTransactionValue(tx, mode == "locked", mode)
+    return VM.Ledger:GetTransactionValue(tx)
 end
 
 local function MatchesPeriod(txTimestamp, period)
@@ -30,7 +29,7 @@ end
 
 function Ranking:GetRankingData(sortMode, sortDir, priceMode, periodFilter, hideOfficers, showLegacy)
     if not VM.db then return {} end
-    local pMode = priceMode or VM.db.uiPrefs.rankingPriceMode or "live"
+    local pMode = VM:GetValuationMode()
     local sMode = sortMode or VM.db.uiPrefs.rankingSortBy or "net"
     local sDir = sortDir or VM.db.uiPrefs.rankingSortDir or "desc"
     local period = periodFilter or VM.db.uiPrefs.rankingPeriod or "ALL"

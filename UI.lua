@@ -373,13 +373,7 @@ local function ShowItemTooltip(selfFrame, itemLink, itemID, itemName, tx, isHist
 
     if tx and tx.unitPriceAtTime and tx.unitPriceAtTime > 0 then
         GameTooltip:AddLine(" ")
-        local isLocked
-        if isHistoricalOverride ~= nil then
-            isLocked = isHistoricalOverride and true or false
-        else
-            local uiPrefs = GetUIPrefs()
-            isLocked = (uiPrefs.rankingPriceMode == "locked")
-        end
+        local isLocked = (VM:GetValuationMode() == "locked")
         local lockedTotal = tx.unitPriceAtTime * (tx.count or 1)
         local curPrice = (tx.itemID and tx.itemID > 0) and (VM:GetEffectiveLivePrice(tx.itemID, tx.itemLink, tx.unitPriceAtTime) or 0) or tx.unitPriceAtTime
         local curTotal = curPrice * (tx.count or 1)
@@ -1334,7 +1328,7 @@ function UI:RefreshExportContent()
     if not exportModalFrame or not exportModalFrame:IsShown() then return end
     local isCSV = (exportModalFrame.csvToggle and exportModalFrame.csvToggle:IsShown() and exportModalFrame.csvToggle:GetChecked()) or false
     local uiPrefs = GetUIPrefs()
-    local priceMode = uiPrefs.rankingPriceMode or "live"
+    local priceMode = VM:GetValuationMode()
     local sortBy = uiPrefs.rankingSortBy or "net"
     local sortDir = uiPrefs.rankingSortDir or "desc"
     local period = uiPrefs.rankingPeriod or "ALL"
@@ -1346,7 +1340,7 @@ function UI:RefreshExportContent()
         return tostring(str or ""):gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", "")
     end
 
-    local basisDesc = (priceMode == "locked") and "Historical / Locked at Time" or "Live AH"
+    local basisDesc = (priceMode == "locked") and "Value at time of transaction" or "Live AH"
     local lines = {}
     if isCSV then
         table.insert(lines, string.format("# Valuation Basis: %s | Sort: %s (%s)", basisDesc, sortBy, sortDir))
@@ -3282,19 +3276,12 @@ function UI:BuildLedgerPanel(panel)
     filterStrip:SetPoint("TOPRIGHT", -10, -38)
     ApplyModernBackdrop(filterStrip, { 0.05, 0.06, 0.08, 0.9 }, THEME.border)
 
-    local priceToggle = CreateFrame("CheckButton", nil, filterStrip, "UICheckButtonTemplate")
-    priceToggle:SetSize(20, 20)
-    priceToggle:SetPoint("LEFT", 8, 0)
-    priceToggle:SetChecked(uiPrefs.useHistoricalPrices or false)
-    priceToggle.label = filterStrip:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    priceToggle.label:SetPoint("LEFT", priceToggle, "RIGHT", 4, 0)
-    priceToggle.label:SetText("Historical price")
-    priceToggle:SetScript("OnClick", function(cb)
-        local prefs = GetUIPrefs()
-        prefs.useHistoricalPrices = cb:GetChecked() and true or false
-        UI:RefreshLedger()
-    end)
-    panel.priceToggle = priceToggle
+    -- Read-only: valuation is a guild-wide setting (Settings), not a per-view toggle
+    local basisText = filterStrip:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+    basisText:SetPoint("LEFT", 10, 0)
+    basisText:SetWidth(130)
+    basisText:SetJustifyH("LEFT")
+    panel.basisText = basisText
 
     local ffaToggle = CreateFrame("CheckButton", nil, filterStrip, "UICheckButtonTemplate")
     ffaToggle:SetSize(20, 20)
@@ -3396,8 +3383,7 @@ local function CreateLedgerRow(content)
         selfRow:SetBackdropColor(THEME.rowHover[1], THEME.rowHover[2], THEME.rowHover[3], 1)
         local tx = selfRow.txData
         if tx and selfRow.showItemTooltip then
-            local useHist = GetUIPrefs().useHistoricalPrices or false
-            ShowItemTooltip(selfRow, tx.itemLink, tx.itemID, tx.itemName, tx, useHist)
+            ShowItemTooltip(selfRow, tx.itemLink, tx.itemID, tx.itemName, tx)
         end
     end)
     row:SetScript("OnLeave", function(selfRow)
@@ -3502,14 +3488,16 @@ function UI:RefreshLedger()
     end
 
     local uiPrefs = GetUIPrefs()
-    if panel.priceToggle then panel.priceToggle:SetChecked(uiPrefs.useHistoricalPrices or false) end
+    if panel.basisText then
+        panel.basisText:SetText(VM:GetValuationMode() == "live" and "Values: live AH" or "Values: at time of entry")
+    end
     if panel.ffaToggle then panel.ffaToggle:SetChecked(uiPrefs.includeFFA ~= false) end
     if panel.hideLegacyCb then panel.hideLegacyCb:SetChecked(uiPrefs.hideLegacyLedger or false) end
 
     for _, r in ipairs(panel.scroll.rows) do r:Hide() end
     if panel.scroll.legacyHeader then panel.scroll.legacyHeader:Hide() end
 
-    local useHist = uiPrefs.useHistoricalPrices
+    local useHist = nil -- valuation follows the guild-wide setting
     local hideLegacy = uiPrefs.hideLegacyLedger or false
     local q = STATE.ledgerSearchQuery or ""
     local allGroups = VM.Ledger:GetAggregatedByMain(useHist)
@@ -3821,50 +3809,19 @@ function UI:BuildRankingPanel(panel)
     topBar:SetPoint("TOPLEFT", 10, -6)
     topBar:SetPoint("TOPRIGHT", -10, -6)
 
-    local histBtn = CreateModernButton(topBar, 110, 24, "Historical values")
-    histBtn:SetPoint("LEFT", 0, 0)
-    histBtn:SetScript("OnClick", function()
-        local prefs = GetUIPrefs()
-        prefs.rankingPriceMode = "locked"
-        if panel.UpdateBasisButtons then panel.UpdateBasisButtons() end
-        UI:RefreshRanking()
-    end)
-    panel.histBtn = histBtn
-
-    local liveBtn = CreateModernButton(topBar, 105, 24, "Current values")
-    liveBtn:SetPoint("LEFT", histBtn, "RIGHT", 4, 0)
-    liveBtn:SetScript("OnClick", function()
-        local prefs = GetUIPrefs()
-        prefs.rankingPriceMode = "live"
-        if panel.UpdateBasisButtons then panel.UpdateBasisButtons() end
-        UI:RefreshRanking()
-    end)
-    panel.liveBtn = liveBtn
-
-    local function UpdateBasisButtons()
-        local mode = GetUIPrefs().rankingPriceMode or "live"
-        if mode == "locked" then
-            histBtn.customBg = { 0.15, 0.28, 0.42, 1 }
-            histBtn:SetBackdropColor(0.15, 0.28, 0.42, 1)
-            SetButtonAccent(histBtn, THEME.accent)
-            histBtn.label:SetTextColor(1, 0.82, 0)
-            liveBtn.customBg = nil
-            liveBtn:SetBackdropColor(THEME.btnBg[1], THEME.btnBg[2], THEME.btnBg[3], 1)
-            SetButtonAccent(liveBtn, THEME.border)
-            liveBtn.label:SetTextColor(0.6, 0.6, 0.6)
+    -- Read-only: valuation is a guild-wide setting (Settings), identical for every member
+    local basisText = topBar:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    basisText:SetPoint("LEFT", 2, 0)
+    basisText:SetJustifyH("LEFT")
+    panel.basisText = basisText
+    panel.UpdateBasisButtons = function()
+        if VM:GetValuationMode() == "live" then
+            basisText:SetText("|cff8899aaValues:|r |cff26a6f2Live AH prices|r")
         else
-            liveBtn.customBg = { 0.15, 0.28, 0.42, 1 }
-            liveBtn:SetBackdropColor(0.15, 0.28, 0.42, 1)
-            SetButtonAccent(liveBtn, THEME.accent)
-            liveBtn.label:SetTextColor(1, 0.82, 0)
-            histBtn.customBg = nil
-            histBtn:SetBackdropColor(THEME.btnBg[1], THEME.btnBg[2], THEME.btnBg[3], 1)
-            SetButtonAccent(histBtn, THEME.border)
-            histBtn.label:SetTextColor(0.6, 0.6, 0.6)
+            basisText:SetText("|cff8899aaValues:|r |cffffd700At time of entry|r")
         end
     end
-    panel.UpdateBasisButtons = UpdateBasisButtons
-    UpdateBasisButtons()
+    panel.UpdateBasisButtons()
 
     local exportBtn = CreateModernButton(topBar, 76, 24, "Export", THEME.accent)
     exportBtn:SetPoint("RIGHT", 0, 0)
@@ -4033,8 +3990,7 @@ local function CreateRankingRow(content)
         selfRow:SetBackdropColor(THEME.rowHover[1], THEME.rowHover[2], THEME.rowHover[3], 1)
         if selfRow.showItemTooltip and selfRow.txData then
             local tx = selfRow.txData
-            local isLocked = (GetUIPrefs().rankingPriceMode == "locked")
-            ShowItemTooltip(selfRow, tx.itemLink, tx.itemID, tx.itemName, tx, isLocked)
+            ShowItemTooltip(selfRow, tx.itemLink, tx.itemID, tx.itemName, tx)
         end
     end)
     row:SetScript("OnLeave", function(selfRow)
@@ -4091,7 +4047,7 @@ function UI:RefreshRanking()
 
     for _, r in ipairs(panel.scroll.rows) do r:Hide() end
 
-    local priceMode = uiPrefs.rankingPriceMode or "live"
+    local priceMode = VM:GetValuationMode()
     local period = uiPrefs.rankingPeriod or "ALL"
     local hideOff = uiPrefs.hideOfficers or false
     local showLeg = uiPrefs.showLegacyRanking ~= false
@@ -4845,28 +4801,34 @@ function UI:BuildSettingsPanel(panel)
 
     local basisLabel = lower:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     basisLabel:SetPoint("TOPLEFT", 0, -52)
-    basisLabel:SetText("Default Ranking Mode:")
+    basisLabel:SetText("Item values (guild-wide):")
 
-    local basisHistBtn = CreateModernButton(lower, 120, 20, "Historical values")
+    local basisHistBtn = CreateModernButton(lower, 120, 20, "At time of entry")
     basisHistBtn:SetPoint("LEFT", basisLabel, "RIGHT", 8, 0)
     basisHistBtn:SetScript("OnClick", function()
-        local prefs = GetUIPrefs()
-        prefs.rankingPriceMode = "locked"
+        VM:SetValuationMode("locked")
         if panel.UpdateBasisButtons then panel.UpdateBasisButtons() end
     end)
     panel.basisHistBtn = basisHistBtn
 
-    local basisCurrentBtn = CreateModernButton(lower, 120, 20, "Current values")
+    local basisCurrentBtn = CreateModernButton(lower, 120, 20, "Live AH prices")
     basisCurrentBtn:SetPoint("LEFT", basisHistBtn, "RIGHT", 4, 0)
     basisCurrentBtn:SetScript("OnClick", function()
-        local prefs = GetUIPrefs()
-        prefs.rankingPriceMode = "live"
+        VM:SetValuationMode("live")
         if panel.UpdateBasisButtons then panel.UpdateBasisButtons() end
     end)
     panel.basisCurrentBtn = basisCurrentBtn
+    for _, b in ipairs({ basisHistBtn, basisCurrentBtn }) do
+        b:HookScript("OnEnter", function(selfBtn)
+            GameTooltip:SetOwner(selfBtn, "ANCHOR_TOP")
+            GameTooltip:SetText("How Ledger and Ranking value items, for every member. 'At time of entry' keeps the value stored with each transaction (stable, identical for everyone). 'Live AH prices' uses each member's current price data. Only the Guild Master and the officer rank can change this.", 1, 1, 1, 1, true)
+            GameTooltip:Show()
+        end)
+        b:HookScript("OnLeave", function() GameTooltip:Hide() end)
+    end
 
     panel.UpdateBasisButtons = function()
-        local mode = GetUIPrefs().rankingPriceMode or "live"
+        local mode = VM:GetValuationMode()
         if mode == "locked" then
             basisHistBtn.customBg = { 0.15, 0.28, 0.42, 1 }
             basisHistBtn:SetBackdropColor(0.15, 0.28, 0.42, 1)

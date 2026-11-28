@@ -49,7 +49,7 @@ All notable changes to **Vault Manager** will be documented in this file.
 - **Free-for-All and Direct Withdrawals:** Items taken from Free-for-All tabs, or withdrawn without an approved request, are tracked at 100% of their auction value in the *Ledger* and *Ranking*, so taking an item out and putting it back nets to 0g.
 - **Reassign** now works on every non-derived Ledger entry, including item deposits (for example raid loot) moved to the guild account with an expense category.
 - **Two-Word Character Names:** Names that appear only partly in the Guild Bank log (first word only) are matched to the full guild roster name everywhere, including class colors and duplicate detection.
-- **Ledger and Ranking** now use exactly the same valuation, so their totals always agree.
+- **One Guild-Wide Item Valuation:** Ledger and Ranking value items the same way for every member. By default this is the value stored with each transaction, so the numbers stay stable and identical for everyone. The Guild Master or the officer rank can switch the whole guild to live AH prices in *Settings*. The separate *Historical price* and *Historical / Current values* toggles have been removed.
 - **Settings** shows unpurchased Guild Bank tabs in a compact list.
 - **Sync Protocol:** The protocol version is now 7. Request and Ledger messages go out before bulk inventory data, the inventory is only re-sent when its contents change (gold-only changes send a small update), and long messages are shortened to fit the chat channel limit instead of being dropped silently.
 - **Officer Rank Detection:** Officer permissions are now determined the same way for your own client, other members' messages and tab rule checks.

@@ -827,6 +827,25 @@ function VM:GetItemAHPrice(itemID, itemLink)
     return nil
 end
 
+-- Max stack size for an item (nil when the item is not cached yet)
+function VM:GetItemMaxStack(itemID, itemLink)
+    if not GetItemInfo then return nil end
+    local lookup = (tonumber(itemID) and tonumber(itemID) > 0) and tonumber(itemID) or itemLink
+    if not lookup then return nil end
+    local _, _, _, _, _, _, _, stack = GetItemInfo(lookup)
+    stack = tonumber(stack)
+    if stack and stack > 0 then return stack end
+    return nil
+end
+
+-- A single request may hold at most 6 stacks (the Trade window limit): 6 items for unstackable gear, 6 x stack size otherwise
+VM.MAX_REQUEST_STACKS = 6
+function VM:GetMaxRequestQty(itemID, itemLink)
+    local stack = self:GetItemMaxStack(itemID, itemLink)
+    if not stack then return nil end
+    return stack * VM.MAX_REQUEST_STACKS
+end
+
 function VM:GetEffectiveLivePrice(itemID, itemLink, fallbackScanPrice)
     local livePrice = self:GetItemAHPrice(itemID, itemLink)
     if livePrice and livePrice > 0 then

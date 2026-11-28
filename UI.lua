@@ -26,6 +26,7 @@ local STATE = {
         PENDING = true,
         APPROVED = true,
         PREPARED = true,
+        UNPAID = true,
         HISTORY = false,
     },
     ledgerSearchQuery = "",
@@ -98,6 +99,21 @@ if StaticPopupDialogs then
         hideOnEscape = true,
         preferredIndex = 3,
     }
+    StaticPopupDialogs["VAULTMANAGER_WRITEOFF_DEBT"] = {
+        text = "Write off unpaid amount?\n\n%s\n\nThe loss is charged to GUILD (Member) and stays visible as unpaid on %s in the Ledger.",
+        button1 = "Write Off",
+        button2 = "Cancel",
+        OnAccept = function(self, data)
+            local d = data or self.data
+            if d and d.reqID and VM.Fulfillment then
+                VM.Fulfillment:WriteOffDebt(d.reqID)
+            end
+        end,
+        timeout = 0,
+        whileDead = true,
+        hideOnEscape = true,
+        preferredIndex = 3,
+    }
     StaticPopupDialogs["VAULTMANAGER_PAIR_TX"] = {
         text = "Pair as return?\n\n%s\n%s\n\nBoth entries are voided and net to 0g regardless of price changes.",
         button1 = "Pair",
@@ -146,6 +162,21 @@ local function SetButtonAccent(btn, accentColor)
     btn.accentColor = accentColor
     local bd = accentColor or THEME.border
     btn:SetBackdropBorderColor(bd[1], bd[2], bd[3], 0.85)
+end
+
+-- Workflow button states: "active" (clickable), "disabled" (greyed, not clickable),
+-- "done" (step completed: green, dimmed, not clickable)
+local function ApplyButtonState(btn, state)
+    if state == "active" then
+        btn:SetModernEnabled(true)
+    else
+        btn:SetModernEnabled(false)
+        if state == "done" then
+            btn:SetBackdropColor(0.10, 0.30, 0.16, 0.65)
+            btn:SetBackdropBorderColor(THEME.green[1], THEME.green[2], THEME.green[3], 0.55)
+            btn.label:SetTextColor(0.45, 0.80, 0.52)
+        end
+    end
 end
 
 local function CreateDebouncer(delaySec, callback)
@@ -622,15 +653,17 @@ function UI:CreateRequestsHelpModal()
         "• |cffffcc33PENDING|r — Waiting for officer approval. Stock is not yet reserved.\n" ..
         "• |cff26a6f2APPROVED|r — Accepted. Items are soft-locked in the Vault until withdrawn.\n" ..
         "• |cff44dd77PREPARED|r — Withdrawn by an officer and awaiting Mail or Trade delivery.\n" ..
-        "• |cff999999HISTORY|r — Fulfilled, rejected, cancelled, or written off (pruned after 30 days).\n\n" ..
-        "|cff26a6f2Officer Actions|r\n" ..
-        "• |cff44dd77Approve|r — Accepts a pending request and reserves Vault stock.\n" ..
-        "• |cffff5555Reject|r — Declines a pending request without logging to the Ledger.\n" ..
-        "• |cff26a6f2Prepare|r — Withdraws items/gold from the open Guild Bank into your bags and assigns delivery to you. Open Mail or Trade with the member to fill automatically.\n" ..
-        "• |cff44dd77Complete|r — Marks the request delivered and logs it to the Ledger. (Mail, Trade, and direct Guild Bank withdrawals also auto-complete.)\n" ..
-        "• |cffccccccRelease|r — Returns a prepared order back to APPROVED if you put items back.\n" ..
-        "• |cffff5555Cancel|r — Cancels an approved/prepared request and releases stock.\n" ..
-        "• |cffff5555Write Off|r — Available if the officer holding a prepared order left the guild; charges 100% value to the departed officer."
+        "• |cffff5555UNPAID|r — Delivered by trade but not (fully) paid.\n" ..
+        "• |cff999999HISTORY|r — Fulfilled, rejected, cancelled, or written off (pruned after 30 days).\n" ..
+        "Members can cancel their own pending/approved requests. One request holds at most 6 stacks.\n\n" ..
+        "|cff26a6f2Officer Workflow|r (only the next step is active; finished steps turn green)\n" ..
+        "• |cff26a6f2Withdraw|r — Takes the items/gold out of the Guild Bank (any tab) into your bags.\n" ..
+        "• |cff26a6f2Fulfill|r — Places them in the open Mail or Trade window. You click Send/Trade.\n" ..
+        "• |cff44dd77Complete|r — Happens automatically when the mail is sent or the trade finishes.\n" ..
+        "• |cffffd700Return|r — Puts the items/gold back in the Guild Bank; request goes back to APPROVED.\n" ..
+        "• |cffff5555Cancel|r — Cancels the request (items you keep are charged to you).\n" ..
+        "• |cff44dd77Paid|r / |cffff5555Write Off|r — Settle an unpaid trade; write-offs are charged to GUILD (Member) and shown on the member.\n" ..
+        "• |cffff5555Write Off|r (prepared) — If the officer holding an order left the guild."
     )
 end
 
@@ -2116,7 +2149,7 @@ local function CreateInventoryRow(content)
     row.nameBtn:SetScript("OnLeave", OnRowLeave)
 
     row.qtyBtn:SetScript("OnClick", function(selfBtn)
-        local avail = row.available or 1
+        local avail = row.maxPick or row.available or 1
         local curr = row.selectedQty or 1
         local stateKey = row.qtyStateKey
         UI:OpenQtyPicker(selfBtn, avail, curr, function(chosen)
@@ -2127,11 +2160,25 @@ local function CreateInventoryRow(content)
         end)
     end)
 
-    row.reqBtn:SetScript("OnClick", function()
-        if not row.itemData then return end
+    row.reqBtn:SetScript("OnClick", function(selfBtn)
+        if not row.itemData or not selfBtn:IsEnabled() then return end
         local qty = row.selectedQty or 1
-        VM.Fulfillment:CreateRequest(row.tabIndex, row.itemKey, qty)
+        -- Immediate visual response before the list refreshes
+        selfBtn:SetText("Sent...")
+        ApplyButtonState(selfBtn, "done")
+        local req = VM.Fulfillment:CreateRequest(row.tabIndex, row.itemKey, qty)
+        if not req then
+            UI:RefreshInventory()
+        end
     end)
+    row.reqBtn:HookScript("OnEnter", function(selfBtn)
+        if selfBtn.tooltipText then
+            GameTooltip:SetOwner(selfBtn, "ANCHOR_TOP")
+            GameTooltip:SetText(selfBtn.tooltipText, 1, 1, 1, 1, true)
+            GameTooltip:Show()
+        end
+    end)
+    row.reqBtn:HookScript("OnLeave", function() GameTooltip:Hide() end)
 
     row.assignBtn:SetScript("OnClick", function()
         if not row.itemData then return end
@@ -2305,12 +2352,15 @@ function UI:RefreshInventory()
                     local reserved = VM:GetReservedCount(itemKey, STATE.selectedBankTab)
                     local available = math.max(0, (item.count or 0) - reserved)
                     row.available = available
+                    local maxReq = VM:GetMaxRequestQty(item.itemID, item.itemLink or item.link)
+                    row.maxPick = maxReq and math.min(available, maxReq) or available
+                    local myOpenQty = VM.Fulfillment:GetMyOpenRequestCount(itemKey, STATE.selectedBankTab)
 
                     local qtyStateKey = tostring(STATE.selectedBankTab) .. ":" .. tostring(itemKey)
                     row.qtyStateKey = qtyStateKey
                     local selectedQty = tonumber(STATE.selectedVaultQty[qtyStateKey]) or 1
-                    if available > 0 and selectedQty > available then
-                        selectedQty = available
+                    if row.maxPick > 0 and selectedQty > row.maxPick then
+                        selectedQty = row.maxPick
                         STATE.selectedVaultQty[qtyStateKey] = selectedQty
                     elseif selectedQty < 1 then
                         selectedQty = 1
@@ -2325,10 +2375,11 @@ function UI:RefreshInventory()
                     row.icon:SetTexture(item.icon or "Interface\\Icons\\INV_Misc_QuestionMark")
                     row.nameText:SetText(item.link or item.name)
 
+                    local mineTag = (myOpenQty > 0) and string.format(" |cff44dd77(You: %d)|r", myOpenQty) or ""
                     if reserved > 0 then
-                        row.stockText:SetText(string.format("Avail: |cff44dd77%d|r |cff888888(Res:%d)|r", available, reserved))
+                        row.stockText:SetText(string.format("Avail: |cff44dd77%d|r |cff888888(Res:%d)|r%s", available, reserved, mineTag))
                     else
-                        row.stockText:SetText(string.format("Stock: |cff44dd77%d|r", available))
+                        row.stockText:SetText(string.format("Stock: |cff44dd77%d|r%s", available, mineTag))
                     end
 
                     local effectivePrice = VM:GetEffectiveLivePrice(item.itemID, item.itemLink or item.link, item.ahPrice)
@@ -2343,11 +2394,23 @@ function UI:RefreshInventory()
                         row.priceText:SetText("|cff777777AH: Unknown|r")
                     end
 
-                    if rule.mode == "LOCKED" or available <= 0 then
+                    row.reqBtn.tooltipText = nil
+                    if myOpenQty > 0 then
+                        -- Immediate feedback + protection against duplicate requests
+                        row.reqBtn:SetText("Requested")
+                        ApplyButtonState(row.reqBtn, "done")
+                        row.reqBtn.tooltipText = "You already have an open request for this item. Cancel it in the Requests tab to change the amount."
+                        row.qtyBtn:Hide()
+                    elseif rule.mode == "LOCKED" or available <= 0 then
+                        row.reqBtn:SetText("Request")
                         row.reqBtn:SetModernEnabled(false)
                         row.qtyBtn:Hide()
                     else
+                        row.reqBtn:SetText("Request")
                         row.reqBtn:SetModernEnabled(true)
+                        if maxReq then
+                            row.reqBtn.tooltipText = string.format("Max %d per request (%d stacks).", maxReq, VM.MAX_REQUEST_STACKS)
+                        end
                         row.qtyBtn:SetText(tostring(selectedQty))
                         row.qtyBtn:Show()
                     end
@@ -2374,6 +2437,7 @@ local REQ_SECTIONS = {
     { key = "PENDING", title = "Pending Approval", color = "|cffffcc33" },
     { key = "APPROVED", title = "Approved — Ready for Bank Withdrawal", color = "|cff26a6f2" },
     { key = "PREPARED", title = "Prepared — Withdrawn & Awaiting Delivery", color = "|cff44dd77" },
+    { key = "UNPAID", title = "Unpaid — Delivered but Not Paid", color = "|cffff5555" },
     { key = "HISTORY", title = "History — Fulfilled, Rejected & Written Off", color = "|cff999999" },
 }
 
@@ -2406,7 +2470,7 @@ function UI:BuildRequestsPanel(panel)
     local toggleAllBtn = CreateModernButton(topBar, 84, 24, "Expand All")
     toggleAllBtn:SetPoint("RIGHT", 0, 0)
     toggleAllBtn:SetScript("OnClick", function()
-        local keys = (panel.visibleSections and #panel.visibleSections > 0) and panel.visibleSections or { "PENDING", "APPROVED", "PREPARED", "HISTORY" }
+        local keys = (panel.visibleSections and #panel.visibleSections > 0) and panel.visibleSections or { "PENDING", "APPROVED", "PREPARED", "UNPAID", "HISTORY" }
         local anyCollapsed = false
         for _, k in ipairs(keys) do
             if not STATE.requestSectionExpanded[k] then
@@ -2457,15 +2521,13 @@ local function CreateRequestRow(content)
     row.meta:SetWidth(472)
     row.meta:SetJustifyH("LEFT")
 
-    -- Right-aligned 3-column action buttons (no gap on 2-button rows)
-    row.btn1 = CreateModernButton(row, 76, 22, "", THEME.accent)
-    row.btn1:SetPoint("LEFT", 490, 0)
-
-    row.btn2 = CreateModernButton(row, 76, 22, "", THEME.green)
-    row.btn2:SetPoint("LEFT", 572, 0)
-
-    row.btn3 = CreateModernButton(row, 70, 22, "", THEME.red)
-    row.btn3:SetPoint("LEFT", 654, 0)
+    -- Up to 5 right-aligned workflow buttons, laid out per request state in RefreshRequests
+    row.btns = {}
+    for i = 1, 5 do
+        row.btns[i] = CreateModernButton(row, 58, 22, "", THEME.accent)
+        row.btns[i]:Hide()
+    end
+    row.btn1, row.btn2, row.btn3 = row.btns[1], row.btns[2], row.btns[3]
 
     local function AttachBtnTooltip(btn)
         btn:HookScript("OnEnter", function(selfBtn)
@@ -2479,9 +2541,7 @@ local function CreateRequestRow(content)
             GameTooltip:Hide()
         end)
     end
-    AttachBtnTooltip(row.btn1)
-    AttachBtnTooltip(row.btn2)
-    AttachBtnTooltip(row.btn3)
+    for i = 1, 5 do AttachBtnTooltip(row.btns[i]) end
 
     row:SetScript("OnEnter", function(selfRow)
         selfRow:SetBackdropColor(THEME.rowHover[1], THEME.rowHover[2], THEME.rowHover[3], 1)
@@ -2506,8 +2566,21 @@ local function CreateRequestRow(content)
             VM.Fulfillment:ApproveRequest(req.id)
         elseif actionKey == "REJECT" or actionKey == "CANCEL" then
             VM.Fulfillment:RejectRequest(req.id)
-        elseif actionKey == "PREPARE" then
+        elseif actionKey == "CANCEL_OWN" then
+            VM.Fulfillment:CancelOwnRequest(req.id)
+        elseif actionKey == "PREPARE" or actionKey == "WITHDRAW" then
             VM.Fulfillment:PrepareRequest(req.id)
+        elseif actionKey == "FULFILL" then
+            VM.Fulfillment:FulfillPrepared(req.id)
+        elseif actionKey == "RETURN" then
+            VM.Fulfillment:ReturnPreparedRequest(req.id)
+        elseif actionKey == "DEBT_PAID" then
+            VM.Fulfillment:MarkDebtPaid(req.id)
+        elseif actionKey == "DEBT_WRITEOFF" then
+            local owed = VM.Fulfillment:GetOwedAmount(req)
+            local desc = string.format("%s owes %s for %dx %s", req.requester or "?", VM:FormatMoneyPlain(owed), req.count or 1, req.itemName or "Item")
+            local dlg = StaticPopup_Show and StaticPopup_Show("VAULTMANAGER_WRITEOFF_DEBT", desc, req.requester or "?")
+            if dlg then dlg.data = { reqID = req.id } end
         elseif actionKey == "COMPLETE" then
             VM.Fulfillment:CompleteRequest(req.id)
         elseif actionKey == "RELEASE" then
@@ -2531,9 +2604,11 @@ local function CreateRequestRow(content)
         end
     end
 
-    row.btn1:SetScript("OnClick", function(selfBtn) ExecuteAction(selfBtn.actionKey, row.reqData) end)
-    row.btn2:SetScript("OnClick", function(selfBtn) ExecuteAction(selfBtn.actionKey, row.reqData) end)
-    row.btn3:SetScript("OnClick", function(selfBtn) ExecuteAction(selfBtn.actionKey, row.reqData) end)
+    for i = 1, 5 do
+        row.btns[i]:SetScript("OnClick", function(selfBtn)
+            if selfBtn:IsEnabled() then ExecuteAction(selfBtn.actionKey, row.reqData) end
+        end)
+    end
 
     return row
 end
@@ -2563,6 +2638,7 @@ function UI:RefreshRequests()
         PENDING = {},
         APPROVED = {},
         PREPARED = {},
+        UNPAID = {},
         HISTORY = {},
     }
 
@@ -2573,6 +2649,8 @@ function UI:RefreshRequests()
             table.insert(buckets.APPROVED, req)
         elseif req.status == "PREPARED" then
             table.insert(buckets.PREPARED, req)
+        elseif VM.Fulfillment:GetOwedAmount(req) > 0 then
+            table.insert(buckets.UNPAID, req)
         else
             table.insert(buckets.HISTORY, req)
         end
@@ -2586,13 +2664,17 @@ function UI:RefreshRequests()
     table.sort(buckets.PREPARED, function(a, b)
         return (a.preparedAt or a.createdAt or 0) > (b.preparedAt or b.createdAt or 0)
     end)
+    table.sort(buckets.UNPAID, function(a, b)
+        return (a.completedAt or 0) > (b.completedAt or 0)
+    end)
     table.sort(buckets.HISTORY, function(a, b)
         return (a.completedAt or a.updatedAt or a.createdAt or 0) > (b.completedAt or b.updatedAt or b.createdAt or 0)
     end)
 
     if panel.summaryText then
-        panel.summaryText:SetText(string.format("|cffffcc33Pending: %d|r  |  |cff26a6f2Approved: %d|r  |  |cff44dd77Prepared: %d|r  |  |cff888888History: %d|r",
-            #buckets.PENDING, #buckets.APPROVED, #buckets.PREPARED, #buckets.HISTORY))
+        local unpaidTxt = (#buckets.UNPAID > 0) and string.format("  |  |cffff5555Unpaid: %d|r", #buckets.UNPAID) or ""
+        panel.summaryText:SetText(string.format("|cffffcc33Pending: %d|r  |  |cff26a6f2Approved: %d|r  |  |cff44dd77Prepared: %d|r%s  |  |cff888888History: %d|r",
+            #buckets.PENDING, #buckets.APPROVED, #buckets.PREPARED, unpaidTxt, #buckets.HISTORY))
     end
 
     panel.visibleSections = {}
@@ -2670,6 +2752,19 @@ function UI:RefreshRequests()
                     row:Show()
 
                     local prepLeftGuild = (req.status == "PREPARED" and req.preparedBy and req.preparedBy ~= "" and VM:IsLegacyMember(req.preparedBy))
+                    local statusLabel = statusColors[req.status] or req.status
+                    if req.status == "REJECTED" and req.completedMethod == "CANCELLED" then
+                        statusLabel = "|cffff8844CANCELLED|r"
+                    end
+                    local owed = VM.Fulfillment:GetOwedAmount(req)
+                    local tabTag = ""
+                    if not req.isGoldRequest and req.tab and tonumber(req.tab) and tonumber(req.tab) > 0 then
+                        local tData = VM.db.inventory and VM.db.inventory.tabs and VM.db.inventory.tabs[tonumber(req.tab)]
+                        local tName = tData and tData.name
+                        tabTag = (tName and tName ~= "" and tName ~= ("Tab " .. req.tab))
+                            and string.format("  |cff8899aa[Tab %d: %s]|r", req.tab, tName)
+                            or string.format("  |cff8899aa[Tab %d]|r", req.tab)
+                    end
 
                     -- Line 1: Main info
                     if req.isGoldRequest then
@@ -2679,7 +2774,7 @@ function UI:RefreshRequests()
                         local reasonTxt = (req.reason and req.reason ~= "") and (" — " .. req.reason) or ""
                         local leftTag = prepLeftGuild and " |cffff4444[OFFICER LEFT]|r" or ""
                         row.info:SetText(string.format("[%s]  %s  —  |cffffd700Gold Request:|r%s %s|cffcccccc%s|r%s",
-                            statusColors[req.status] or req.status,
+                            statusLabel,
                             VM:ColorizeName(req.requester),
                             catTag,
                             VM:FormatMoney(gAmt),
@@ -2701,12 +2796,13 @@ function UI:RefreshRequests()
                         end
 
                         local leftTag = prepLeftGuild and " |cffff4444[OFFICER LEFT]|r" or ""
-                        row.info:SetText(string.format("[%s]  %s  —  %dx %s%s%s",
-                            statusColors[req.status] or req.status,
+                        row.info:SetText(string.format("[%s]  %s  —  %dx %s%s%s%s",
+                            statusLabel,
                             VM:ColorizeName(req.requester),
                             req.count or 1,
                             req.itemLink or req.itemName or "Item",
                             priceNote,
+                            tabTag,
                             leftTag))
                     end
 
@@ -2715,7 +2811,10 @@ function UI:RefreshRequests()
                     if req.createdAt and req.createdAt > 0 then
                         table.insert(metaParts, "Requested: " .. date("%d/%m %H:%M", req.createdAt))
                     end
-                    if req.status == "REJECTED" then
+                    if req.status == "REJECTED" and req.completedMethod == "CANCELLED" then
+                        local cTime = (req.completedAt and req.completedAt > 0) and (" " .. date("%d/%m %H:%M", req.completedAt)) or ""
+                        table.insert(metaParts, "Cancelled" .. cTime .. " by requester")
+                    elseif req.status == "REJECTED" then
                         if req.approvedBy and req.approvedBy ~= "" then
                             local rejTime = (req.completedAt and req.completedAt > 0) and (" " .. date("%d/%m %H:%M", req.completedAt)) or ""
                             local label = (req.approvedAt and req.approvedAt > 0) and "Cancelled" or "Rejected"
@@ -2747,90 +2846,83 @@ function UI:RefreshRequests()
                         local woBy = (req.fulfilledBy and req.fulfilledBy ~= "") and (" by " .. VM:ColorizeName(req.fulfilledBy)) or ""
                         table.insert(metaParts, "Written off" .. woTime .. woBy)
                     end
-                    row.meta:SetText("|cff999999" .. table.concat(metaParts, "  |  ") .. "|r")
-
-                    -- Right-aligned action buttons (Officers only)
-                    row.btn1:Hide()
-                    row.btn2:Hide()
-                    row.btn3:Hide()
-                    row.btn1.actionKey = nil
-                    row.btn2.actionKey = nil
-                    row.btn3.actionKey = nil
-                    row.btn1.tooltipText = nil
-                    row.btn2.tooltipText = nil
-                    row.btn3.tooltipText = nil
-
-                    local textWidth = 710
-
-                    if isOff then
-                        if req.status == "PENDING" then
-                            SetButtonAccent(row.btn2, THEME.green)
-                            row.btn2:SetText("Approve")
-                            row.btn2.actionKey = "APPROVE"
-                            row.btn2.tooltipText = "Approve request and reserve stock in the Vault."
-                            row.btn2:Show()
-
-                            SetButtonAccent(row.btn3, THEME.red)
-                            row.btn3:SetText("Reject")
-                            row.btn3.actionKey = "REJECT"
-                            row.btn3.tooltipText = "Decline this pending request without logging to the Ledger."
-                            row.btn3:Show()
-                            textWidth = 554
-                        elseif req.status == "APPROVED" then
-                            SetButtonAccent(row.btn1, THEME.accent)
-                            row.btn1:SetText("Prepare")
-                            row.btn1.actionKey = "PREPARE"
-                            row.btn1.tooltipText = "Withdraw items/gold from the open Guild Bank and assign delivery to you."
-                            row.btn1:Show()
-
-                            SetButtonAccent(row.btn2, THEME.green)
-                            row.btn2:SetText("Complete")
-                            row.btn2.actionKey = "COMPLETE"
-                            row.btn2.tooltipText = "Mark delivered manually and log to the Ledger."
-                            row.btn2:Show()
-
-                            SetButtonAccent(row.btn3, THEME.red)
-                            row.btn3:SetText("Cancel")
-                            row.btn3.actionKey = "CANCEL"
-                            row.btn3.tooltipText = "Cancel this approved request and release reserved stock."
-                            row.btn3:Show()
-                            textWidth = 472
-                        elseif req.status == "PREPARED" then
-                            if prepLeftGuild then
-                                SetButtonAccent(row.btn2, THEME.red)
-                                row.btn2:SetText("Write Off")
-                                row.btn2.actionKey = "WRITEOFF"
-                                row.btn2.tooltipText = "Officer left the guild. Write off and charge 100% value to the departed officer."
-                                row.btn2:Show()
-
-                                SetButtonAccent(row.btn3, THEME.border)
-                                row.btn3:SetText("Release")
-                                row.btn3.actionKey = "RELEASE"
-                                row.btn3.tooltipText = "Return this order to APPROVED (if items were returned to the bank)."
-                                row.btn3:Show()
-                                textWidth = 554
-                            elseif IsSameOfficerName(req.preparedBy, me) then
-                                SetButtonAccent(row.btn1, THEME.green)
-                                row.btn1:SetText("Complete")
-                                row.btn1.actionKey = "COMPLETE"
-                                row.btn1.tooltipText = "Mark delivered manually and log to the Ledger."
-                                row.btn1:Show()
-
-                                SetButtonAccent(row.btn2, THEME.border)
-                                row.btn2:SetText("Release")
-                                row.btn2.actionKey = "RELEASE"
-                                row.btn2.tooltipText = "Return order to APPROVED if you put the items/gold back in the bank."
-                                row.btn2:Show()
-
-                                SetButtonAccent(row.btn3, THEME.red)
-                                row.btn3:SetText("Cancel")
-                                row.btn3.actionKey = "CANCEL"
-                                row.btn3.tooltipText = "Cancel this prepared request."
-                                row.btn3:Show()
-                                textWidth = 472
-                            end
-                        end
+                    local metaStr = "|cff999999" .. table.concat(metaParts, "  |  ") .. "|r"
+                    if owed > 0 then
+                        metaStr = metaStr .. string.format("  |cffff5555Owes %s|r", VM:FormatMoney(owed))
                     end
+                    row.meta:SetText(metaStr)
+
+                    -- Workflow buttons: only the next step is active; finished steps turn green and dim
+                    for _, b in ipairs(row.btns) do
+                        b:Hide()
+                        b.actionKey = nil
+                        b.tooltipText = nil
+                    end
+
+                    local specs = {}
+                    local function AddBtn(label, key, state, accent, tip)
+                        table.insert(specs, { label = label, key = key, state = state, accent = accent, tip = tip })
+                    end
+                    local isOwnReq = VM:IsSameCharacter(req.requester, me)
+                    local deliverHint = req.isGoldRequest and "gold" or "items"
+
+                    if req.status == "PENDING" then
+                        if isOff then
+                            AddBtn("Approve", "APPROVE", "active", THEME.green, "Approve request and reserve stock in the Vault.")
+                            AddBtn("Reject", "REJECT", "active", THEME.red, "Decline this pending request.")
+                        elseif isOwnReq then
+                            AddBtn("Cancel", "CANCEL_OWN", "active", THEME.red, "Cancel your request.")
+                        end
+                    elseif req.status == "APPROVED" then
+                        if isOff then
+                            AddBtn("Withdraw", "WITHDRAW", "active", THEME.accent,
+                                string.format("Withdraw the %s from the Guild Bank into your bags (switches to the right tab automatically).", deliverHint))
+                            AddBtn("Fulfill", "FULFILL", "disabled", THEME.accent, "Withdraw first.")
+                            AddBtn("Complete", "COMPLETE", "disabled", THEME.green, "Completes automatically when the mail is sent or the trade finishes.")
+                            AddBtn("Cancel", "CANCEL", "active", THEME.red, "Cancel this approved request and release reserved stock.")
+                        elseif isOwnReq then
+                            AddBtn("Cancel", "CANCEL_OWN", "active", THEME.red, "Cancel your request.")
+                        end
+                    elseif req.status == "PREPARED" and isOff then
+                        if prepLeftGuild then
+                            AddBtn("Write Off", "WRITEOFF", "active", THEME.red, "Officer left the guild. Write off and charge 100% value to the departed officer.")
+                            AddBtn("Release", "RELEASE", "active", THEME.border, "Return this order to APPROVED (if the items were put back in the bank).")
+                        elseif IsSameOfficerName(req.preparedBy, me) then
+                            local started = VM.Fulfillment.fulfillStarted[req.id]
+                            AddBtn("Withdraw", "WITHDRAW", "done", THEME.green, "Withdrawn from the Guild Bank.")
+                            AddBtn("Fulfill", "FULFILL", started and "done" or "active", THEME.accent,
+                                string.format("Place the %s in the open Mail or Trade window (you click Send / Trade yourself).", deliverHint))
+                            AddBtn("Complete", "COMPLETE", started and "active" or "disabled", THEME.green,
+                                started and "Completes automatically when sent/traded. Click only if you delivered another way."
+                                or "Fulfill first. Completes automatically when the mail is sent or the trade finishes.")
+                            AddBtn("Return", "RETURN", "active", THEME.gold, "Put the items/gold back in the Guild Bank and set the request back to APPROVED.")
+                            AddBtn("Cancel", "CANCEL", "active", THEME.red, "Cancel the request. Items you keep are charged to you — use Return to put them back.")
+                        else
+                            local tip = "Prepared by " .. tostring(req.preparedBy or "?")
+                            AddBtn("Withdraw", "WITHDRAW", "done", THEME.green, tip)
+                            AddBtn("Fulfill", "FULFILL", "disabled", THEME.accent, tip)
+                            AddBtn("Complete", "COMPLETE", "disabled", THEME.green, tip)
+                        end
+                    elseif req.status == "FULFILLED" and owed > 0 and isOff then
+                        AddBtn("Paid", "DEBT_PAID", "active", THEME.green, "The member paid the outstanding amount to you (recorded as their payment).")
+                        AddBtn("Write Off", "DEBT_WRITEOFF", "active", THEME.red, "Write off the unpaid amount: charged to GUILD (Member), shown as unpaid on the member in the Ledger.")
+                    end
+
+                    local x = 728
+                    for i = #specs, 1, -1 do
+                        local spec = specs[i]
+                        local b = row.btns[i]
+                        b:ClearAllPoints()
+                        b:SetPoint("RIGHT", row, "LEFT", x, 0)
+                        SetButtonAccent(b, spec.accent)
+                        b:SetText(spec.label)
+                        b.actionKey = spec.key
+                        b.tooltipText = spec.tip
+                        ApplyButtonState(b, spec.state)
+                        b:Show()
+                        x = x - 62
+                    end
+                    local textWidth = (#specs > 0) and (x - 14) or 710
 
                     row.info:SetWidth(textWidth)
                     row.meta:SetWidth(textWidth)
@@ -3222,6 +3314,8 @@ function UI:RefreshLedger()
         return row
     end
 
+    local unpaidByMain = VM.Ledger.GetUnpaidByMain and VM.Ledger:GetUnpaidByMain() or {}
+
     local function RenderGroup(grp)
         local isExpanded = (q ~= "") or (STATE.expandedMains[grp.mainName] == true)
         local header = AcquireRow()
@@ -3267,7 +3361,12 @@ function UI:RefreshLedger()
             header.donatedText:SetText("|cff808080Donated: " .. VM:FormatMoney(grp.totalInValue) .. "|r")
             header.receivedText:SetText("|cff808080Received: " .. VM:FormatMoney(grp.totalOutValue) .. "|r")
         else
-            header.nameText:SetText(string.format("%s  %s", VM:ColorizeName(grp.mainName), entryCountStr))
+            local unpaid = unpaidByMain[grp.mainName]
+            local unpaidTag = ""
+            if unpaid and (unpaid.outstanding + unpaid.writtenOff) > 0 then
+                unpaidTag = string.format("  |cffff5555Unpaid: %s|r", VM:FormatMoneyShort(unpaid.outstanding + unpaid.writtenOff))
+            end
+            header.nameText:SetText(string.format("%s  %s%s", VM:ColorizeName(grp.mainName), entryCountStr, unpaidTag))
             header.donatedText:SetText("Donated: " .. VM:FormatMoney(grp.totalInValue) .. goldSubNote)
             header.receivedText:SetText("Received: " .. VM:FormatMoney(grp.totalOutValue))
         end
@@ -3348,6 +3447,9 @@ function UI:RefreshLedger()
                         noteTag = " |cff26a6f2[TRANSFER]|r" .. noteTag
                     elseif tx.source == "PAYMENT" then
                         noteTag = " |cff44dd77[PAYMENT]|r" .. noteTag
+                    elseif tx.source == "DEBT_WRITEOFF" then
+                        noteTag = (tx.type == "IN") and (" |cffff5555[UNPAID — WRITTEN OFF]|r" .. noteTag)
+                            or (" |cffff5555[UNPAID DEBT WRITTEN OFF]|r" .. noteTag)
                     end
 
                     local ruleTag = ""
@@ -4881,6 +4983,8 @@ function UI:ShowMailFulfillmentPanel(orders)
                 local r = row.reqData
                 if r and VM.Fulfillment then
                     VM.Fulfillment:PopulateMail(r)
+                    VM.Fulfillment.fulfillStarted[r.id] = true
+                    UI:RefreshRequests()
                 end
             end)
 
@@ -5014,6 +5118,8 @@ function UI:ShowTradeFulfillmentPrompt(targetName, orders)
                 local r = row.reqData
                 if r and VM.Fulfillment then
                     VM.Fulfillment:PopulateTrade(r)
+                    VM.Fulfillment.fulfillStarted[r.id] = true
+                    UI:RefreshRequests()
                 end
             end)
             row.fillBtn:HookScript("OnEnter", function(selfBtn)

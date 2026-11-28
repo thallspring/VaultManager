@@ -55,6 +55,7 @@ local AUTO_LOG_SOURCES = {
 local PAYMENT_SOURCES = {
     PAYMENT = true,
     MANUAL_ASSIGN_PAYMENT = true,
+    DEBT_WRITEOFF = true,
 }
 
 function Scanner:IsBankOpen()

@@ -271,7 +271,7 @@ end
 
 -- Member payment received by an officer (Mail CoD / Trade / manual) credited to the payer at delivery.
 -- tx.officer is the holder of the gold; their later Guild Bank deposit is booked as TRANSFER.
-function Ledger:RecordPayment(payerName, copperAmount, holderName, method, note)
+function Ledger:RecordPayment(payerName, copperAmount, holderName, method, note, fulfillmentId)
     local amount = math.floor(tonumber(copperAmount) or 0)
     if amount <= 0 then return nil end
     local payer = VM:NormalizeName(payerName)
@@ -290,11 +290,12 @@ function Ledger:RecordPayment(payerName, copperAmount, holderName, method, note)
         count = 1,
         unitPriceAtTime = amount,
         chargedUnitPrice = 0,
-        note = note or methodLabel,
+        note = note or (fulfillmentId and "" or methodLabel),
         timestamp = now,
         updatedAt = now,
         officer = VM:NormalizeName(holderName or VM:GetPlayerName()),
         source = "PAYMENT",
+        fulfillmentId = fulfillmentId,
         isFFA = false,
         isManual = false,
         deleted = false
@@ -303,6 +304,109 @@ function Ledger:RecordPayment(payerName, copperAmount, holderName, method, note)
     VM.Comms:BroadcastTransaction(tx)
     if VM.UI then VM.UI:RefreshAll() end
     return tx
+end
+
+-- Payments + debt write-offs recorded against a request (used to compute what a member still owes)
+function Ledger:GetSettledForRequest(reqID)
+    if not reqID or not VM.db or not VM.db.ledger then return 0 end
+    local total = 0
+    for _, tx in pairs(VM.db.ledger) do
+        if tx and not tx.deleted and tx.fulfillmentId == reqID and tx.type == "IN"
+            and (tx.source == "PAYMENT" or tx.source == "DEBT_WRITEOFF") then
+            total = total + (tx.unitPriceAtTime or 0) * (tx.count or 1)
+        end
+    end
+    return total
+end
+
+-- Unpaid trade written off: the member is credited (debt cleared, visible as [UNPAID]) and the loss
+-- is booked on GUILD under the Member category, keeping the ledger zero-sum.
+function Ledger:RecordDebtWriteOff(req, copperAmount, officerName)
+    local amount = math.floor(tonumber(copperAmount) or 0)
+    if not req or amount <= 0 then return nil end
+    local now = time()
+    local member = VM:NormalizeName(req.requester)
+    local officer = VM:NormalizeName(officerName or VM:GetPlayerName())
+    local memberTx = {
+        id = GenerateTxID("GOLD_DEBT"),
+        type = "IN",
+        player = member,
+        rawSender = member,
+        attributedTo = member,
+        itemID = 0,
+        itemLink = "GOLD",
+        itemName = "Gold Deposit",
+        count = 1,
+        unitPriceAtTime = amount,
+        chargedUnitPrice = 0,
+        note = "",
+        timestamp = now,
+        updatedAt = now,
+        officer = officer,
+        source = "DEBT_WRITEOFF",
+        fulfillmentId = req.id,
+        isFFA = false,
+        isManual = false,
+        deleted = false
+    }
+    local guildTx = {
+        id = GenerateTxID("GOLD_DEBT_OUT"),
+        type = "OUT",
+        player = "GUILD",
+        rawSender = member,
+        attributedTo = "GUILD",
+        guildCategory = "MEMBER",
+        itemID = 0,
+        itemLink = "GOLD",
+        itemName = "Gold Withdrawal",
+        count = 1,
+        unitPriceAtTime = amount,
+        chargedUnitPrice = amount,
+        chargedTotalPrice = amount,
+        note = "",
+        timestamp = now,
+        updatedAt = now,
+        officer = officer,
+        source = "DEBT_WRITEOFF",
+        fulfillmentId = req.id,
+        isFFA = false,
+        isManual = false,
+        deleted = false
+    }
+    VM.db.ledger[memberTx.id] = memberTx
+    VM.db.ledger[guildTx.id] = guildTx
+    VM.Comms:BroadcastTransaction(memberTx)
+    VM.Comms:BroadcastTransaction(guildTx)
+    return memberTx, guildTx
+end
+
+-- Unpaid amounts per main: written-off debt (from the ledger) plus outstanding debt on delivered requests
+function Ledger:GetUnpaidByMain()
+    local result = {}
+    local function Add(name, amt)
+        local n = VM:NormalizeName(name)
+        if n == "" or amt <= 0 then return end
+        local main = VM:GetMainFor(n)
+        result[main] = result[main] or { writtenOff = 0, outstanding = 0 }
+        return result[main]
+    end
+    for _, tx in pairs(VM.db.ledger or {}) do
+        if tx and not tx.deleted and tx.source == "DEBT_WRITEOFF" and tx.type == "IN" then
+            local amt = (tx.unitPriceAtTime or 0) * (tx.count or 1)
+            local e = Add(tx.player, amt)
+            if e then e.writtenOff = e.writtenOff + amt end
+        end
+    end
+    if VM.Fulfillment and VM.Fulfillment.GetOwedAmount then
+        for _, req in pairs(VM.db.requests or {}) do
+            local owed = VM.Fulfillment:GetOwedAmount(req)
+            if owed > 0 then
+                local e = Add(req.requester, owed)
+                if e then e.outstanding = e.outstanding + owed end
+            end
+        end
+    end
+    return result
 end
 
 -- Gold of member payments an officer still holds (payments received minus transfers deposited)
@@ -1105,6 +1209,7 @@ function Ledger:CleanupDuplicates()
         MANUAL_ASSIGN = true,
         MANUAL_ASSIGN_PAYMENT = true,
         PAYMENT = true,
+        DEBT_WRITEOFF = true,
         REQUEST = true,
         GOLD_REQUEST = true,
         RETURN = true,

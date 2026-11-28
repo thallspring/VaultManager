@@ -46,6 +46,7 @@ local PROTECTED_TX_SOURCES = {
     TAB_PURCHASE = true,
     GUILD_EXPENSE = true,
     PAYMENT = true,
+    DEBT_WRITEOFF = true,
 }
 
 local function EscapeStr(s)
@@ -738,7 +739,15 @@ function Comms:OnMessageReceived(msg, sender)
         end
 
         local existing = VM.db.requests[req.id]
-        if not fromOfficer and (existing or req.status ~= "PENDING") then return end
+        if not fromOfficer then
+            -- Members may create their own PENDING requests and cancel their own PENDING/APPROVED ones
+            local isOwn = VM:IsSameCharacter(req.requester, sender)
+            local isNewOwn = (not existing) and req.status == "PENDING" and isOwn
+            local isOwnCancel = existing and isOwn and VM:IsSameCharacter(existing.requester, sender)
+                and (existing.status == "PENDING" or existing.status == "APPROVED")
+                and req.status == "REJECTED" and req.completedMethod == "CANCELLED"
+            if not isNewOwn and not isOwnCancel then return end
+        end
         if not existing or req.updatedAt > (existing.updatedAt or 0) then
             VM.db.requests[req.id] = req
             if VM:IsOfficer() and req.status == "PENDING" and not existing then
@@ -910,7 +919,7 @@ function Comms:OnMessageReceived(msg, sender)
             guildCategory = (VM.Ledger and VM.Ledger.NormalizeGuildCategory) and VM.Ledger:NormalizeGuildCategory(rawCat) or rawCat
         end
 
-        if (source == "GOLD_REQUEST" or source == "WRITE_OFF" or source == "GUILD_EXPENSE" or source == "PAYMENT") and not fromOfficer then return end
+        if (source == "GOLD_REQUEST" or source == "WRITE_OFF" or source == "GUILD_EXPENSE" or source == "PAYMENT" or source == "DEBT_WRITEOFF") and not fromOfficer then return end
         -- Only officers may delete or void ledger entries
         if (deleted or voided) and not fromOfficer then return end
         if not fromOfficer and not isGold and (source ~= "BANK_LOG" and source ~= "BANK_MONEY_LOG" and source ~= "TAB_PURCHASE" and source ~= "FFA_SCAN" and source ~= "GOLD_IN" and source ~= "GOLD_OUT" and source ~= "MANUAL_GOLD" and itemLink ~= "GOLD") then
@@ -1228,6 +1237,14 @@ function Comms:BroadcastTransaction(tx)
     if #payload > maxLen and numItemID > 0 and linkStr ~= "" and linkStr ~= "GOLD" then
         linkStr = ""
         payload = BuildTxPayload()
+    end
+    -- Payments/debt write-offs need their request link (debt tracking): shorten the note first
+    local keepFulfill = (tx.source == "PAYMENT" or tx.source == "DEBT_WRITEOFF")
+    if keepFulfill then
+        while #payload > maxLen and #noteStr > 0 do
+            noteStr = noteStr:sub(1, math.max(0, #noteStr - 4))
+            payload = BuildTxPayload()
+        end
     end
     if #payload > maxLen and fulfillStr ~= "" then
         fulfillStr = ""

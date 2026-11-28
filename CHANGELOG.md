@@ -7,9 +7,15 @@ All notable changes to **Vault Manager** will be documented in this file.
 ## [1.5.0] - Unreleased
 
 ### Added
+- **Officer Request Workflow:** Approved requests show the buttons *Withdraw*, *Fulfill*, *Complete*, *Return* and *Cancel*. Only the next step can be clicked; finished steps turn green and dim. *Withdraw* takes the items from the right bank tab automatically, *Fulfill* fills the open Mail or Trade window, *Complete* happens automatically when the mail is sent or the trade finishes, and *Return* puts the items or gold back in the Guild Bank and sets the request back to *Approved*.
+- **Cancel Your Own Requests:** Members can cancel their own pending or approved requests (and no one else's).
+- **Request Feedback:** The *Request* button changes to *Requested* right away and shows how many you have requested. A second request for the same item is blocked until the first one is cancelled.
+- **Request Size Limit:** One request can hold at most 6 stacks, the most a trade window can hold (for example 6 for gear or 120 for items that stack to 20).
+- **Unpaid Trades:** If a member pays less than the price in the trade, the request moves to a new *Unpaid* section and shows the amount still owed. Officers can mark it *Paid* or *Write Off* the debt. Written-off amounts are charged to the guild account (*Member*) and stay visible as unpaid on that member in the *Ledger*.
+- **Bank Tab on Requests:** Every item request shows which Guild Bank tab the item is in.
 - **Prepared Requests with Officer Ownership:** Officers can now *Prepare* an approved request, which withdraws the exact items (splitting stacks into free bag slots when needed) or gold from the open Guild Bank and assigns the delivery to that officer. Officers are never asked to deliver another officer's prepared orders.
 - **Verified Guild Bank Withdrawals:** *Prepare* only marks a request as prepared (or fulfilled, for your own request) after the items have actually arrived in your bags or the gold in your purse. Failed withdrawals leave the request approved and explain why (daily withdrawal limit, missing permission, missing stock, no free bag slots).
-- **Release & Write Off:** Prepared orders can be released back to *Approved*, and orders held by an officer who has left the guild can be written off and charged to that officer.
+- **Write Off for Departed Officers:** Orders held by an officer who has left the guild can be written off and charged to that officer, or released back to *Approved*.
 - **Mail Side Panel:** Opening a mailbox shows your prepared orders with a *Fill Mail* button that fills in recipient, subject, items and Cash on Delivery or gold. It refuses to fill if Send Mail already holds attachments or gold. Sending the mail completes the request automatically.
 - **Trade Prompt:** Trading a member with a prepared order offers *Fill Trade*, which places the items or gold in the trade window and whispers the amount due in plain text. Only one gold request can be filled per trade. Completing the trade completes the request automatically.
 - **Relog Reminder:** After logging in, officers are reminded about prepared orders that are still waiting for delivery.
